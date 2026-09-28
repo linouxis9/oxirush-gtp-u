@@ -100,7 +100,8 @@ fn main() -> Result<(), oxirush_gtp_u::Error> {
 `Endpoint::bind` opens the socket and returns a receiver for the tunnels'
 messages. `install` adds the tunnel of a RAN UE and PDU session to a remote
 F-TEID and returns the local TEID to give the peer; `send` sends a G-PDU on
-it. The [`Endpoint` documentation](https://docs.rs/oxirush-gtp-u/latest/oxirush_gtp_u/struct.Endpoint.html)
+it. `install_s1u` adds an eNB's S1-U tunnel instead, whose G-PDUs carry no
+PDU Session Container. The [`Endpoint` documentation](https://docs.rs/oxirush-gtp-u/latest/oxirush_gtp_u/struct.Endpoint.html)
 has a complete example with two endpoints.
 
 Bind port 2152 to receive the peer's Error Indications, which TS 29.281

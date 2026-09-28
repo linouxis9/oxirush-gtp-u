@@ -18,7 +18,8 @@ First release.
   sends Error Indication and Supported Extension Headers Notification to
   port 2152, and delivers G-PDUs, End Markers and the peer's Error
   Indications with their source address; the TEID alone identifies a
-  tunnel.
+  tunnel. `install_s1u` gives an eNB's S1-U tunnels, without a PDU Session
+  Container.
 - `upf_sim::UpfSimulator` and the `oxirush-upf-sim` binary: a test UPF with
   an IPv4 UDP and ICMP echo service, End Marker on a path switch, and an
   optional TUN per session.

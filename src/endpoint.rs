@@ -1,4 +1,4 @@
-//! The N3 endpoint of a gNB.
+//! The N3 endpoint of a gNB, or the S1-U endpoint of an eNB.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -48,7 +48,8 @@ pub struct ReceivedPacket {
 }
 
 /// One UDP socket carrying a gNB's N3 tunnels, each identified by a RAN UE
-/// identifier (such as the RAN UE NGAP ID) and a PDU session ID.
+/// identifier (such as the RAN UE NGAP ID) and a PDU session ID, or an
+/// eNB's S1-U tunnels, identified by the eNB UE S1AP ID and E-RAB ID.
 ///
 /// A task answers Echo Requests, sends an Error Indication for a G-PDU on
 /// an unknown TEID and a Supported Extension Headers Notification for an
@@ -102,7 +103,8 @@ impl Drop for Shared {
 struct Route {
     local_teid: u32,
     remote: RemoteTunnel,
-    qfi: u8,
+    /// The uplink QoS flow of an N3 tunnel; S1-U tunnels have none.
+    qfi: Option<u8>,
 }
 
 #[derive(Default)]
@@ -183,6 +185,24 @@ impl Endpoint {
     /// If `qfi` is above 63.
     pub fn install(&self, ran_id: u32, session_id: u8, remote: RemoteTunnel, qfi: u8) -> u32 {
         assert!(qfi <= 63, "QFI {qfi} is outside 0..=63");
+        self.install_route(ran_id, session_id, remote, Some(qfi))
+    }
+
+    /// Set up the S1-U tunnel of eNB UE `ran_id` and E-RAB `erab_id`
+    /// toward `remote`, and return its local TEID. Its uplink G-PDUs carry
+    /// no PDU Session Container. For an existing tunnel this updates the
+    /// remote end and keeps the TEID.
+    pub fn install_s1u(&self, ran_id: u32, erab_id: u8, remote: RemoteTunnel) -> u32 {
+        self.install_route(ran_id, erab_id, remote, None)
+    }
+
+    fn install_route(
+        &self,
+        ran_id: u32,
+        session_id: u8,
+        remote: RemoteTunnel,
+        qfi: Option<u8>,
+    ) -> u32 {
         let mut routes = lock(&self.shared.routes);
         if let Some(route) = routes.by_session.get_mut(&(ran_id, session_id)) {
             route.remote = remote;
@@ -238,10 +258,14 @@ impl Endpoint {
             .ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::NotFound,
-                    format!("no N3 tunnel for RAN UE {ran_id} PDU session {session_id}"),
+                    format!("no tunnel for RAN UE {ran_id} session {session_id}"),
                 )
             })?;
-        let bytes = Packet::uplink(route.remote.teid, route.qfi, payload)
+        let packet = match route.qfi {
+            Some(qfi) => Packet::uplink(route.remote.teid, qfi, payload),
+            None => Packet::g_pdu(route.remote.teid, payload),
+        };
+        let bytes = packet
             .encode()
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
         let to = path::destination(self.shared.ipv6, route.remote.address);

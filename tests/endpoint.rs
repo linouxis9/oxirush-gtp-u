@@ -273,6 +273,26 @@ async fn delivers_end_markers() {
 }
 
 #[tokio::test]
+async fn s1u_tunnels_send_plain_g_pdus() {
+    let (endpoint, mut received, peer, _) = setup().await;
+    let remote = RemoteTunnel {
+        address: peer.local_addr().unwrap(),
+        teid: 60,
+    };
+    let local_teid = endpoint.install_s1u(9, 5, remote);
+    assert_eq!(endpoint.local_teid(9, 5), Some(local_teid));
+    endpoint.send(9, 5, vec![0x45]).await.unwrap();
+    let uplink = reply(&peer).await;
+    assert_eq!((uplink.teid, uplink.payload.as_slice()), (60, &[0x45][..]));
+    assert!(uplink.extension_headers.is_empty());
+    // Downlink G-PDUs reach the E-RAB's tunnel.
+    send(&peer, &endpoint, &Packet::g_pdu(local_teid, vec![0x46])).await;
+    let packet = timeout(WAIT, received.recv()).await.unwrap().unwrap();
+    assert_eq!((packet.ran_id, packet.session_id), (9, 5));
+    assert_eq!(packet.packet.payload, vec![0x46]);
+}
+
+#[tokio::test]
 async fn install_and_remove_tunnels() {
     let (endpoint, _received, _peer, local_teid) = setup().await;
     let other = UdpSocket::bind("127.0.0.1:0").await.unwrap();
