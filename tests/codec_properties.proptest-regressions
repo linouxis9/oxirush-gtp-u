@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 883d794bee841e6538a428138a67945b4d20fe7ed70885cf61b269c63e3b02dc # shrinks to packet = Packet { message_type: 0, teid: 0, sequence: None, n_pdu_number: None, extension_headers: [PduSessionContainer(Other([32, 0, 0]))], payload: [] }

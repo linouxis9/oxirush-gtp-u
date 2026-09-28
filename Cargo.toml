@@ -1,0 +1,66 @@
+[package]
+name = "oxirush-gtp-u"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "GTPv1-U codec (TS 29.281, TS 38.415), async N3 endpoint, test UPF and Linux TUN routing"
+license = "Apache-2.0"
+repository = "https://github.com/linouxis9/oxirush-gtp-u"
+documentation = "https://docs.rs/oxirush-gtp-u"
+keywords = ["5g", "gtp-u", "upf", "3gpp", "telecom"]
+categories = ["network-programming", "parser-implementations", "development-tools::testing"]
+readme = "README.md"
+exclude = ["/.github", "/fuzz"]
+
+[features]
+default = ["endpoint"]
+# The Tokio N3 endpoint and the test UPF.
+endpoint = ["dep:tokio", "dep:tracing"]
+# Linux TUN devices and their routing, set up over rtnetlink.
+tun = [
+    "endpoint",
+    "dep:libc",
+    "dep:netlink-packet-core",
+    "dep:netlink-packet-route",
+    "dep:netlink-sys",
+]
+# Serialize and Deserialize for RemoteTunnel (with endpoint).
+serde = ["dep:serde"]
+
+[dependencies]
+serde = { version = "1.0.110", features = ["derive"], optional = true }
+tokio = { version = "1.38", features = ["net", "rt", "sync"], optional = true }
+tracing = { version = "0.1.40", optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { version = "0.2.164", optional = true }
+netlink-packet-core = { version = "0.9", optional = true }
+netlink-packet-route = { version = "0.33", optional = true }
+netlink-sys = { version = "0.9", optional = true }
+
+[dev-dependencies]
+proptest = "1.5"
+tokio = { version = "1.38", features = ["macros", "net", "process", "rt", "sync", "time"] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+libc = "0.2.164"
+
+[[bin]]
+name = "oxirush-upf-sim"
+required-features = ["endpoint"]
+
+[[test]]
+name = "endpoint"
+required-features = ["endpoint"]
+
+[[test]]
+name = "upf_sim"
+required-features = ["endpoint"]
+
+[[test]]
+name = "tun_linux"
+required-features = ["tun"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

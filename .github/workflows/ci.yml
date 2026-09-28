@@ -1,0 +1,141 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked --all-features
+      - run: cargo test --locked --no-default-features
+
+  msrv:
+    name: MSRV (1.85)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked --all-features
+
+  minimal-versions:
+    name: Minimal dependency versions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - run: cargo update -Z direct-minimal-versions
+      - run: cargo test --all-features
+
+  tun:
+    name: TUN routing (root, network namespaces)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Azure kernels ship the vrf module in linux-modules-extra.
+      - name: Load the vrf module
+        id: vrf
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y "linux-modules-extra-$(uname -r)" || true
+          if sudo modprobe vrf; then
+            echo "skip=" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::no vrf kernel module: the VRF test is skipped"
+            echo "skip=--skip ue_vrf" >> "$GITHUB_OUTPUT"
+          fi
+      - run: cargo test --locked --features tun --test tun_linux -- --ignored ${{ steps.vrf.outputs.skip }}
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: sudo
+
+  wireshark:
+    name: Wire format against Wireshark
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install tshark
+        run: |
+          sudo add-apt-repository -y ppa:wireshark-dev/stable
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y tshark
+      - run: cargo test --locked --test wireshark -- --ignored
+
+  fuzz:
+    name: Fuzz the decoders (1 minute)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - run: cargo install cargo-fuzz --locked
+      - run: cargo fuzz run decode -- -max_total_time=60 -max_len=512
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - run: cargo clippy --locked --all-targets --no-default-features -- -D warnings
+
+  doc:
+    name: Doc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --locked --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: "--cfg docsrs -D warnings"
+
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --check
+      - run: cargo fmt --check --manifest-path fuzz/Cargo.toml
+
+  audit:
+    name: Security audit
+    runs-on: ubuntu-latest
+    # The action reports through a check run.
+    permissions:
+      contents: read
+      checks: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
