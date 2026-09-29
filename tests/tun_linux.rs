@@ -62,6 +62,85 @@ fn rules() -> String {
     String::from_utf8(output.stdout).unwrap()
 }
 
+#[tokio::test]
+#[ignore = "needs root"]
+async fn removing_a_session_during_tun_creation_does_not_leave_an_orphan() {
+    session_creation_race(false).await;
+}
+
+#[tokio::test]
+#[ignore = "needs root"]
+async fn replacing_a_session_during_tun_creation_does_not_attach_the_old_tun() {
+    session_creation_race(true).await;
+}
+
+#[tokio::test]
+#[ignore = "needs root"]
+async fn replacing_an_attached_session_closes_its_old_tun() {
+    isolate();
+    let (upf, _) = UpfSimulator::bind("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    let peer = "127.0.0.1:2152".parse().unwrap();
+    upf.set_session(Session::new(1, 2, peer, 9));
+    upf.attach_tun(
+        1,
+        TunConfig::new(
+            "oxreplace",
+            Routing::Upf {
+                ue_address: Ipv4Addr::new(198, 19, 0, 10),
+            },
+        ),
+    )
+    .unwrap();
+    assert!(exists("oxreplace"));
+    // A handover retains the session's N6 attachment.
+    upf.switch_downlink(1, peer, 3).await.unwrap();
+    assert!(exists("oxreplace"));
+    // Reprovisioning the TEID must not carry the old UE's N6 into it.
+    upf.set_session(Session::new(1, 4, peer, 9));
+    assert!(
+        !exists("oxreplace"),
+        "replacement session inherited the old TUN"
+    );
+}
+
+async fn session_creation_race(replace: bool) {
+    isolate();
+    let (upf, _) = UpfSimulator::bind("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    upf.set_session(Session::new(1, 2, "127.0.0.1:2152".parse().unwrap(), 9));
+    let other = upf.clone();
+    let remover = std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !exists("oxrace") {
+            assert!(std::time::Instant::now() < deadline, "TUN was not created");
+            std::thread::yield_now();
+        }
+        other.remove_session(1);
+        if replace {
+            // Even identical parameters represent a new provisioning.
+            other.set_session(Session::new(1, 2, "127.0.0.1:2152".parse().unwrap(), 9));
+        }
+    });
+    // For a deterministic reproducer, strace can delay the return from
+    // TUNSETIFF: -e inject=ioctl:delay_exit=500ms:when=4 in this test. The remover sees
+    // the new device while attach_tun is still configuring it.
+    let result = upf.attach_tun(
+        1,
+        TunConfig::new(
+            "oxrace",
+            Routing::Upf {
+                ue_address: Ipv4Addr::new(198, 19, 0, 10),
+            },
+        ),
+    );
+    remover.join().unwrap();
+    assert!(!exists("oxrace"), "a removed session retained its TUN");
+    assert!(result.is_ok() || result.unwrap_err().kind() == io::ErrorKind::NotFound);
+}
+
 /// Reply to the ICMP Echo Request that `ping` sends through `port`, the
 /// first packet to come through it (the TUN sends no IPv6).
 async fn answer_ping(port: &TunPort, source: Ipv4Addr, destination: Ipv4Addr) {

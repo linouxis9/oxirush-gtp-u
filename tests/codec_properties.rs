@@ -17,16 +17,22 @@ fn downlink() -> impl Strategy<Value = PduSessionContainer> {
         of(any::<u64>()),
         of(0u32..1 << 24),
         of(any::<u32>()),
+        (of(0u32..1 << 24), of(any::<u16>())),
     )
-        .prop_map(|(qfi, rqi, ppi, time_stamp, sequence, mbs_sequence)| {
-            let mut information = DownlinkPduSessionInformation::new(qfi);
-            information.rqi = rqi;
-            information.ppi = ppi;
-            information.dl_sending_time_stamp = time_stamp;
-            information.dl_qfi_sequence_number = sequence;
-            information.dl_mbs_qfi_sequence_number = mbs_sequence;
-            PduSessionContainer::Downlink(information)
-        })
+        .prop_map(
+            |(qfi, rqi, ppi, time_stamp, sequence, mbs_sequence, burst)| {
+                let mut information = DownlinkPduSessionInformation::new(qfi);
+                information.rqi = rqi;
+                information.ppi = ppi;
+                information.dl_sending_time_stamp = time_stamp;
+                information.dl_qfi_sequence_number = sequence;
+                information.dl_mbs_qfi_sequence_number = mbs_sequence;
+                if ppi.is_some() {
+                    (information.burst_size, information.time_to_next_burst) = burst;
+                }
+                PduSessionContainer::Downlink(information)
+            },
+        )
 }
 
 /// With `valid`, values the encoder accepts: raw content padded. Without,
@@ -140,6 +146,37 @@ fn information_element() -> impl Strategy<Value = InformationElement> {
     prop_oneof![
         any::<u8>().prop_map(InformationElement::Recovery),
         any::<u32>().prop_map(InformationElement::TeidDataI),
+        proptest::sample::select(vec![
+            (1, 1),
+            (2, 8),
+            (3, 6),
+            (4, 4),
+            (5, 4),
+            (8, 1),
+            (9, 28),
+            (11, 1),
+            (12, 3),
+            (13, 1),
+            (15, 1),
+            (17, 4),
+            (18, 5),
+            (19, 1),
+            (20, 1),
+            (21, 1),
+            (22, 9),
+            (23, 1),
+            (24, 1),
+            (25, 2),
+            (26, 2),
+            (27, 2),
+            (28, 2),
+            (29, 1),
+            (127, 4),
+        ])
+        .prop_flat_map(|(kind, length)| {
+            vec(any::<u8>(), length)
+                .prop_map(move |value| InformationElement::OtherTv { kind, value })
+        }),
         any::<IpAddr>().prop_map(InformationElement::GtpUPeerAddress),
         vec(any::<u8>(), 0..8).prop_map(InformationElement::ExtensionHeaderTypeList),
         (any::<u16>(), vec(any::<u8>(), 0..8)).prop_map(|(identifier, value)| {

@@ -185,6 +185,11 @@ pub struct DownlinkPduSessionInformation {
     pub dl_qfi_sequence_number: Option<u32>,
     /// DL MBS QFI Sequence Number (present when MSNP is set).
     pub dl_mbs_qfi_sequence_number: Option<u32>,
+    /// Burst Size, 24 bits (present when BSSI is set in the PPI octet).
+    pub burst_size: Option<u32>,
+    /// Time To Next Burst, in tenths of a millisecond (present when TTNBI
+    /// is set in the PPI octet).
+    pub time_to_next_burst: Option<u16>,
 }
 
 impl DownlinkPduSessionInformation {
@@ -200,22 +205,26 @@ impl DownlinkPduSessionInformation {
         let mut reader = Reader(content);
         let flags = reader.u8()?;
         let octet = reader.u8()?;
-        let ppi = if octet & 0x80 != 0 {
-            Some(reader.u8()? >> 5)
+        let ppi_octet = if octet & 0x80 != 0 {
+            Some(reader.u8()?)
         } else {
             None
         };
         let dl_sending_time_stamp = reader.u64_if(flags & 0x08 != 0)?;
         let dl_qfi_sequence_number = reader.u24_if(flags & 0x04 != 0)?;
         let dl_mbs_qfi_sequence_number = reader.u32_if(flags & 0x02 != 0)?;
+        let burst_size = reader.u24_if(ppi_octet.is_some_and(|ppi| ppi & 0x02 != 0))?;
+        let time_to_next_burst = reader.u16_if(ppi_octet.is_some_and(|ppi| ppi & 0x01 != 0))?;
         // What follows the present fields is padding.
         Ok(Self {
             qfi: octet & 0x3f,
             rqi: octet & 0x40 != 0,
-            ppi,
+            ppi: ppi_octet.map(|ppi| ppi >> 5),
             dl_sending_time_stamp,
             dl_qfi_sequence_number,
             dl_mbs_qfi_sequence_number,
+            burst_size,
+            time_to_next_burst,
         })
     }
 
@@ -225,6 +234,10 @@ impl DownlinkPduSessionInformation {
             return Err(Error::OutOfRange("PPI"));
         }
         check_u24(self.dl_qfi_sequence_number, "DL QFI Sequence Number")?;
+        check_u24(self.burst_size, "Burst Size")?;
+        if self.ppi.is_none() && (self.burst_size.is_some() || self.time_to_next_burst.is_some()) {
+            return Err(Error::OutOfRange("burst information without PPI"));
+        }
         out.push(
             flag(self.dl_sending_time_stamp.is_some(), 0x08)
                 | flag(self.dl_qfi_sequence_number.is_some(), 0x04)
@@ -232,7 +245,11 @@ impl DownlinkPduSessionInformation {
         );
         out.push(flag(self.ppi.is_some(), 0x80) | flag(self.rqi, 0x40) | self.qfi);
         if let Some(ppi) = self.ppi {
-            out.push(ppi << 5);
+            out.push(
+                ppi << 5
+                    | flag(self.burst_size.is_some(), 0x02)
+                    | flag(self.time_to_next_burst.is_some(), 0x01),
+            );
         }
         if let Some(time_stamp) = self.dl_sending_time_stamp {
             out.extend_from_slice(&time_stamp.to_be_bytes());
@@ -242,6 +259,12 @@ impl DownlinkPduSessionInformation {
         }
         if let Some(sequence) = self.dl_mbs_qfi_sequence_number {
             out.extend_from_slice(&sequence.to_be_bytes());
+        }
+        if let Some(size) = self.burst_size {
+            out.extend_from_slice(&size.to_be_bytes()[1..]);
+        }
+        if let Some(time) = self.time_to_next_burst {
+            out.extend_from_slice(&time.to_be_bytes());
         }
         Ok(())
     }

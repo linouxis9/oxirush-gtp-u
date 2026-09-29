@@ -27,6 +27,15 @@ pub enum InformationElement {
         /// Extension Value.
         value: Vec<u8>,
     },
+    /// A TV information element defined by TS 29.060 table 37, but not
+    /// expected in GTP-U signalling. Its known fixed length allows the
+    /// receiver to skip it (TS 29.060 section 11.1.11).
+    OtherTv {
+        /// Type, excluding Recovery and TEID Data I.
+        kind: u8,
+        /// The fixed-length value, kept as received.
+        value: Vec<u8>,
+    },
     /// Any other TLV information element, kept as received: a type of 128
     /// or more, and not one with a variant above (133, 141 or 255). A later
     /// version may decode more types into variants of their own, which the
@@ -64,6 +73,7 @@ impl InformationElement {
             InformationElement::GtpUPeerAddress(_) => Self::GTP_U_PEER_ADDRESS,
             InformationElement::ExtensionHeaderTypeList(_) => Self::EXTENSION_HEADER_TYPE_LIST,
             InformationElement::PrivateExtension { .. } => Self::PRIVATE_EXTENSION,
+            InformationElement::OtherTv { kind, .. } => *kind,
             InformationElement::Other { kind, .. } => *kind,
         }
     }
@@ -109,7 +119,19 @@ impl InformationElement {
                         .ok_or(Error::Truncated("information element"))?;
                     (Self::decode_tlv(kind, value)?, rest)
                 }
-                _ => return Err(Error::UnknownInformationElement(kind)),
+                _ => {
+                    let length = tv_length(kind).ok_or(Error::UnknownInformationElement(kind))?;
+                    let (value, rest) = rest
+                        .split_at_checked(length)
+                        .ok_or(Error::Truncated("TV information element"))?;
+                    (
+                        InformationElement::OtherTv {
+                            kind,
+                            value: value.to_vec(),
+                        },
+                        rest,
+                    )
+                }
             };
             elements.push(element);
             bytes = rest;
@@ -174,6 +196,15 @@ impl InformationElement {
             InformationElement::PrivateExtension { identifier, value } => {
                 push_tlv(out, &[&identifier.to_be_bytes(), value])?;
             }
+            InformationElement::OtherTv { kind, value } => {
+                let length = tv_length(*kind)
+                    .filter(|_| !matches!(*kind, Self::RECOVERY | Self::TEID_DATA_I))
+                    .ok_or(Error::OutOfRange("TV information element type"))?;
+                if value.len() != length {
+                    return Err(Error::InvalidLength("TV information element"));
+                }
+                out.extend_from_slice(value);
+            }
             InformationElement::Other { kind, value } => {
                 if *kind < 128
                     || matches!(
@@ -192,6 +223,22 @@ impl InformationElement {
     }
 }
 
+/// Fixed value lengths of every TV IE in TS 29.060 V19.0.0 table 37.
+fn tv_length(kind: u8) -> Option<usize> {
+    match kind {
+        1 | 8 | 11 | 13..=15 | 19..=21 | 23 | 24 | 29 => Some(1),
+        2 => Some(8),
+        3 => Some(6),
+        4 | 5 | 16 | 17 | 127 => Some(4),
+        9 => Some(28),
+        12 => Some(3),
+        18 => Some(5),
+        22 => Some(9),
+        25..=28 => Some(2),
+        _ => None,
+    }
+}
+
 /// Append the two-octet length and the value made of `parts`.
 fn push_tlv(out: &mut Vec<u8>, parts: &[&[u8]]) -> Result<(), Error> {
     let length = parts.iter().map(|part| part.len()).sum::<usize>();
@@ -202,4 +249,82 @@ fn push_tlv(out: &mut Vec<u8>, parts: &[&[u8]]) -> Result<(), Error> {
         out.extend_from_slice(part);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_known_tv_ie_has_its_specified_length() {
+        // TS 29.060 V19.0.0 table 37, excluding the separately typed
+        // Recovery (14) and TEID Data I (16).
+        let types = [
+            (1, 1),
+            (2, 8),
+            (3, 6),
+            (4, 4),
+            (5, 4),
+            (8, 1),
+            (9, 28),
+            (11, 1),
+            (12, 3),
+            (13, 1),
+            (15, 1),
+            (17, 4),
+            (18, 5),
+            (19, 1),
+            (20, 1),
+            (21, 1),
+            (22, 9),
+            (23, 1),
+            (24, 1),
+            (25, 2),
+            (26, 2),
+            (27, 2),
+            (28, 2),
+            (29, 1),
+            (127, 4),
+        ];
+        for (kind, length) in types {
+            let element = InformationElement::OtherTv {
+                kind,
+                value: vec![0xaa; length],
+            };
+            let mut wire = vec![kind];
+            wire.extend_from_slice(&vec![0xaa; length]);
+            assert_eq!(
+                InformationElement::encode_all(std::slice::from_ref(&element)).unwrap(),
+                wire
+            );
+            assert_eq!(
+                InformationElement::decode_all(&wire).unwrap(),
+                vec![element]
+            );
+            for cut in 1..wire.len() {
+                assert_eq!(
+                    InformationElement::decode_all(&wire[..cut]),
+                    Err(Error::Truncated("TV information element"))
+                );
+            }
+            for length in [length - 1, length + 1] {
+                assert_eq!(
+                    InformationElement::encode_all(&[InformationElement::OtherTv {
+                        kind,
+                        value: vec![0xaa; length]
+                    }]),
+                    Err(Error::InvalidLength("TV information element")),
+                );
+            }
+        }
+        for kind in [0, 6, 7, 10, 30, 116, 117, 126, 128, 255, 14, 16] {
+            assert_eq!(
+                InformationElement::encode_all(&[InformationElement::OtherTv {
+                    kind,
+                    value: vec![]
+                }]),
+                Err(Error::OutOfRange("TV information element type")),
+            );
+        }
+    }
 }

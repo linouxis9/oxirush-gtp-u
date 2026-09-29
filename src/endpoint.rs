@@ -143,14 +143,16 @@ impl Endpoint {
     /// Indications: TS 29.281 §4.4.2.4 sends them there, whatever port the
     /// G-PDUs came from. Several endpoints thus need an address each.
     ///
-    /// On `[::]` the socket also serves IPv4 peers where IPv6 sockets are
-    /// dual-stack, as on Linux, but not on Windows.
-    ///
-    /// Bind a specific address rather than a wildcard one: TS 29.281 §4.4.3
-    /// has replies leave from the address the request reached, but from a
-    /// wildcard socket they leave from the address the kernel picks, which
-    /// an Error Indication also names.
+    /// The address must be specific, so replies leave from the address
+    /// the request reached (TS 29.281 §4.4.3). Wildcard addresses return
+    /// [`InvalidInput`](io::ErrorKind::InvalidInput).
     pub async fn bind(address: SocketAddr) -> io::Result<(Self, mpsc::Receiver<ReceivedPacket>)> {
+        if address.ip().to_canonical().is_unspecified() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "GTP-U requires a specific bind address",
+            ));
+        }
         let socket = Arc::new(UdpSocket::bind(address).await?);
         let ipv6 = socket.local_addr()?.is_ipv6();
         let routes = Arc::new(Mutex::new(Routes::default()));
@@ -302,6 +304,7 @@ async fn receive(
             Ok(packet) => packet,
             Err(error) => {
                 debug!("N3 dropped a malformed message from {from}: {error}");
+                path::answer_length_error(&socket, &buffer[..size], from).await;
                 continue;
             }
         };

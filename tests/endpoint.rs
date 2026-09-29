@@ -116,6 +116,114 @@ async fn answers_echo_requests() {
 }
 
 #[tokio::test]
+async fn rejects_wildcard_bind_addresses() {
+    for address in ["0.0.0.0:0", "[::]:0", "[::ffff:0.0.0.0]:0"] {
+        let error = Endpoint::bind(address.parse().unwrap()).await.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
+}
+
+#[tokio::test]
+async fn answers_out_of_sequence_echo_request_with_error_cause() {
+    let (endpoint, _, peer, _) = setup().await;
+    let mut request = Packet::echo_request(77);
+    request.payload = InformationElement::encode_all(&[
+        InformationElement::PrivateExtension {
+            identifier: 1,
+            value: vec![],
+        },
+        InformationElement::Recovery(0),
+    ])
+    .unwrap();
+    send(&peer, &endpoint, &request).await;
+    let response = reply(&peer).await;
+    assert_eq!(
+        (response.message_type, response.sequence),
+        (ECHO_RESPONSE, Some(77))
+    );
+    assert_eq!(
+        response.information_elements().unwrap(),
+        vec![
+            InformationElement::OtherTv {
+                kind: 1,
+                value: vec![193]
+            },
+            InformationElement::Recovery(0),
+        ]
+    );
+    let wire = response.encode().unwrap();
+    assert_eq!(Packet::decode(&wire).unwrap().encode().unwrap(), wire);
+}
+
+#[tokio::test]
+async fn answers_echo_request_length_errors_with_error_cause() {
+    let (endpoint, _, peer, _) = setup().await;
+    // All E/S/PN combinations and both values of the ignored spare bit.
+    for flags in 0u8..16 {
+        let mut request = Packet::echo_request(77);
+        request.payload = vec![255, 0, 2, 0, 1]; // Private Extension.
+        let mut wire = request.encode().unwrap();
+        wire[0] = 0x30 | flags;
+        if flags & 7 == 0 {
+            wire.drain(8..12);
+        }
+        let actual_length = (wire.len() - 8) as u16;
+        for length in [actual_length - 1, actual_length + 1] {
+            wire[2..4].copy_from_slice(&length.to_be_bytes());
+            peer.send_to(&wire, endpoint.local_addr().unwrap())
+                .await
+                .unwrap();
+            // TS 29.060 section 11.1.2, imported by TS 29.281 section 9.1.
+            let response = reply(&peer).await;
+            assert_eq!(response.sequence, Some(if flags & 2 != 0 { 77 } else { 0 }));
+            assert_eq!(
+                response.information_elements().unwrap(),
+                vec![
+                    InformationElement::OtherTv {
+                        kind: 1,
+                        value: vec![193]
+                    },
+                    InformationElement::Recovery(0),
+                ]
+            );
+        }
+    }
+    let mut unsupported = Packet::echo_request(77).encode().unwrap();
+    unsupported[0] = 0x52;
+    unsupported[2..4].copy_from_slice(&0u16.to_be_bytes());
+    let truncated = &unsupported[..7];
+    for wire in [truncated, &unsupported, &[0x32, 1, 0, 0, 0, 0, 0, 0][..]] {
+        peer.send_to(wire, endpoint.local_addr().unwrap())
+            .await
+            .unwrap();
+        assert!(quiet(&peer).await);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tokio::test]
+async fn specific_echo_response_uses_the_request_destination() {
+    let (endpoint, _) = Endpoint::bind("127.0.0.2:0".parse().unwrap())
+        .await
+        .unwrap();
+    let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let destination = std::net::SocketAddr::new(
+        Ipv4Addr::new(127, 0, 0, 2).into(),
+        endpoint.local_addr().unwrap().port(),
+    );
+    peer.send_to(&Packet::echo_request(1).encode().unwrap(), destination)
+        .await
+        .unwrap();
+    let mut buffer = [0; 100];
+    let (_, from) = timeout(WAIT, peer.recv_from(&mut buffer))
+        .await
+        .unwrap()
+        .unwrap();
+    // TS 29.281 section 4.4.3.2 requires copying the destination address.
+    assert_eq!(from, destination);
+}
+
+#[tokio::test]
 async fn keeps_answering_echo_while_the_receiver_lags() {
     let (endpoint, _unread, peer, local_teid) = setup().await;
     // More than the receiver's queue of 256.
@@ -163,14 +271,16 @@ async fn sends_error_indication_for_an_unknown_teid() {
     assert!(received.try_recv().is_err());
 }
 
-/// Linux routes replies to 127.0.0.22 from 127.0.0.1.
+/// The Error Indication names the actual destination address.
 #[cfg(target_os = "linux")]
 #[tokio::test]
-async fn error_indication_names_the_wildcard_socket_s_address() {
-    let (endpoint, _received) = Endpoint::bind("0.0.0.0:0".parse().unwrap()).await.unwrap();
+async fn error_indication_names_the_specific_socket_s_address() {
+    let (endpoint, _received) = Endpoint::bind("127.0.0.2:0".parse().unwrap())
+        .await
+        .unwrap();
     let port = endpoint.local_addr().unwrap().port();
     let (listener, sender) = user_plane_peer(22).await;
-    let to = (Ipv4Addr::LOCALHOST, port);
+    let to = (Ipv4Addr::new(127, 0, 0, 2), port);
     sender
         .send_to(&Packet::g_pdu(5, vec![]).encode().unwrap(), to)
         .await
@@ -181,7 +291,7 @@ async fn error_indication_names_the_wildcard_socket_s_address() {
             .information_elements()
             .unwrap()
             .contains(&InformationElement::GtpUPeerAddress(
-                Ipv4Addr::LOCALHOST.into()
+                Ipv4Addr::new(127, 0, 0, 2).into()
             ))
     );
 }
@@ -197,6 +307,30 @@ async fn delivers_the_peer_s_error_indication_to_its_tunnel() {
     // One naming another tunnel is not delivered.
     send(&peer, &endpoint, &Packet::error_indication(45, peer_ip)).await;
     assert!(timeout(QUIET, received.recv()).await.is_err());
+}
+
+#[tokio::test]
+async fn discards_error_indication_with_out_of_sequence_ies() {
+    let (endpoint, mut received, peer, _) = setup().await;
+    let mut indication = Packet::error_indication(44, peer.local_addr().unwrap().ip());
+    let mut elements = indication.information_elements().unwrap();
+    elements.reverse();
+    indication.payload = InformationElement::encode_all(&elements).unwrap();
+    send(&peer, &endpoint, &indication).await;
+    // TS 29.281 section 9.1 imports TS 29.060 section 11.1.10.
+    assert!(timeout(QUIET, received.recv()).await.is_err());
+}
+
+#[tokio::test]
+async fn skips_known_unexpected_tv_ie_in_error_indication() {
+    let (endpoint, mut received, peer, _) = setup().await;
+    let mut indication = Packet::error_indication(44, peer.local_addr().unwrap().ip());
+    // Cause (type 1, one value octet) is known in TS 29.060 section 7.7.1
+    // but unexpected here. Section 11.1.11 requires skipping it.
+    indication.payload.splice(0..0, [1, 128]);
+    send(&peer, &endpoint, &indication).await;
+    let received = delivered(&mut received).await;
+    assert_eq!((received.ran_id, received.session_id), (7, 1));
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -349,12 +483,14 @@ async fn works_over_ipv6() {
     assert_eq!(delivered(&mut received).await.packet.payload, vec![0x60, 1]);
 }
 
-/// A socket on `[::]` also serves IPv4 peers, which it sees as IPv4-mapped
+/// A socket on an IPv4-mapped IPv6 address serves IPv4 peers, which it sees as IPv4-mapped
 /// addresses (Linux sockets are dual-stack by default).
 #[cfg(target_os = "linux")]
 #[tokio::test]
-async fn dual_stack_socket_serves_ipv4_peers() {
-    let (endpoint, mut received) = Endpoint::bind("[::]:0".parse().unwrap()).await.unwrap();
+async fn ipv4_mapped_socket_serves_ipv4_peers() {
+    let (endpoint, mut received) = Endpoint::bind("[::ffff:127.0.0.1]:0".parse().unwrap())
+        .await
+        .unwrap();
     let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let remote = RemoteTunnel {
         address: peer.local_addr().unwrap(),

@@ -1,12 +1,12 @@
 //! What TS 29.281 requires of every GTP-U node, whatever its tunnels.
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use tokio::net::UdpSocket;
 use tracing::{debug, warn};
 
-use crate::{ECHO_REQUEST, ExtensionHeader, G_PDU, PORT, Packet};
+use crate::{ECHO_REQUEST, ExtensionHeader, G_PDU, InformationElement, PORT, Packet};
 
 /// The extension header types the endpoint and the test UPF understand.
 const SUPPORTED_EXTENSION_HEADERS: [u8; 2] = [
@@ -31,12 +31,72 @@ pub(crate) async fn answer(socket: &UdpSocket, packet: &Packet, from: SocketAddr
         }
         return true;
     }
+    // TS 29.281 section 9.1 imports TS 29.060 section 11.1.10:
+    // signalling IEs must be in ascending type order. The raw codec keeps
+    // their received order for lossless re-encoding.
+    if packet.message_type != G_PDU
+        && packet.information_elements().is_ok_and(|elements| {
+            elements
+                .windows(2)
+                .any(|pair| pair[0].kind() > pair[1].kind())
+        })
+    {
+        warn!("GTP-U: dropped a message with out-of-sequence information elements from {from}");
+        if packet.message_type == ECHO_REQUEST {
+            // TS 29.060 section 11.1.10 requires an error response with
+            // Cause 193 (Invalid message format). Retain the mandatory
+            // Recovery IE of the Echo Response (TS 29.281 section 7.2.2).
+            let response = echo_error_response(packet.sequence.unwrap_or(0));
+            send(socket, &response, from).await;
+        }
+        return true;
+    }
     if packet.message_type == ECHO_REQUEST {
         let response = Packet::echo_response(packet.sequence.unwrap_or(0));
         send(socket, &response, from).await;
         return true;
     }
     false
+}
+
+/// A complete Echo Request with an inconsistent GTP length still receives
+/// an error response (TS 29.281 section 9.1, TS 29.060 section 11.1.2).
+/// Truncated headers and unsupported versions are silently discarded.
+pub(crate) async fn answer_length_error(socket: &UdpSocket, bytes: &[u8], from: SocketAddr) {
+    let Some(header) = bytes.first_chunk::<8>() else {
+        return;
+    };
+    let flags = header[0];
+    if flags & 0xf0 != 0x30 || header[1] != ECHO_REQUEST {
+        return;
+    }
+    let header_length = if flags & 0x07 != 0 { 12 } else { 8 };
+    if bytes.len() < header_length {
+        return;
+    }
+    let length = usize::from(u16::from_be_bytes([header[2], header[3]]));
+    if length == bytes.len() - 8 {
+        return;
+    }
+    let sequence = if flags & 0x02 != 0 {
+        u16::from_be_bytes([bytes[8], bytes[9]])
+    } else {
+        0
+    };
+    send(socket, &echo_error_response(sequence), from).await;
+}
+
+fn echo_error_response(sequence: u16) -> Packet {
+    let mut response = Packet::echo_response(sequence);
+    response.payload = InformationElement::encode_all(&[
+        InformationElement::OtherTv {
+            kind: 1,
+            value: vec![193],
+        },
+        InformationElement::Recovery(0),
+    ])
+    .expect("fixed-length Cause and Recovery IEs encode");
+    response
 }
 
 /// Answer a G-PDU with TEID `teid`, which has no tunnel here, with an
@@ -46,7 +106,10 @@ pub(crate) async fn error_indication(socket: &UdpSocket, teid: u32, from: Socket
     if teid == 0 {
         return;
     }
-    let Some(local) = local_ip(socket, from) else {
+    let Ok(local) = socket
+        .local_addr()
+        .map(|address| address.ip().to_canonical())
+    else {
         debug!("GTP-U: no local address toward {from} for an Error Indication");
         return;
     };
@@ -71,23 +134,6 @@ async fn send(socket: &UdpSocket, packet: &Packet, to: SocketAddr) {
     if let Err(error) = socket.send_to(&bytes, to).await {
         debug!("GTP-U: reply to {to} failed: {error}");
     }
-}
-
-/// The address a G-PDU from `peer` reached: the socket's, or for a
-/// wildcard socket, the source address of the route back to the peer.
-fn local_ip(socket: &UdpSocket, peer: SocketAddr) -> Option<IpAddr> {
-    let local = socket.local_addr().ok()?.ip().to_canonical();
-    if !local.is_unspecified() {
-        return Some(local);
-    }
-    let peer = peer.ip().to_canonical();
-    let unspecified = match peer {
-        IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-        IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
-    };
-    let probe = std::net::UdpSocket::bind((unspecified, 0)).ok()?;
-    probe.connect((peer, crate::PORT)).ok()?;
-    Some(probe.local_addr().ok()?.ip())
 }
 
 /// `address` in the family of a socket: IPv4-mapped for an IPv6 socket,

@@ -14,6 +14,16 @@ use oxirush_gtp_u::{
 use tokio::net::UdpSocket;
 use tokio::time::timeout;
 
+#[tokio::test]
+async fn rejects_wildcard_bind_addresses() {
+    for address in ["0.0.0.0:0", "[::]:0", "[::ffff:0.0.0.0]:0"] {
+        let error = UpfSimulator::bind(address.parse().unwrap())
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
+}
+
 const WAIT: Duration = Duration::from_secs(2);
 
 fn udp(payload: &[u8]) -> Vec<u8> {

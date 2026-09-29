@@ -7,8 +7,8 @@ use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use oxirush_gtp_u::{
-    DownlinkPduSessionInformation, ExtensionHeader, Packet, PduSessionContainer,
-    UplinkPduSessionInformation, UplinkTimeStamps, ipv4_udp,
+    DownlinkPduSessionInformation, ExtensionHeader, InformationElement, Packet,
+    PduSessionContainer, UplinkPduSessionInformation, UplinkTimeStamps, ipv4_udp,
 };
 
 /// Dissect `packet`, sent in UDP to port 2152, and return `fields` as
@@ -80,6 +80,35 @@ fn check(packet: &Packet, expected: &[(&str, &str)]) {
         Packet::decode(&packet.encode().unwrap()).as_ref(),
         Ok(packet)
     );
+    let wire = packet.encode().unwrap();
+    assert_eq!(Packet::decode(&wire).unwrap().encode().unwrap(), wire);
+}
+
+#[test]
+#[ignore = "needs tshark"]
+fn downlink_burst_information() {
+    let mut downlink = DownlinkPduSessionInformation::new(5);
+    downlink.ppi = Some(3);
+    downlink.burst_size = Some(0x01_0203);
+    downlink.time_to_next_burst = Some(0x0405);
+    let mut packet = Packet::g_pdu(1, vec![]);
+    packet
+        .extension_headers
+        .push(ExtensionHeader::PduSessionContainer(
+            PduSessionContainer::Downlink(downlink),
+        ));
+    // Wireshark 4.6 does not expose BSSI/TTNBI/BSSize/TTNB fields yet;
+    // check the framing and independently decoded QFI/PPI, while the
+    // specification-derived golden and combination tests check their bytes.
+    check(
+        &packet,
+        &[
+            ("gtp.length", "16"),
+            ("gtp.ext_hdr.length", "3"),
+            ("gtp.ext_hdr.pdu_ses_con.qos_flow_id", "5"),
+            ("gtp.ext_hdr.pdu_ses_cont.ppi", "3"),
+        ],
+    );
 }
 
 #[test]
@@ -112,6 +141,29 @@ fn path_management_messages() {
             ("gtp.message", "0x1f"),
             ("gtp.num_ext_hdr_types", "2"),
             ("gtp.ext_hdr_type", "64,133"),
+        ],
+    );
+}
+
+#[test]
+#[ignore = "needs tshark"]
+fn echo_error_response() {
+    let mut response = Packet::echo_response(77);
+    response.payload = InformationElement::encode_all(&[
+        InformationElement::OtherTv {
+            kind: 1,
+            value: vec![193],
+        },
+        InformationElement::Recovery(0),
+    ])
+    .unwrap();
+    check(
+        &response,
+        &[
+            ("gtp.message", "0x02"),
+            ("gtp.seq_number", "0x004d"),
+            ("gtp.cause", "193"),
+            ("gtp.recovery", "0"),
         ],
     );
 }

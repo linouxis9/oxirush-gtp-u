@@ -34,7 +34,7 @@ const OPTIONAL_LEN: usize = 4;
 /// [`decode`](Packet::decode) produced. The bytes of a re-encoded message can
 /// differ from those received where the specs leave room: spare bits,
 /// fields whose flag is clear (not interpreted, TS 29.281 §5.1), padding,
-/// and fields of the DL PDU Session Information that later releases add.
+/// and fields of the PDU Session Information that later releases add.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Packet {
@@ -405,6 +405,74 @@ mod tests {
     }
 
     #[test]
+    fn downlink_burst_information_round_trips() {
+        // TS 38.415 V19.1.0 figure 5.5.2.1-1: PPP=1, PPI=3,
+        // BSSI=1, TTNBI=1, BSSize=0x010203, TTNB=0x0405.
+        let wire = hex("34 ff 0010 00000001 0000 00 85
+             03 00 85 63 010203 0405 0000 00");
+        let packet = Packet::decode(&wire).unwrap();
+        assert_eq!(packet.encode().unwrap(), wire);
+        let Some(PduSessionContainer::Downlink(information)) = packet.pdu_session_container()
+        else {
+            panic!("not DL PDU Session Information");
+        };
+        assert_eq!(information.burst_size, Some(0x01_0203));
+        assert_eq!(information.time_to_next_burst, Some(0x0405));
+
+        // All combinations of the optional fields, including interactions
+        // with timestamps and both sequence numbers.
+        for flags in 0u8..64 {
+            let mut information = DownlinkPduSessionInformation::new(63);
+            information.ppi = (flags & 1 != 0).then_some(7);
+            information.dl_sending_time_stamp = (flags & 2 != 0).then_some(u64::MAX);
+            information.dl_qfi_sequence_number = (flags & 4 != 0).then_some(0xff_ffff);
+            information.dl_mbs_qfi_sequence_number = (flags & 8 != 0).then_some(u32::MAX);
+            information.burst_size = (flags & 16 != 0).then_some(0xff_ffff);
+            information.time_to_next_burst = (flags & 32 != 0).then_some(u16::MAX);
+            let mut packet = Packet::g_pdu(1, vec![0x45]);
+            packet
+                .extension_headers
+                .push(ExtensionHeader::PduSessionContainer(
+                    PduSessionContainer::Downlink(information),
+                ));
+            if flags & 1 == 0 && flags & 48 != 0 {
+                assert_eq!(
+                    packet.encode(),
+                    Err(Error::OutOfRange("burst information without PPI"))
+                );
+            } else {
+                let wire = packet.encode().unwrap();
+                let decoded = Packet::decode(&wire).unwrap();
+                assert_eq!(decoded, packet);
+                assert_eq!(decoded.encode().unwrap(), wire);
+            }
+        }
+    }
+
+    #[test]
+    fn downlink_burst_information_rejects_invalid_fields() {
+        // BSSize ends after the QFI Sequence Number, beyond the container.
+        for content in ["04 85 02 000001", "00 85 03 010203"] {
+            assert_eq!(
+                Packet::decode(&hex(&format!(
+                    "34 ff 000c 00000001 0000 00 85 02 {content} 00"
+                ))),
+                Err(Error::Truncated("PDU Session Container")),
+            );
+        }
+        let mut information = DownlinkPduSessionInformation::new(1);
+        information.ppi = Some(0);
+        information.burst_size = Some(0x100_0000);
+        let mut packet = Packet::g_pdu(1, vec![]);
+        packet
+            .extension_headers
+            .push(ExtensionHeader::PduSessionContainer(
+                PduSessionContainer::Downlink(information),
+            ));
+        assert_eq!(packet.encode(), Err(Error::OutOfRange("Burst Size")));
+    }
+
+    #[test]
     fn extension_header_chain_and_optional_fields() {
         let mut packet = Packet::g_pdu(3, vec![0xaa]);
         packet.sequence = Some(0x0102);
@@ -614,8 +682,8 @@ mod tests {
             );
         }
         assert_eq!(
-            InformationElement::decode_all(&[1, 0]),
-            Err(Error::UnknownInformationElement(1))
+            InformationElement::decode_all(&[6, 0]),
+            Err(Error::UnknownInformationElement(6))
         );
         for kind in [14, 133, 141, 255] {
             let other = InformationElement::Other {

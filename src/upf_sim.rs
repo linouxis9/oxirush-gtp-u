@@ -84,9 +84,16 @@ struct Shared {
 /// What the tasks share with the handles.
 #[derive(Default)]
 struct State {
-    sessions: Mutex<HashMap<u32, Session>>,
+    sessions: Mutex<HashMap<u32, SessionEntry>>,
     #[cfg(all(target_os = "linux", feature = "tun"))]
     tuns: Mutex<HashMap<u32, TunAttachment>>,
+}
+
+struct SessionEntry {
+    session: Session,
+    /// Identifies this provisioning, even if the same TEID is reused.
+    #[cfg(all(target_os = "linux", feature = "tun"))]
+    incarnation: Arc<()>,
 }
 
 impl Drop for Shared {
@@ -115,11 +122,16 @@ impl UpfSimulator {
     /// Bind the N3 socket to `address`. The receiver observes the sessions'
     /// uplink G-PDUs; it is best effort and never delays forwarding.
     ///
-    /// Bind a specific address rather than a wildcard one: TS 29.281 §4.4.3
-    /// has replies leave from the address the request reached, but from a
-    /// wildcard socket they leave from the address the kernel picks, which
-    /// an Error Indication also names.
+    /// The address must be specific, so replies leave from the address
+    /// the request reached (TS 29.281 §4.4.3). Wildcard addresses return
+    /// [`InvalidInput`](io::ErrorKind::InvalidInput).
     pub async fn bind(address: SocketAddr) -> io::Result<(Self, mpsc::Receiver<UplinkPacket>)> {
+        if address.ip().to_canonical().is_unspecified() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "GTP-U requires a specific bind address",
+            ));
+        }
         let socket = Arc::new(UdpSocket::bind(address).await?);
         let ipv6 = socket.local_addr()?.is_ipv6();
         let state = Arc::new(State::default());
@@ -144,9 +156,24 @@ impl UpfSimulator {
         self.shared.socket.local_addr()
     }
 
-    /// Add a session, or replace the one with the same uplink TEID.
+    /// Provision a session, replacing one with the same uplink TEID and
+    /// closing its previous TUN. Use [`switch_downlink`](Self::switch_downlink)
+    /// for a handover that retains the session's N6 attachment.
     pub fn set_session(&self, session: Session) {
-        lock(&self.shared.state.sessions).insert(session.uplink_teid, session);
+        let mut sessions = lock(&self.shared.state.sessions);
+        sessions.insert(
+            session.uplink_teid,
+            SessionEntry {
+                session,
+                #[cfg(all(target_os = "linux", feature = "tun"))]
+                incarnation: Arc::new(()),
+            },
+        );
+        #[cfg(all(target_os = "linux", feature = "tun"))]
+        let attachment = lock(&self.shared.state.tuns).remove(&session.uplink_teid);
+        drop(sessions);
+        #[cfg(all(target_os = "linux", feature = "tun"))]
+        drop(attachment);
     }
 
     /// Move a session's downlink to `downlink_teid` at `gnb_address`, as
@@ -160,9 +187,10 @@ impl UpfSimulator {
     ) -> io::Result<()> {
         let old = {
             let mut sessions = lock(&self.shared.state.sessions);
-            let session = sessions
+            let session = &mut sessions
                 .get_mut(&uplink_teid)
-                .ok_or_else(|| unknown_session(uplink_teid))?;
+                .ok_or_else(|| unknown_session(uplink_teid))?
+                .session;
             let old = *session;
             session.gnb_address = gnb_address;
             session.downlink_teid = downlink_teid;
@@ -182,12 +210,14 @@ impl UpfSimulator {
 
     /// Remove a session and close its TUN.
     pub fn remove_session(&self, uplink_teid: u32) {
-        lock(&self.shared.state.sessions).remove(&uplink_teid);
+        let mut sessions = lock(&self.shared.state.sessions);
+        sessions.remove(&uplink_teid);
         #[cfg(all(target_os = "linux", feature = "tun"))]
-        {
-            // Closed here, after the lock is released.
-            let _attachment = lock(&self.shared.state.tuns).remove(&uplink_teid);
-        }
+        let attachment = lock(&self.shared.state.tuns).remove(&uplink_teid);
+        drop(sessions);
+        // Close after the registry locks are released.
+        #[cfg(all(target_os = "linux", feature = "tun"))]
+        drop(attachment);
     }
 
     /// Give a session a Linux TUN as N6: its uplink T-PDUs go to Linux, and
@@ -198,9 +228,10 @@ impl UpfSimulator {
     /// Outside a Tokio runtime.
     #[cfg(all(target_os = "linux", feature = "tun"))]
     pub fn attach_tun(&self, uplink_teid: u32, config: TunConfig) -> io::Result<()> {
-        if !lock(&self.shared.state.sessions).contains_key(&uplink_teid) {
-            return Err(unknown_session(uplink_teid));
-        }
+        let incarnation = lock(&self.shared.state.sessions)
+            .get(&uplink_teid)
+            .map(|entry| entry.incarnation.clone())
+            .ok_or_else(|| unknown_session(uplink_teid))?;
         let already_attached = || {
             io::Error::new(
                 io::ErrorKind::AlreadyExists,
@@ -217,12 +248,31 @@ impl UpfSimulator {
             self.shared.state.clone(),
             self.shared.ipv6,
             uplink_teid,
+            incarnation.clone(),
         ))
         .abort_handle();
         let attachment = TunAttachment { port, task };
+        // Keep removal/replacement from interleaving the recheck and the
+        // insertion. Removing a session then either prevents attachment
+        // or removes the attachment that was just inserted.
+        let sessions = lock(&self.shared.state.sessions);
+        if !sessions
+            .get(&uplink_teid)
+            .is_some_and(|entry| Arc::ptr_eq(&entry.incarnation, &incarnation))
+        {
+            drop(sessions);
+            drop(attachment);
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "session with uplink TEID {uplink_teid} was removed or replaced during TUN creation"
+                ),
+            ));
+        }
         let mut tuns = lock(&self.shared.state.tuns);
         if tuns.contains_key(&uplink_teid) {
             drop(tuns);
+            drop(sessions);
             drop(attachment);
             return Err(already_attached());
         }
@@ -234,7 +284,7 @@ impl UpfSimulator {
     pub async fn send_downlink(&self, uplink_teid: u32, packet: Vec<u8>) -> io::Result<()> {
         let session = lock(&self.shared.state.sessions)
             .get(&uplink_teid)
-            .copied()
+            .map(|entry| entry.session)
             .ok_or_else(|| unknown_session(uplink_teid))?;
         send_downlink(&self.shared.socket, self.shared.ipv6, &session, packet).await
     }
@@ -299,6 +349,7 @@ async fn receive(
             Ok(packet) => packet,
             Err(error) => {
                 debug!("UPF dropped a malformed message from {from}: {error}");
+                path::answer_length_error(&socket, &buffer[..size], from).await;
                 continue;
             }
         };
@@ -319,7 +370,9 @@ async fn receive(
                 continue;
             }
         }
-        let session = lock(&state.sessions).get(&packet.teid).copied();
+        let session = lock(&state.sessions)
+            .get(&packet.teid)
+            .map(|entry| entry.session);
         let Some(session) = session else {
             debug!("UPF G-PDU for unknown TEID {} from {from}", packet.teid);
             path::error_indication(&socket, packet.teid, from).await;
@@ -368,6 +421,7 @@ async fn forward_tun_downlink(
     state: Arc<State>,
     ipv6: bool,
     uplink_teid: u32,
+    incarnation: Arc<()>,
 ) {
     let mut buffer = vec![0; 65536];
     loop {
@@ -378,7 +432,10 @@ async fn forward_tun_downlink(
                 return;
             }
         };
-        let session = lock(&state.sessions).get(&uplink_teid).copied();
+        let session = lock(&state.sessions)
+            .get(&uplink_teid)
+            .filter(|entry| Arc::ptr_eq(&entry.incarnation, &incarnation))
+            .map(|entry| entry.session);
         let Some(session) = session else {
             return;
         };
