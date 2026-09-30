@@ -2,28 +2,30 @@
 
 [![Crates.io](https://img.shields.io/crates/v/oxirush-gtp-u.svg)](https://crates.io/crates/oxirush-gtp-u)
 [![Documentation](https://docs.rs/oxirush-gtp-u/badge.svg)](https://docs.rs/oxirush-gtp-u)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](https://github.com/linouxis9/oxirush-gtp-u/blob/master/LICENSE)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 GTPv1-U for Rust: a codec for 3GPP TS 29.281 with the PDU Session Container
 of TS 38.415, a Tokio endpoint for the N3 side of a gNB, a UPF for tests,
 and Linux TUN devices routed for a UE or a UPF session.
 
-## What it covers
+## Features
 
 The codec handles every header field of TS 29.281 §5.1, chains of
 extension headers, and the information elements of §8. It builds Echo
 Request and Response, Error Indication, Supported Extension Headers
-Notification, End Marker and G-PDU messages. The PDU Session Container
-carries the downlink and uplink PDU Session Information of TS 38.415 V18
+Notification, End Marker, Tunnel Status and G-PDU messages. The PDU Session
+Container carries the downlink and uplink PDU Session Information of TS 38.415 V18
 §5.5.2, with the QoS monitoring, sequence number, delay and congestion
-fields; IEs added by later releases are kept as received.
+fields, plus downlink Burst Size and Time To Next Burst. Later uplink IEs
+are kept as received when their format is not yet typed.
 
 Decoding follows the receiver rules of §5.1: the flags decide which
 optional fields are read, the spare bit is ignored, and extension headers
-and IEs of unknown types are kept. It never panics, and what it returns
-encodes to bytes that decode to the same value. Property tests and a fuzz
-target check both, and the tests compare the wire format with Wireshark's
-dissector. The codec has also exchanged traffic with the free5GC and
+and unknown TLV IEs are kept. TV IEs imported from TS 29.060 are kept when
+their fixed length is known; an unknown TV type returns an error. Property
+tests and a fuzz target check for panics and decode/encode/decode equality,
+and the tests compare the wire format with Wireshark's dissector.
+The codec has also exchanged traffic with the free5GC and
 Open5GS UPFs.
 
 `Endpoint` is one UDP socket for all the tunnels of a gNB, keyed by a RAN
@@ -49,7 +51,7 @@ or of a UPF session. Dropping it removes them.
 `parse_ipv4_udp` and `parse_ipv4_icmp_echo` read them, to exercise tunnels
 without a TUN.
 
-## What it does not do
+### Limitations
 
 - No PFCP: the test UPF's sessions are set with `set_session`, or by the
   arguments of the `oxirush-upf-sim` binary.
@@ -59,12 +61,14 @@ without a TUN.
 - GTP-U has no authentication: anyone who reaches the socket can send on a
   tunnel or report an Error Indication for it.
 
-## Installation
+## Quick start
 
 ```toml
 [dependencies]
 oxirush-gtp-u = "0.1"
 ```
+
+### Feature flags
 
 | Feature    | Default | Adds |
 | ---------- | ------- | ---- |
@@ -75,7 +79,9 @@ oxirush-gtp-u = "0.1"
 Without default features the crate is the codec and the IPv4 helpers, with
 no dependencies. The minimum supported Rust version is 1.85.
 
-## Encoding and decoding
+## Usage
+
+### Encoding and decoding
 
 ```rust
 use oxirush_gtp_u::{Packet, PduSessionContainer};
@@ -95,7 +101,7 @@ fn main() -> Result<(), oxirush_gtp_u::Error> {
 }
 ```
 
-## Tunnels on an endpoint
+### Tunnels on an endpoint
 
 `Endpoint::bind` opens the socket and returns a receiver for the tunnels'
 messages. `install` adds the tunnel of a RAN UE and PDU session to a remote
@@ -106,10 +112,11 @@ has a complete example with two endpoints.
 
 Bind port 2152 to receive the peer's Error Indications, which TS 29.281
 §4.4.2.4 sends there whatever port the G-PDUs came from, and bind a
-specific address rather than a wildcard one: replies leave from the
-address the request reached only when the socket is bound to it.
+specific address: `Endpoint::bind` and `UpfSimulator::bind` reject wildcard
+addresses with `InvalidInput` so replies use the address that received the
+request.
 
-## The test UPF
+### The test UPF
 
 The binary runs one session:
 
@@ -122,7 +129,7 @@ TEID, the downlink TEID and the QFI; the gNB uses the same TEIDs the other
 way round. Tests that change sessions as they run, or move a session's
 downlink with `switch_downlink`, use the Rust API instead.
 
-## TUN devices
+### TUN devices
 
 `TunPort` needs `CAP_NET_ADMIN` and sets up one of three routings:
 
@@ -146,7 +153,7 @@ process, but the policy rule or VRF stays behind when the process ends
 without running destructors: on SIGKILL, an unhandled SIGTERM or Ctrl-C,
 `process::exit`, or a panic with `panic = "abort"`.
 
-## Source layout
+## Architecture
 
 ```text
 src/
@@ -175,18 +182,35 @@ cargo test --test wireshark -- --ignored
 
 `fuzz/` has a cargo-fuzz target for the decoders.
 
-## Specifications
+## 3GPP references
 
 - 3GPP TS 29.281: GTPv1-U (header, extension headers, messages, information
   elements, path management)
 - 3GPP TS 38.415: NG-RAN PDU Session User Plane protocol (PDU Session
   Container)
+- 3GPP TS 29.060: imported TV information elements and receive rules
+
+## Documentation
+
+Full API reference: **<https://docs.rs/oxirush-gtp-u>**
 
 ## Contributing
 
-Pull requests are welcome. Sign off each commit (`git commit -s`) to
-certify the [Developer Certificate of Origin](https://developercertificate.org/).
+Contributions welcome! Please:
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Sign off your commits (`git commit -s`)
+4. Open a Pull Request
+
+### Developer Certificate of Origin (DCO)
+
+By contributing to this project, you agree to the [Developer Certificate of Origin (DCO)](https://developercertificate.org/). This means that you have the right to submit your contributions and you agree to license them according to the project's license.
+
+All commits should be signed-off with `git commit -s` to indicate your agreement to the DCO.
 
 ## License
 
-Apache License 2.0, see [LICENSE](https://github.com/linouxis9/oxirush-gtp-u/blob/master/LICENSE).
+Copyright 2025 - 2026 Valentin D'Emmanuele
+
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for details.

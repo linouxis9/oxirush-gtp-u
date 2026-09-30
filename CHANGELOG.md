@@ -14,12 +14,20 @@ First release.
   congestion fields; new IEs of later releases are kept as received. The
   wire format is checked against Wireshark's dissector and was exchanged
   with the free5GC and Open5GS UPFs.
+- Downlink Burst Size and Time To Next Burst are typed and preserved with
+  their BSSI/TTNBI flags. Imported TS 29.060 TV IEs retain their values and
+  signaling IEs use the required order; Echo Response includes the rejection
+  Cause when mandatory Echo Request fields are missing.
 - `Endpoint`: a gNB's N3 socket and tunnels. It answers Echo Requests,
   sends Error Indication and Supported Extension Headers Notification to
   port 2152, and delivers G-PDUs, End Markers and the peer's Error
   Indications with their source address; the TEID alone identifies a
   tunnel. `install_s1u` gives an eNB's S1-U tunnels, without a PDU Session
   Container.
+- Endpoint and test-UPF binding require a specific local IP address;
+  wildcard addresses return `InvalidInput` to preserve reply source addresses.
+  TUN attachment and session replacement check the session's identity so a
+  concurrent operation cannot attach a device to a replacement session.
 - `upf_sim::UpfSimulator` and the `oxirush-upf-sim` binary: a test UPF with
   an IPv4 UDP and ICMP echo service, End Marker on a path switch, and an
   optional TUN per session.
