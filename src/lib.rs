@@ -11,6 +11,8 @@ mod ipv4;
 mod packet;
 
 #[cfg(feature = "endpoint")]
+mod datagram;
+#[cfg(feature = "endpoint")]
 mod endpoint;
 #[cfg(all(target_os = "linux", feature = "tun"))]
 #[allow(unsafe_code)]

@@ -29,7 +29,11 @@ enum PathAction {
 /// that the receiver must understand but does not, answering a request or
 /// G-PDU with a Supported Extension Headers Notification (TS 29.281
 /// §5.2.1). Returns whether `packet` needs nothing else.
-pub(crate) async fn answer(socket: &UdpSocket, packet: &Packet, from: SocketAddr) -> bool {
+pub(crate) async fn answer<P: AsRef<[u8]>>(
+    socket: &UdpSocket,
+    packet: &Packet<P>,
+    from: SocketAddr,
+) -> bool {
     match classify(packet, from) {
         PathAction::Forward => false,
         PathAction::Discard(reason) => {
@@ -50,7 +54,7 @@ pub(crate) async fn answer(socket: &UdpSocket, packet: &Packet, from: SocketAddr
     }
 }
 
-fn classify(packet: &Packet, from: SocketAddr) -> PathAction {
+fn classify<P: AsRef<[u8]>>(packet: &Packet<P>, from: SocketAddr) -> PathAction {
     let unsupported = packet.extension_headers.iter().any(|header| {
         matches!(header, ExtensionHeader::Other { .. }) && header.comprehension_required()
     });

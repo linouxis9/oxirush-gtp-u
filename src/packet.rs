@@ -35,9 +35,13 @@ const OPTIONAL_LEN: usize = 4;
 /// differ from those received where the specs leave room: spare bits,
 /// fields whose flag is clear (not interpreted, TS 29.281 §5.1), padding,
 /// and fields of the PDU Session Information that later releases add.
+///
+/// `P` defaults to an owned `Vec<u8>`. Constructors also accept slices and
+/// other byte buffers implementing `AsRef<[u8]>`. Borrowed decoding keeps the
+/// payload in the original datagram; extension metadata remains owned.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct Packet {
+pub struct Packet<P = Vec<u8>> {
     /// Message type, such as [`G_PDU`] or [`ECHO_REQUEST`].
     pub message_type: u8,
     /// Tunnel Endpoint Identifier, assigned by the receiver of the tunnel;
@@ -51,12 +55,12 @@ pub struct Packet {
     pub extension_headers: Vec<ExtensionHeader>,
     /// The T-PDU of a G-PDU, or the information elements of a signalling
     /// message (see [`information_elements`](Packet::information_elements)).
-    pub payload: Vec<u8>,
+    pub payload: P,
 }
 
-impl Packet {
+impl<P: AsRef<[u8]>> Packet<P> {
     /// A message without optional header fields.
-    pub fn new(message_type: u8, teid: u32, payload: Vec<u8>) -> Self {
+    pub fn new(message_type: u8, teid: u32, payload: P) -> Self {
         Self {
             message_type,
             teid,
@@ -68,22 +72,46 @@ impl Packet {
     }
 
     /// A G-PDU without extension headers, as on S1-U.
-    pub fn g_pdu(teid: u32, payload: Vec<u8>) -> Self {
+    pub fn g_pdu(teid: u32, payload: P) -> Self {
         Self::new(G_PDU, teid, payload)
     }
 
     /// An uplink G-PDU on N3 or N9: its PDU Session Container holds UL PDU
     /// Session Information of QoS flow `qfi`.
-    pub fn uplink(teid: u32, qfi: u8, payload: Vec<u8>) -> Self {
+    pub fn uplink(teid: u32, qfi: u8, payload: P) -> Self {
         Self::g_pdu(teid, payload).with_container(PduSessionContainer::uplink(qfi))
     }
 
     /// A downlink G-PDU on N3 or N9: its PDU Session Container holds DL PDU
     /// Session Information of QoS flow `qfi`.
-    pub fn downlink(teid: u32, qfi: u8, payload: Vec<u8>) -> Self {
+    pub fn downlink(teid: u32, qfi: u8, payload: P) -> Self {
         Self::g_pdu(teid, payload).with_container(PduSessionContainer::downlink(qfi))
     }
 
+    fn with_container(mut self, container: PduSessionContainer) -> Self {
+        self.extension_headers
+            .push(ExtensionHeader::PduSessionContainer(container));
+        self
+    }
+
+    /// The PDU Session Container, if the message has one.
+    pub fn pdu_session_container(&self) -> Option<&PduSessionContainer> {
+        self.extension_headers
+            .iter()
+            .find_map(|header| match header {
+                ExtensionHeader::PduSessionContainer(container) => Some(container),
+                _ => None,
+            })
+    }
+
+    /// The QoS Flow Identifier of the PDU Session Container, if any.
+    pub fn qfi(&self) -> Option<u8> {
+        self.pdu_session_container()
+            .and_then(PduSessionContainer::qfi)
+    }
+}
+
+impl Packet {
     /// An Echo Request. Echo messages always carry a sequence number.
     pub fn echo_request(sequence: u16) -> Self {
         Self::signalling(ECHO_REQUEST, sequence, &[])
@@ -133,12 +161,6 @@ impl Packet {
         Self::new(END_MARKER, teid, Vec::new())
     }
 
-    fn with_container(mut self, container: PduSessionContainer) -> Self {
-        self.extension_headers
-            .push(ExtensionHeader::PduSessionContainer(container));
-        self
-    }
-
     /// A path management or tunnel management message: TEID 0 and the S
     /// flag set (TS 29.281 §5.1).
     fn signalling(message_type: u8, sequence: u16, elements: &[InformationElement]) -> Self {
@@ -149,30 +171,15 @@ impl Packet {
         packet
     }
 
-    /// The PDU Session Container, if the message has one.
-    pub fn pdu_session_container(&self) -> Option<&PduSessionContainer> {
-        self.extension_headers
-            .iter()
-            .find_map(|header| match header {
-                ExtensionHeader::PduSessionContainer(container) => Some(container),
-                _ => None,
-            })
-    }
-
-    /// The QoS Flow Identifier of the PDU Session Container, if any.
-    pub fn qfi(&self) -> Option<u8> {
-        self.pdu_session_container()
-            .and_then(PduSessionContainer::qfi)
-    }
-
-    /// Decode the payload as information elements, the content of every
-    /// message type except G-PDU.
-    pub fn information_elements(&self) -> Result<Vec<InformationElement>, Error> {
-        InformationElement::decode_all(&self.payload)
-    }
-
     /// Decode one GTP-U message, the whole payload of a UDP datagram.
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
+        Self::decode_borrowed(bytes).map(Packet::into_owned)
+    }
+
+    /// Decode a message while borrowing its payload from the input datagram.
+    /// Extension headers and their metadata remain owned. The payload is copied
+    /// only when [`into_owned`](Packet::into_owned) is called.
+    pub fn decode_borrowed(bytes: &[u8]) -> Result<Packet<&[u8]>, Error> {
         let Some((header, rest)) = bytes.split_first_chunk::<MANDATORY_LEN>() else {
             return Err(Error::Truncated("GTP-U header"));
         };
@@ -188,10 +195,10 @@ impl Packet {
         if rest.len() > length {
             return Err(Error::InvalidLength("GTP-U message"));
         }
-        let mut packet = Self::new(
+        let mut packet = Packet::new(
             header[1],
             u32::from_be_bytes([header[4], header[5], header[6], header[7]]),
-            Vec::new(),
+            &[][..],
         );
         let mut rest = rest;
         if flags & (E | S | PN) != 0 {
@@ -224,8 +231,31 @@ impl Packet {
                 rest = after;
             }
         }
-        packet.payload = rest.to_vec();
+        packet.payload = rest;
         Ok(packet)
+    }
+}
+
+impl Packet<&[u8]> {
+    /// Copy the borrowed payload into an owned message, moving its extension
+    /// headers without cloning them.
+    pub fn into_owned(self) -> Packet {
+        Packet {
+            message_type: self.message_type,
+            teid: self.teid,
+            sequence: self.sequence,
+            n_pdu_number: self.n_pdu_number,
+            extension_headers: self.extension_headers,
+            payload: self.payload.to_vec(),
+        }
+    }
+}
+
+impl<P: AsRef<[u8]>> Packet<P> {
+    /// Decode the payload as information elements, the content of every
+    /// message type except G-PDU.
+    pub fn information_elements(&self) -> Result<Vec<InformationElement>, Error> {
+        InformationElement::decode_all(self.payload.as_ref())
     }
 
     /// Encode the message.
@@ -237,10 +267,14 @@ impl Packet {
 
     /// Validated wire length, including the mandatory header. No output is allocated.
     pub fn encoded_len(&self) -> Result<usize, Error> {
+        self.encoded_len_for_payload(self.payload.as_ref().len())
+    }
+
+    fn encoded_len_for_payload(&self, payload_length: usize) -> Result<usize, Error> {
         let optional = self.sequence.is_some()
             || self.n_pdu_number.is_some()
             || !self.extension_headers.is_empty();
-        let mut length = self.payload.len();
+        let mut length = payload_length;
         if optional {
             length = length
                 .checked_add(OPTIONAL_LEN)
@@ -258,7 +292,8 @@ impl Packet {
     /// Append the message to a reusable buffer. On validation error its contents
     /// and capacity remain unchanged. Call `clear()` first to replace old output.
     pub fn encode_into(&self, out: &mut Vec<u8>) -> Result<(), Error> {
-        let length = self.encoded_len()?;
+        let payload = self.payload.as_ref();
+        let length = self.encoded_len_for_payload(payload.len())?;
         out.reserve(length);
         let start = out.len();
         let mut flags = VERSION_1_GTP;
@@ -289,7 +324,7 @@ impl Packet {
                 .map_or(0, ExtensionHeader::kind);
             header.encode(next, out)?;
         }
-        out.extend_from_slice(&self.payload);
+        out.extend_from_slice(payload);
         let length = (length - MANDATORY_LEN) as u16;
         out[start + 2..start + 4].copy_from_slice(&length.to_be_bytes());
         Ok(())
@@ -326,6 +361,49 @@ mod tests {
         assert_eq!(&appended[2..], wire);
         assert_eq!(&appended[..2], &[0xaa, 0xbb]);
         assert_eq!(&Packet::decode(&wire).unwrap(), packet);
+        let borrowed = Packet::decode_borrowed(&wire).unwrap();
+        assert_eq!(borrowed.encode().unwrap(), wire);
+        assert_eq!(borrowed.encoded_len().unwrap(), wire.len());
+        assert_eq!(
+            borrowed.payload.as_ptr(),
+            wire[wire.len() - borrowed.payload.len()..].as_ptr()
+        );
+        assert_eq!(borrowed.into_owned(), *packet);
+    }
+
+    #[test]
+    fn constructors_accept_owned_buffers_slices_and_arrays() {
+        let payload = [0x45, 0, 1];
+        let owned: Packet = Packet::g_pdu(1, payload.to_vec());
+        let borrowed: Packet<&[u8]> = Packet::g_pdu(1, &payload[..]);
+        let array = Packet::g_pdu(1, payload);
+        let boxed = Packet::g_pdu(1, Box::<[u8]>::from(payload));
+        assert_eq!(borrowed.encode().unwrap(), owned.encode().unwrap());
+        assert_eq!(array.encode().unwrap(), owned.encode().unwrap());
+        assert_eq!(boxed.encode().unwrap(), owned.encode().unwrap());
+        assert_eq!(borrowed.into_owned(), owned);
+        let empty = Packet::uplink(1, 9, vec![]);
+        assert_eq!(empty.qfi(), Some(9));
+    }
+
+    #[test]
+    fn encoding_validates_and_writes_one_payload_snapshot() {
+        struct Payload(std::cell::Cell<usize>);
+        impl AsRef<[u8]> for Payload {
+            fn as_ref(&self) -> &[u8] {
+                let calls = self.0.get();
+                self.0.set(calls + 1);
+                if calls == 0 {
+                    b"one"
+                } else {
+                    b"another payload"
+                }
+            }
+        }
+        let packet = Packet::g_pdu(1, Payload(std::cell::Cell::new(0)));
+        let wire = packet.encode().unwrap();
+        assert_eq!(packet.payload.0.get(), 1);
+        assert_eq!(Packet::decode(&wire).unwrap().payload, b"one");
     }
 
     #[test]

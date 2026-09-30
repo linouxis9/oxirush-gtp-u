@@ -497,7 +497,7 @@ async fn sends_downlink_packets_and_rejects_unknown_sessions() {
         .unwrap();
     let gnb = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     upf.set_session(Session::new(10, 20, gnb.local_addr().unwrap(), 5));
-    upf.send_downlink(10, vec![0x60, 0]).await.unwrap();
+    upf.send_downlink(10, &[0x60, 0][..]).await.unwrap();
     let downlink = reply(&gnb).await;
     assert_eq!((downlink.teid, downlink.qfi()), (20, Some(5)));
     assert_eq!(downlink.payload, vec![0x60, 0]);

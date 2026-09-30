@@ -1,21 +1,21 @@
 //! The N3 endpoint of a gNB, or the S1-U endpoint of an eNB.
 
-use std::collections::HashMap;
 use std::fmt;
 use std::io;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 
-use tokio::net::UdpSocket;
-use tokio::sync::mpsc::{self, error::TrySendError};
+use tokio::sync::mpsc;
 use tokio::task::{AbortHandle, JoinHandle};
-use tracing::{debug, trace, warn};
+use tracing::{debug, trace};
 
 use crate::ReceiveStats;
-use crate::path::{self, lock, same_ip};
-use crate::stats::Counters;
-use crate::{END_MARKER, ERROR_INDICATION, G_PDU, InformationElement, Packet};
+use crate::datagram::DatagramSocket;
+use crate::{END_MARKER, ERROR_INDICATION, G_PDU, Packet};
+
+mod routes;
+use routes::RouteTable;
 
 /// Messages the receiver of [`Endpoint::bind`] can lag behind by before
 /// newer ones are dropped.
@@ -90,51 +90,16 @@ pub struct Endpoint {
 }
 
 struct Shared {
-    socket: Arc<UdpSocket>,
-    routes: Arc<Mutex<Routes>>,
-    ipv6: bool,
+    socket: Arc<DatagramSocket>,
+    routes: Arc<RouteTable>,
     worker: AbortHandle,
     completion: tokio::sync::Mutex<Option<JoinHandle<io::Result<()>>>>,
     stopped: AtomicBool,
-    counters: Arc<Counters>,
 }
 
 impl Drop for Shared {
     fn drop(&mut self) {
         self.worker.abort();
-    }
-}
-
-#[derive(Clone, Copy)]
-struct Route {
-    local_teid: u32,
-    remote: RemoteTunnel,
-    /// The uplink QoS flow of an N3 tunnel; S1-U tunnels have none.
-    qfi: Option<u8>,
-}
-
-#[derive(Default)]
-struct Routes {
-    by_session: HashMap<(u32, u8), Route>,
-    by_teid: HashMap<u32, (u32, u8)>,
-    last_teid: u32,
-}
-
-impl Routes {
-    /// The next TEID after the last one that is neither 0 nor in use.
-    fn allocate_teid(&mut self) -> u32 {
-        loop {
-            self.last_teid = self.last_teid.wrapping_add(1);
-            if self.last_teid != 0 && !self.by_teid.contains_key(&self.last_teid) {
-                return self.last_teid;
-            }
-        }
-    }
-
-    fn remove(&mut self, key: (u32, u8)) {
-        if let Some(route) = self.by_session.remove(&key) {
-            self.by_teid.remove(&route.local_teid);
-        }
     }
 }
 
@@ -153,32 +118,17 @@ impl Endpoint {
     /// the request reached (TS 29.281 §4.4.3). Wildcard addresses return
     /// [`InvalidInput`](io::ErrorKind::InvalidInput).
     pub async fn bind(address: SocketAddr) -> io::Result<(Self, mpsc::Receiver<ReceivedPacket>)> {
-        if address.ip().to_canonical().is_unspecified() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "GTP-U requires a specific bind address",
-            ));
-        }
-        let socket = Arc::new(UdpSocket::bind(address).await?);
-        let ipv6 = socket.local_addr()?.is_ipv6();
-        let routes = Arc::new(Mutex::new(Routes::default()));
+        let socket = Arc::new(DatagramSocket::bind(address).await?);
+        let routes = Arc::new(RouteTable::default());
         let (tx, rx) = mpsc::channel(QUEUE);
-        let counters = Arc::new(Counters::default());
-        let completion = tokio::spawn(receive(
-            socket.clone(),
-            routes.clone(),
-            tx,
-            counters.clone(),
-        ));
+        let completion = tokio::spawn(receive(socket.clone(), routes.clone(), tx));
         let worker = completion.abort_handle();
         let shared = Shared {
             socket,
             routes,
-            ipv6,
             worker,
             completion: tokio::sync::Mutex::new(Some(completion)),
             stopped: AtomicBool::new(false),
-            counters,
         };
         Ok((
             Self {
@@ -195,7 +145,7 @@ impl Endpoint {
 
     /// Receive counters, including overload drops. Clones share the counters.
     pub fn stats(&self) -> ReceiveStats {
-        self.shared.counters.snapshot()
+        self.shared.socket.stats()
     }
 
     /// Whether the background receiver is still running and has not been shut down.
@@ -225,18 +175,15 @@ impl Endpoint {
 
     /// Send a custom message from this endpoint's bound socket. This preserves
     /// its sequence number and extension headers and does not require a route.
-    pub async fn send_to(&self, packet: &Packet, to: SocketAddr) -> io::Result<()> {
+    pub async fn send_to<P: AsRef<[u8]>>(
+        &self,
+        packet: &Packet<P>,
+        to: SocketAddr,
+    ) -> io::Result<()> {
         if !self.is_running() {
             return Err(io::ErrorKind::BrokenPipe.into());
         }
-        let bytes = packet
-            .encode()
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-        self.shared
-            .socket
-            .send_to(&bytes, path::destination(self.shared.ipv6, to))
-            .await?;
-        Ok(())
+        self.shared.socket.send(packet, to).await
     }
 
     /// Provision an explicitly assigned, nonzero local TEID. `qfi=None` selects
@@ -250,35 +197,9 @@ impl Endpoint {
         remote: RemoteTunnel,
         qfi: Option<u8>,
     ) -> io::Result<()> {
-        if local_teid == 0 || qfi.is_some_and(|qfi| qfi > 63) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "invalid local TEID or QFI",
-            ));
-        }
-        let key = (ran_id, session_id);
-        let mut routes = lock(&self.shared.routes);
-        if routes
-            .by_teid
-            .get(&local_teid)
-            .is_some_and(|owner| *owner != key)
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "local TEID belongs to another session",
-            ));
-        }
-        routes.remove(key);
-        routes.by_session.insert(
-            key,
-            Route {
-                local_teid,
-                remote,
-                qfi,
-            },
-        );
-        routes.by_teid.insert(local_teid, key);
-        Ok(())
+        self.shared
+            .routes
+            .install_with_teid((ran_id, session_id), local_teid, remote, qfi)
     }
 
     /// Set up the tunnel of RAN UE `ran_id` and PDU session `session_id`
@@ -309,58 +230,40 @@ impl Endpoint {
         remote: RemoteTunnel,
         qfi: Option<u8>,
     ) -> u32 {
-        let mut routes = lock(&self.shared.routes);
-        if let Some(route) = routes.by_session.get_mut(&(ran_id, session_id)) {
-            route.remote = remote;
-            route.qfi = qfi;
-            return route.local_teid;
-        }
-        let local_teid = routes.allocate_teid();
-        routes.by_session.insert(
-            (ran_id, session_id),
-            Route {
-                local_teid,
-                remote,
-                qfi,
-            },
-        );
-        routes.by_teid.insert(local_teid, (ran_id, session_id));
-        local_teid
+        self.shared
+            .routes
+            .install((ran_id, session_id), remote, qfi)
     }
 
     /// The local TEID of a tunnel.
     pub fn local_teid(&self, ran_id: u32, session_id: u8) -> Option<u32> {
-        lock(&self.shared.routes)
-            .by_session
-            .get(&(ran_id, session_id))
+        self.shared
+            .routes
+            .route((ran_id, session_id))
             .map(|route| route.local_teid)
     }
 
     /// Remove a tunnel. Its G-PDUs then get an Error Indication.
     pub fn remove(&self, ran_id: u32, session_id: u8) {
-        lock(&self.shared.routes).remove((ran_id, session_id));
+        self.shared.routes.remove((ran_id, session_id));
     }
 
     /// Remove every tunnel of RAN UE `ran_id`.
     pub fn remove_ran(&self, ran_id: u32) {
-        let mut routes = lock(&self.shared.routes);
-        let keys: Vec<_> = routes
-            .by_session
-            .keys()
-            .filter(|(ran, _)| *ran == ran_id)
-            .copied()
-            .collect();
-        for key in keys {
-            routes.remove(key);
-        }
+        self.shared.routes.remove_ran(ran_id);
     }
 
-    /// Send `payload`, an IP packet, as an uplink G-PDU in a tunnel.
-    pub async fn send(&self, ran_id: u32, session_id: u8, payload: Vec<u8>) -> io::Result<()> {
-        let route = lock(&self.shared.routes)
-            .by_session
-            .get(&(ran_id, session_id))
-            .copied()
+    /// Send an owned or borrowed IP packet as an uplink G-PDU in a tunnel.
+    pub async fn send<P: AsRef<[u8]>>(
+        &self,
+        ran_id: u32,
+        session_id: u8,
+        payload: P,
+    ) -> io::Result<()> {
+        let route = self
+            .shared
+            .routes
+            .route((ran_id, session_id))
             .ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::NotFound,
@@ -379,36 +282,20 @@ impl fmt::Debug for Endpoint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Endpoint")
             .field("local_addr", &self.local_addr().ok())
-            .field("tunnels", &lock(&self.shared.routes).by_session.len())
+            .field("tunnels", &self.shared.routes.len())
             .finish()
     }
 }
 
 async fn receive(
-    socket: Arc<UdpSocket>,
-    routes: Arc<Mutex<Routes>>,
+    socket: Arc<DatagramSocket>,
+    routes: Arc<RouteTable>,
     tx: mpsc::Sender<ReceivedPacket>,
-    counters: Arc<Counters>,
 ) -> io::Result<()> {
     let mut buffer = vec![0; 65536];
     loop {
-        let (size, from) = match socket.recv_from(&mut buffer).await {
-            Ok(received) => received,
-            Err(error) if path::transient(&error) => continue,
-            Err(error) => {
-                warn!("N3 endpoint stopped receiving: {error}");
-                return Err(error);
-            }
-        };
-        counters.received_datagrams.fetch_add(1, Ordering::Relaxed);
-        let packet = match Packet::decode(&buffer[..size]) {
-            Ok(packet) => packet,
-            Err(error) => {
-                counters.malformed_datagrams.fetch_add(1, Ordering::Relaxed);
-                debug!("N3 dropped a malformed message from {from}: {error}");
-                path::answer_length_error(&socket, &buffer[..size], from).await;
-                continue;
-            }
+        let Some((packet, from)) = socket.receive(&mut buffer).await? else {
+            continue;
         };
         trace!(
             "N3 received type {} TEID {} ({} bytes) from {from}",
@@ -416,24 +303,20 @@ async fn receive(
             packet.teid,
             packet.payload.len()
         );
-        if path::answer(&socket, &packet, from).await {
-            counters.path_messages.fetch_add(1, Ordering::Relaxed);
-            continue;
-        }
         let key = match packet.message_type {
             G_PDU | END_MARKER => {
-                let found = lock(&routes).by_teid.get(&packet.teid).copied();
+                let found = routes.session(packet.teid);
                 match found {
                     Some(key) => key,
                     None if packet.message_type == G_PDU => {
                         debug!("N3 G-PDU for unknown TEID {} from {from}", packet.teid);
-                        path::error_indication(&socket, packet.teid, from).await;
+                        socket.error_indication(packet.teid, from).await;
                         continue;
                     }
                     None => continue,
                 }
             }
-            ERROR_INDICATION => match error_indication_tunnel(&routes, &packet) {
+            ERROR_INDICATION => match routes.error_indication_session(&packet) {
                 Some(key) => key,
                 None => {
                     debug!("N3 Error Indication from {from} matches no tunnel");
@@ -446,60 +329,11 @@ async fn receive(
             }
         };
         let (ran_id, session_id) = key;
-        let received = ReceivedPacket {
+        socket.observe(&tx, || ReceivedPacket {
             ran_id,
             session_id,
-            packet,
-            from: path::canonical(from),
-        };
-        match tx.try_send(received) {
-            Err(TrySendError::Full(_)) => {
-                counters.queue_full_drops.fetch_add(1, Ordering::Relaxed);
-                debug!(
-                    "N3 receiver lagging: dropped a message of RAN UE {ran_id} session {session_id}"
-                );
-            }
-            Err(TrySendError::Closed(_)) => {
-                counters
-                    .receiver_closed_drops
-                    .fetch_add(1, Ordering::Relaxed);
-            }
-            Ok(()) => {}
-        }
-    }
-}
-
-/// The tunnel whose remote end an Error Indication names.
-fn error_indication_tunnel(routes: &Mutex<Routes>, packet: &Packet) -> Option<(u32, u8)> {
-    let elements = packet.information_elements().ok()?;
-    let teid = elements.iter().find_map(|element| match element {
-        InformationElement::TeidDataI(teid) => Some(*teid),
-        _ => None,
-    })?;
-    let peer = elements.iter().find_map(|element| match element {
-        InformationElement::GtpUPeerAddress(address) => Some(*address),
-        _ => None,
-    })?;
-    lock(routes)
-        .by_session
-        .iter()
-        .find(|(_, route)| route.remote.teid == teid && same_ip(route.remote.address.ip(), peer))
-        .map(|(key, _)| *key)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn teid_allocation_skips_zero_and_live_teids() {
-        let mut routes = Routes {
-            last_teid: u32::MAX - 2,
-            ..Routes::default()
-        };
-        routes.by_teid.insert(u32::MAX, (1, 1));
-        routes.by_teid.insert(1, (1, 2));
-        assert_eq!(routes.allocate_teid(), u32::MAX - 1);
-        assert_eq!(routes.allocate_teid(), 2);
+            packet: packet.into_owned(),
+            from,
+        });
     }
 }

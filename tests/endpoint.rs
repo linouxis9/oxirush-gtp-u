@@ -20,7 +20,7 @@ const QUIET: Duration = Duration::from_millis(100);
 #[tokio::test]
 async fn custom_packet_send_preserves_fields_and_source_socket() {
     let (endpoint, _, peer, _) = setup().await;
-    let mut packet = Packet::g_pdu(44, vec![0x45]);
+    let mut packet = Packet::g_pdu(44, &[0x45][..]);
     packet.sequence = Some(123);
     packet.extension_headers.push(ExtensionHeader::UdpPort(42));
     endpoint
@@ -33,7 +33,10 @@ async fn custom_packet_send_preserves_fields_and_source_socket() {
         .unwrap()
         .unwrap();
     assert_eq!(from, endpoint.local_addr().unwrap());
-    assert_eq!(Packet::decode(&buffer[..size]).unwrap(), packet);
+    assert_eq!(
+        Packet::decode(&buffer[..size]).unwrap(),
+        packet.into_owned()
+    );
 }
 
 #[tokio::test]
@@ -159,7 +162,7 @@ async fn delivered(received: &mut Receiver<ReceivedPacket>) -> ReceivedPacket {
 #[tokio::test]
 async fn carries_g_pdus_both_ways() {
     let (endpoint, mut received, peer, local_teid) = setup().await;
-    endpoint.send(7, 1, vec![0x45, 0]).await.unwrap();
+    endpoint.send(7, 1, &[0x45, 0][..]).await.unwrap();
     let uplink = reply(&peer).await;
     assert_eq!(
         (uplink.teid, uplink.payload.as_slice()),

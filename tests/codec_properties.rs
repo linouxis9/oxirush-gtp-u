@@ -212,6 +212,11 @@ proptest! {
         packet.encode_into(&mut buffer).unwrap();
         prop_assert_eq!(&buffer[1..], &bytes);
         prop_assert_eq!(packet.encoded_len().unwrap(), bytes.len());
+        let borrowed = Packet::decode_borrowed(&bytes).unwrap();
+        prop_assert_eq!(borrowed.encode().unwrap(), bytes.clone());
+        prop_assert_eq!(borrowed.encoded_len().unwrap(), bytes.len());
+        prop_assert_eq!(borrowed.payload.as_ptr(), bytes[bytes.len() - borrowed.payload.len()..].as_ptr());
+        prop_assert_eq!(borrowed.into_owned(), packet.clone());
         prop_assert_eq!(Packet::decode(&bytes).unwrap(), packet);
     }
 
@@ -227,7 +232,10 @@ proptest! {
         plausible_message(),
         vec(any::<u8>(), 0..64),
     ]) {
-        if let Ok(packet) = Packet::decode(&bytes) {
+        let owned = Packet::decode(&bytes);
+        let borrowed = Packet::decode_borrowed(&bytes).map(|packet| packet.into_owned());
+        prop_assert_eq!(&borrowed, &owned);
+        if let Ok(packet) = owned {
             let encoded = packet.encode().unwrap();
             prop_assert!(encoded.len() <= bytes.len());
             prop_assert_eq!(Packet::decode(&encoded).unwrap(), packet);

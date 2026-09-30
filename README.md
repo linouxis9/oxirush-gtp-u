@@ -105,6 +105,23 @@ fn main() -> Result<(), oxirush_gtp_u::Error> {
 `encode_into` appends to a reusable `Vec<u8>` and leaves it unchanged on
 validation error; clear the buffer first to replace its previous contents.
 
+`Packet<P>` accepts any payload implementing `AsRef<[u8]>`, with `Vec<u8>`
+as the default. `Packet::decode_borrowed` returns a `Packet<&[u8]>` whose
+payload refers to the input datagram; extension headers are still owned.
+Call `into_owned` when the packet must outlive that datagram.
+
+```rust
+use oxirush_gtp_u::Packet;
+
+fn main() -> Result<(), oxirush_gtp_u::Error> {
+    let packet = Packet::uplink(0x1234_5678, 9, b"an IP packet".as_slice());
+    let bytes = packet.encode()?;
+    let borrowed = Packet::decode_borrowed(&bytes)?;
+    assert_eq!(borrowed.encode()?, bytes);
+    Ok(())
+}
+```
+
 ### Tunnels on an endpoint
 
 `Endpoint::bind` opens the socket and returns a receiver for the tunnels'
@@ -117,6 +134,8 @@ has a complete example with two endpoints.
 `install_with_teid` accepts a local TEID assigned by another control-plane
 component. `send_to` sends a custom `Packet` from the endpoint's bound socket,
 including its sequence number and extension headers.
+`send`, `send_to` and `UpfSimulator::send_downlink` accept borrowed payloads
+as well as owned buffers.
 
 Both `Endpoint` and `UpfSimulator` expose receive/drop counters through `stats`,
 worker health through `is_running`, and an async `shutdown` that stops background
@@ -183,17 +202,29 @@ without running destructors: on SIGKILL, `process::exit`, or a panic with
 
 ```text
 src/
-├── packet.rs       header and messages (TS 29.281 §5.1, §6, §7)
-├── extension.rs    extension headers and the PDU Session Container (TS 38.415)
-├── ie.rs           information elements (TS 29.281 §8)
-├── error.rs        decoding and encoding errors
-├── ipv4.rs, icmp.rs          inner IPv4 UDP and ICMP Echo packets
-├── endpoint.rs, path.rs      endpoint and path management (endpoint)
-├── stats.rs        receive/drop counters (endpoint)
-├── upf_sim.rs      test UPF (endpoint)
-├── tun.rs, netlink.rs        TUN devices and rtnetlink routing (tun)
+├── packet.rs              owned and borrowed messages (TS 29.281 §5.1, §6, §7)
+├── extension.rs           extension headers and PDU Session Container (TS 38.415)
+├── ie.rs, error.rs         information elements and codec errors
+├── ipv4.rs, icmp.rs        inner IPv4 UDP and ICMP Echo packets
+├── datagram.rs, path.rs    shared UDP receive and path management (endpoint)
+├── endpoint.rs            gNB endpoint and forwarding (endpoint)
+├── endpoint/routes.rs     tunnel identity and route indexes (endpoint)
+├── stats.rs               receive/drop counters (endpoint)
+├── upf_sim.rs             test UPF and forwarding (endpoint)
+├── upf_sim/sessions.rs     session generations and handover state (endpoint)
+├── tun.rs                 public TUN API (tun)
+├── tun/device.rs          TUN descriptor and packet I/O (tun)
+├── tun/routing.rs         routing ownership and cleanup (tun)
+├── tun/error.rs           contextual I/O errors (tun)
+├── netlink.rs             rtnetlink operations (tun)
 └── bin/oxirush-upf-sim.rs
 ```
+
+`Endpoint` and `UpfSimulator` use the same datagram receive path. It handles malformed
+packets and path replies before tunnel dispatch, and copies a payload only
+after reserving space in the application receiver. Session changes remain
+atomic with the nonblocking send that uses them. TUN routing cleanup runs
+before its device descriptor is released.
 
 ## Tests
 
