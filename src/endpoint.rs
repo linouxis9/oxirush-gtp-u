@@ -4,14 +4,17 @@ use std::collections::HashMap;
 use std::fmt;
 use std::io;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc::{self, error::TrySendError};
-use tokio::task::AbortHandle;
+use tokio::task::{AbortHandle, JoinHandle};
 use tracing::{debug, trace, warn};
 
+use crate::ReceiveStats;
 use crate::path::{self, lock, same_ip};
+use crate::stats::Counters;
 use crate::{END_MARKER, ERROR_INDICATION, G_PDU, InformationElement, Packet};
 
 /// Messages the receiver of [`Endpoint::bind`] can lag behind by before
@@ -91,6 +94,9 @@ struct Shared {
     routes: Arc<Mutex<Routes>>,
     ipv6: bool,
     worker: AbortHandle,
+    completion: tokio::sync::Mutex<Option<JoinHandle<io::Result<()>>>>,
+    stopped: AtomicBool,
+    counters: Arc<Counters>,
 }
 
 impl Drop for Shared {
@@ -157,12 +163,22 @@ impl Endpoint {
         let ipv6 = socket.local_addr()?.is_ipv6();
         let routes = Arc::new(Mutex::new(Routes::default()));
         let (tx, rx) = mpsc::channel(QUEUE);
-        let worker = tokio::spawn(receive(socket.clone(), routes.clone(), tx)).abort_handle();
+        let counters = Arc::new(Counters::default());
+        let completion = tokio::spawn(receive(
+            socket.clone(),
+            routes.clone(),
+            tx,
+            counters.clone(),
+        ));
+        let worker = completion.abort_handle();
         let shared = Shared {
             socket,
             routes,
             ipv6,
             worker,
+            completion: tokio::sync::Mutex::new(Some(completion)),
+            stopped: AtomicBool::new(false),
+            counters,
         };
         Ok((
             Self {
@@ -175,6 +191,94 @@ impl Endpoint {
     /// The socket's local address.
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         self.shared.socket.local_addr()
+    }
+
+    /// Receive counters, including overload drops. Clones share the counters.
+    pub fn stats(&self) -> ReceiveStats {
+        self.shared.counters.snapshot()
+    }
+
+    /// Whether the background receiver is still running and has not been shut down.
+    pub fn is_running(&self) -> bool {
+        !self.shared.stopped.load(Ordering::Relaxed) && !self.shared.worker.is_finished()
+    }
+
+    /// Stop automatic replies and delivery for all clones and await the receiver.
+    /// Repeated calls are safe; cancelling this future retains its completion handle.
+    /// The UDP port remains bound until the final clone is dropped. Provisioning
+    /// methods may still update the registry, but sending then returns `BrokenPipe`.
+    pub async fn shutdown(&self) -> io::Result<()> {
+        self.shared.stopped.store(true, Ordering::Relaxed);
+        self.shared.worker.abort();
+        let mut completion = self.shared.completion.lock().await;
+        let result = match completion.as_mut() {
+            Some(worker) => match worker.await {
+                Ok(result) => result,
+                Err(error) if error.is_cancelled() => Ok(()),
+                Err(error) => Err(io::Error::other(error)),
+            },
+            None => Ok(()),
+        };
+        completion.take();
+        result
+    }
+
+    /// Send a custom message from this endpoint's bound socket. This preserves
+    /// its sequence number and extension headers and does not require a route.
+    pub async fn send_to(&self, packet: &Packet, to: SocketAddr) -> io::Result<()> {
+        if !self.is_running() {
+            return Err(io::ErrorKind::BrokenPipe.into());
+        }
+        let bytes = packet
+            .encode()
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        self.shared
+            .socket
+            .send_to(&bytes, path::destination(self.shared.ipv6, to))
+            .await?;
+        Ok(())
+    }
+
+    /// Provision an explicitly assigned, nonzero local TEID. `qfi=None` selects
+    /// S1-U framing. A TEID owned by another session is rejected; validation
+    /// errors leave the existing route unchanged.
+    pub fn install_with_teid(
+        &self,
+        ran_id: u32,
+        session_id: u8,
+        local_teid: u32,
+        remote: RemoteTunnel,
+        qfi: Option<u8>,
+    ) -> io::Result<()> {
+        if local_teid == 0 || qfi.is_some_and(|qfi| qfi > 63) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid local TEID or QFI",
+            ));
+        }
+        let key = (ran_id, session_id);
+        let mut routes = lock(&self.shared.routes);
+        if routes
+            .by_teid
+            .get(&local_teid)
+            .is_some_and(|owner| *owner != key)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "local TEID belongs to another session",
+            ));
+        }
+        routes.remove(key);
+        routes.by_session.insert(
+            key,
+            Route {
+                local_teid,
+                remote,
+                qfi,
+            },
+        );
+        routes.by_teid.insert(local_teid, key);
+        Ok(())
     }
 
     /// Set up the tunnel of RAN UE `ran_id` and PDU session `session_id`
@@ -267,12 +371,7 @@ impl Endpoint {
             Some(qfi) => Packet::uplink(route.remote.teid, qfi, payload),
             None => Packet::g_pdu(route.remote.teid, payload),
         };
-        let bytes = packet
-            .encode()
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-        let to = path::destination(self.shared.ipv6, route.remote.address);
-        self.shared.socket.send_to(&bytes, to).await?;
-        Ok(())
+        self.send_to(&packet, route.remote.address).await
     }
 }
 
@@ -289,7 +388,8 @@ async fn receive(
     socket: Arc<UdpSocket>,
     routes: Arc<Mutex<Routes>>,
     tx: mpsc::Sender<ReceivedPacket>,
-) {
+    counters: Arc<Counters>,
+) -> io::Result<()> {
     let mut buffer = vec![0; 65536];
     loop {
         let (size, from) = match socket.recv_from(&mut buffer).await {
@@ -297,12 +397,14 @@ async fn receive(
             Err(error) if path::transient(&error) => continue,
             Err(error) => {
                 warn!("N3 endpoint stopped receiving: {error}");
-                return;
+                return Err(error);
             }
         };
+        counters.received_datagrams.fetch_add(1, Ordering::Relaxed);
         let packet = match Packet::decode(&buffer[..size]) {
             Ok(packet) => packet,
             Err(error) => {
+                counters.malformed_datagrams.fetch_add(1, Ordering::Relaxed);
                 debug!("N3 dropped a malformed message from {from}: {error}");
                 path::answer_length_error(&socket, &buffer[..size], from).await;
                 continue;
@@ -315,6 +417,7 @@ async fn receive(
             packet.payload.len()
         );
         if path::answer(&socket, &packet, from).await {
+            counters.path_messages.fetch_add(1, Ordering::Relaxed);
             continue;
         }
         let key = match packet.message_type {
@@ -349,10 +452,19 @@ async fn receive(
             packet,
             from: path::canonical(from),
         };
-        if let Err(TrySendError::Full(_)) = tx.try_send(received) {
-            debug!(
-                "N3 receiver lagging: dropped a message of RAN UE {ran_id} session {session_id}"
-            );
+        match tx.try_send(received) {
+            Err(TrySendError::Full(_)) => {
+                counters.queue_full_drops.fetch_add(1, Ordering::Relaxed);
+                debug!(
+                    "N3 receiver lagging: dropped a message of RAN UE {ran_id} session {session_id}"
+                );
+            }
+            Err(TrySendError::Closed(_)) => {
+                counters
+                    .receiver_closed_drops
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            Ok(()) => {}
         }
     }
 }

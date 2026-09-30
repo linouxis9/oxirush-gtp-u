@@ -230,6 +230,37 @@ impl Packet {
 
     /// Encode the message.
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
+        let mut out = Vec::new();
+        self.encode_into(&mut out)?;
+        Ok(out)
+    }
+
+    /// Validated wire length, including the mandatory header. No output is allocated.
+    pub fn encoded_len(&self) -> Result<usize, Error> {
+        let optional = self.sequence.is_some()
+            || self.n_pdu_number.is_some()
+            || !self.extension_headers.is_empty();
+        let mut length = self.payload.len();
+        if optional {
+            length = length
+                .checked_add(OPTIONAL_LEN)
+                .ok_or(Error::OutOfRange("GTP-U length"))?;
+        }
+        for header in &self.extension_headers {
+            length = length
+                .checked_add(header.encoded_len()?)
+                .ok_or(Error::OutOfRange("GTP-U length"))?;
+        }
+        u16::try_from(length).map_err(|_| Error::OutOfRange("GTP-U length"))?;
+        Ok(MANDATORY_LEN + length)
+    }
+
+    /// Append the message to a reusable buffer. On validation error its contents
+    /// and capacity remain unchanged. Call `clear()` first to replace old output.
+    pub fn encode_into(&self, out: &mut Vec<u8>) -> Result<(), Error> {
+        let length = self.encoded_len()?;
+        out.reserve(length);
+        let start = out.len();
         let mut flags = VERSION_1_GTP;
         if !self.extension_headers.is_empty() {
             flags |= E;
@@ -240,7 +271,6 @@ impl Packet {
         if self.n_pdu_number.is_some() {
             flags |= PN;
         }
-        let mut out = Vec::with_capacity(MANDATORY_LEN + OPTIONAL_LEN + 8 + self.payload.len());
         out.extend_from_slice(&[flags, self.message_type, 0, 0]);
         out.extend_from_slice(&self.teid.to_be_bytes());
         if flags & (E | S | PN) != 0 {
@@ -257,13 +287,12 @@ impl Packet {
                 .extension_headers
                 .get(index + 1)
                 .map_or(0, ExtensionHeader::kind);
-            header.encode(next, &mut out)?;
+            header.encode(next, out)?;
         }
         out.extend_from_slice(&self.payload);
-        let length = u16::try_from(out.len() - MANDATORY_LEN)
-            .map_err(|_| Error::OutOfRange("GTP-U length"))?;
-        out[2..4].copy_from_slice(&length.to_be_bytes());
-        Ok(out)
+        let length = (length - MANDATORY_LEN) as u16;
+        out[start + 2..start + 4].copy_from_slice(&length.to_be_bytes());
+        Ok(())
     }
 }
 
@@ -291,7 +320,36 @@ mod tests {
     fn round_trip(packet: &Packet, wire: &str) {
         let wire = hex(wire);
         assert_eq!(packet.encode().unwrap(), wire, "encoding of {packet:?}");
+        assert_eq!(packet.encoded_len().unwrap(), wire.len());
+        let mut appended = vec![0xaa, 0xbb];
+        packet.encode_into(&mut appended).unwrap();
+        assert_eq!(&appended[2..], wire);
+        assert_eq!(&appended[..2], &[0xaa, 0xbb]);
         assert_eq!(&Packet::decode(&wire).unwrap(), packet);
+    }
+
+    #[test]
+    fn invalid_encoding_leaves_reusable_buffer_unchanged() {
+        let mut invalid_extension = Packet::g_pdu(1, vec![1]);
+        invalid_extension
+            .extension_headers
+            .push(ExtensionHeader::Other {
+                kind: 0x20,
+                content: vec![0; 1022],
+            });
+        for packet in [
+            Packet::g_pdu(1, vec![0; 65536]),
+            invalid_extension,
+            Packet::uplink(1, 64, vec![]),
+        ] {
+            let mut buffer = Vec::with_capacity(32);
+            buffer.extend_from_slice(&[0xaa, 0xbb]);
+            let capacity = buffer.capacity();
+            assert!(packet.encoded_len().is_err());
+            assert!(packet.encode_into(&mut buffer).is_err());
+            assert_eq!(buffer, [0xaa, 0xbb]);
+            assert_eq!(buffer.capacity(), capacity);
+        }
     }
 
     #[test]

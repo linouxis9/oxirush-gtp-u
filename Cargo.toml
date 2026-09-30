@@ -29,7 +29,7 @@ serde = ["dep:serde"]
 
 [dependencies]
 serde = { version = "1.0.110", features = ["derive"], optional = true }
-tokio = { version = "1.38", features = ["net", "rt", "sync"], optional = true }
+tokio = { version = "1.38", features = ["macros", "net", "rt", "sync", "signal"], optional = true }
 tracing = { version = "0.1.40", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]

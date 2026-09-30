@@ -17,6 +17,8 @@ mod endpoint;
 mod netlink;
 #[cfg(feature = "endpoint")]
 mod path;
+#[cfg(feature = "endpoint")]
+mod stats;
 #[cfg(all(target_os = "linux", feature = "tun"))]
 #[allow(unsafe_code)]
 pub mod tun;
@@ -39,6 +41,8 @@ pub use packet::{
     ECHO_REQUEST, ECHO_RESPONSE, END_MARKER, ERROR_INDICATION, G_PDU, Packet,
     SUPPORTED_EXTENSION_HEADERS_NOTIFICATION, TUNNEL_STATUS,
 };
+#[cfg(feature = "endpoint")]
+pub use stats::ReceiveStats;
 
 /// The UDP port of GTP-U.
 pub const PORT: u16 = 2152;

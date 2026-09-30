@@ -101,6 +101,10 @@ fn main() -> Result<(), oxirush_gtp_u::Error> {
 }
 ```
 
+`Packet::encoded_len` validates the wire length without allocating output.
+`encode_into` appends to a reusable `Vec<u8>` and leaves it unchanged on
+validation error; clear the buffer first to replace its previous contents.
+
 ### Tunnels on an endpoint
 
 `Endpoint::bind` opens the socket and returns a receiver for the tunnels'
@@ -109,6 +113,17 @@ F-TEID and returns the local TEID to give the peer; `send` sends a G-PDU on
 it. `install_s1u` adds an eNB's S1-U tunnel instead, whose G-PDUs carry no
 PDU Session Container. The [`Endpoint` documentation](https://docs.rs/oxirush-gtp-u/latest/oxirush_gtp_u/struct.Endpoint.html)
 has a complete example with two endpoints.
+
+`install_with_teid` accepts a local TEID assigned by another control-plane
+component. `send_to` sends a custom `Packet` from the endpoint's bound socket,
+including its sequence number and extension headers.
+
+Both `Endpoint` and `UpfSimulator` expose receive/drop counters through `stats`,
+worker health through `is_running`, and an async `shutdown` that stops background
+processing for all clones and waits for their receiver. The UDP port stays bound
+until the final clone is dropped. Slow or closed application receivers do not stop
+path replies. UPF shutdown also waits for TUN forwarding tasks and reports cleanup
+failures; retry shutdown after resolving the error to finish releasing resources.
 
 Bind port 2152 to receive the peer's Error Indications, which TS 29.281
 §4.4.2.4 sends there whatever port the G-PDUs came from, and bind a
@@ -129,6 +144,12 @@ TEID, the downlink TEID and the QFI; the gNB uses the same TEIDs the other
 way round. Tests that change sessions as they run, or move a session's
 downlink with `switch_downlink`, use the Rust API instead.
 
+A failed or cancelled `switch_downlink` can leave the new route installed.
+The old path's End Marker remains pending and a retry to the same target
+attempts it again. `session` and `pending_end_marker` expose those outcomes;
+UDP send success does not guarantee delivery. The binary handles Ctrl-C and
+SIGTERM by awaiting shutdown and closing attached TUNs.
+
 ### TUN devices
 
 `TunPort` needs `CAP_NET_ADMIN` and sets up one of three routings:
@@ -138,6 +159,11 @@ downlink with `switch_downlink`, use the Rust API instead.
 - `Routing::UeVrf` puts the TUN in a new VRF with its own table.
 - `Routing::Upf` routes one UE address to the TUN in the main table, so
   that Linux handles N6, including forwarding when the host enables it.
+
+`try_close` reports cleanup failures and retains failed resources for retry.
+Cleanup uses the network namespace where the port was created, even when
+another thread or namespace closes it. `close` and `Drop` perform best-effort
+cleanup using the same operation.
 
 `UpfSimulator::attach_tun` connects such a TUN to a session:
 
@@ -150,8 +176,8 @@ sudo ./target/debug/oxirush-upf-sim \
 To reach another network over N6, enable IPv4 forwarding and add the routes
 or NAT that network needs. The TUN device always goes away with the
 process, but the policy rule or VRF stays behind when the process ends
-without running destructors: on SIGKILL, an unhandled SIGTERM or Ctrl-C,
-`process::exit`, or a panic with `panic = "abort"`.
+without running destructors: on SIGKILL, `process::exit`, or a panic with
+`panic = "abort"`.
 
 ## Architecture
 
@@ -163,6 +189,7 @@ src/
 ├── error.rs        decoding and encoding errors
 ├── ipv4.rs, icmp.rs          inner IPv4 UDP and ICMP Echo packets
 ├── endpoint.rs, path.rs      endpoint and path management (endpoint)
+├── stats.rs        receive/drop counters (endpoint)
 ├── upf_sim.rs      test UPF (endpoint)
 ├── tun.rs, netlink.rs        TUN devices and rtnetlink routing (tun)
 └── bin/oxirush-upf-sim.rs
@@ -176,6 +203,8 @@ cargo test --all-features
 # runner variable names the target, here x86_64 Linux.
 CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER=sudo \
   cargo test --features tun --test tun_linux -- --ignored
+CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER=sudo \
+  cargo test --features tun --test tun_cleanup -- --ignored
 # Compare the wire format with Wireshark's dissector (needs tshark).
 cargo test --test wireshark -- --ignored
 ```

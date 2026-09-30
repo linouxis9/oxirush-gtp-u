@@ -5,17 +5,23 @@ use std::collections::HashMap;
 use std::fmt;
 use std::io;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tokio::net::UdpSocket;
-use tokio::sync::mpsc;
-use tokio::task::AbortHandle;
+use tokio::sync::mpsc::error::TrySendError;
+use tokio::sync::{Mutex as AsyncMutex, mpsc};
+use tokio::task::{AbortHandle, JoinHandle};
 use tracing::{debug, warn};
 
 use crate::path::{self, lock};
+use crate::stats::Counters;
 #[cfg(all(target_os = "linux", feature = "tun"))]
 use crate::tun::{TunConfig, TunPort};
-use crate::{ERROR_INDICATION, G_PDU, Packet, ipv4_icmp_echo_reply, ipv4_udp, parse_ipv4_udp};
+use crate::{
+    ERROR_INDICATION, G_PDU, Packet, ReceiveStats, RemoteTunnel, ipv4_icmp_echo_reply, ipv4_udp,
+    parse_ipv4_udp,
+};
 
 /// The tunnels of one PDU session.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -79,41 +85,68 @@ struct Shared {
     state: Arc<State>,
     ipv6: bool,
     worker: AbortHandle,
+    shutdown: AsyncMutex<Shutdown>,
+}
+
+struct Shutdown {
+    receiver: Option<JoinHandle<io::Result<()>>>,
+    #[cfg(all(target_os = "linux", feature = "tun"))]
+    attachments: Vec<TunAttachment>,
 }
 
 /// What the tasks share with the handles.
 #[derive(Default)]
 struct State {
     sessions: Mutex<HashMap<u32, SessionEntry>>,
-    #[cfg(all(target_os = "linux", feature = "tun"))]
-    tuns: Mutex<HashMap<u32, TunAttachment>>,
+    closed: AtomicBool,
+    counters: Arc<Counters>,
 }
 
 struct SessionEntry {
     session: Session,
     /// Identifies this provisioning, even if the same TEID is reused.
+    incarnation: Arc<Incarnation>,
+    /// At most one old path awaits its End Marker send attempt.
+    pending_marker: Option<Session>,
     #[cfg(all(target_os = "linux", feature = "tun"))]
-    incarnation: Arc<()>,
+    attachment: Option<TunAttachment>,
+}
+
+#[derive(Default)]
+struct Incarnation {
+    /// Orders downlink sends and path switches for one provisioning.
+    downlink: AsyncMutex<()>,
+}
+
+struct UplinkTarget {
+    incarnation: Arc<Incarnation>,
+    #[cfg(all(target_os = "linux", feature = "tun"))]
+    port: Option<Arc<TunPort>>,
 }
 
 impl Drop for Shared {
     fn drop(&mut self) {
+        self.state.closed.store(true, Ordering::Relaxed);
         self.worker.abort();
-        #[cfg(all(target_os = "linux", feature = "tun"))]
-        drop(std::mem::take(&mut *lock(&self.state.tuns)));
+        // TUN tasks hold the state, so drain their owning attachments to
+        // break the cycle. Their cleanup must run outside the registry lock.
+        let sessions = std::mem::take(&mut *lock(&self.state.sessions));
+        drop(sessions);
     }
 }
 
 #[cfg(all(target_os = "linux", feature = "tun"))]
 struct TunAttachment {
     port: Arc<TunPort>,
-    task: AbortHandle,
+    task: Option<JoinHandle<()>>,
 }
 
 #[cfg(all(target_os = "linux", feature = "tun"))]
 impl Drop for TunAttachment {
     fn drop(&mut self) {
-        self.task.abort();
+        if let Some(task) = &self.task {
+            task.abort();
+        }
         self.port.close();
     }
 }
@@ -136,12 +169,18 @@ impl UpfSimulator {
         let ipv6 = socket.local_addr()?.is_ipv6();
         let state = Arc::new(State::default());
         let (tx, rx) = mpsc::channel(256);
-        let worker = tokio::spawn(receive(socket.clone(), state.clone(), ipv6, tx)).abort_handle();
+        let task = tokio::spawn(receive(socket.clone(), state.clone(), ipv6, tx));
+        let worker = task.abort_handle();
         let shared = Shared {
             socket,
             state,
             ipv6,
             worker,
+            shutdown: AsyncMutex::new(Shutdown {
+                receiver: Some(task),
+                #[cfg(all(target_os = "linux", feature = "tun"))]
+                attachments: Vec::new(),
+            }),
         };
         Ok((
             Self {
@@ -156,68 +195,222 @@ impl UpfSimulator {
         self.shared.socket.local_addr()
     }
 
+    /// Whether the receive task is running and shutdown has not been requested.
+    pub fn is_running(&self) -> bool {
+        !self.shared.state.closed.load(Ordering::Relaxed) && !self.shared.worker.is_finished()
+    }
+
+    /// A snapshot of receive and observer queue counters shared by all clones.
+    pub fn stats(&self) -> ReceiveStats {
+        self.shared.state.counters.snapshot()
+    }
+
+    /// Stop background processing, close the attached TUNs, and wait for the
+    /// receive and TUN forwarding tasks to finish. Cleanup failures are
+    /// returned and their TUNs remain owned so a later call can retry. All
+    /// clones observe shutdown. The UDP socket
+    /// stays bound until the last clone is dropped. Cancelling this call does
+    /// not prevent a later call from waiting for the task to finish.
+    pub async fn shutdown(&self) -> io::Result<()> {
+        self.shared.state.closed.store(true, Ordering::Relaxed);
+        self.shared.worker.abort();
+        let mut shutdown = self.shared.shutdown.lock().await;
+        let sessions = std::mem::take(&mut *lock(&self.shared.state.sessions));
+        #[cfg(all(target_os = "linux", feature = "tun"))]
+        for entry in sessions.into_values() {
+            if let Some(attachment) = entry.attachment {
+                if let Some(task) = &attachment.task {
+                    task.abort();
+                }
+                shutdown.attachments.push(attachment);
+            }
+        }
+        #[cfg(not(all(target_os = "linux", feature = "tun")))]
+        drop(sessions);
+        let result = match shutdown.receiver.as_mut() {
+            Some(task) => match task.await {
+                Ok(result) => result,
+                Err(error) if error.is_cancelled() => Ok(()),
+                Err(error) => Err(io::Error::other(error)),
+            },
+            None => Ok(()),
+        };
+        shutdown.receiver.take();
+        #[cfg(all(target_os = "linux", feature = "tun"))]
+        {
+            let mut result = result;
+            let mut index = 0;
+            while index < shutdown.attachments.len() {
+                let attachment = &mut shutdown.attachments[index];
+                if let Some(task) = attachment.task.as_mut() {
+                    if let Err(error) = task.await {
+                        if !error.is_cancelled() && result.is_ok() {
+                            result = Err(io::Error::other(error));
+                        }
+                    }
+                    attachment.task.take();
+                }
+                match attachment.port.try_close() {
+                    Ok(()) => {
+                        shutdown.attachments.swap_remove(index);
+                    }
+                    Err(error) => {
+                        if result.is_ok() {
+                            result = Err(error);
+                        }
+                        index += 1;
+                    }
+                }
+            }
+            result
+        }
+        #[cfg(not(all(target_os = "linux", feature = "tun")))]
+        {
+            result
+        }
+    }
+
+    fn ensure_running(&self) -> io::Result<()> {
+        if self.is_running() {
+            Ok(())
+        } else {
+            Err(stopped())
+        }
+    }
+
     /// Provision a session, replacing one with the same uplink TEID and
     /// closing its previous TUN. Use [`switch_downlink`](Self::switch_downlink)
     /// for a handover that retains the session's N6 attachment.
+    ///
+    /// # Panics
+    ///
+    /// If `session.qfi` is above 63, including when the public field was
+    /// changed after constructing the session.
     pub fn set_session(&self, session: Session) {
-        let mut sessions = lock(&self.shared.state.sessions);
-        sessions.insert(
+        assert!(session.qfi <= 63, "QFI {} is outside 0..=63", session.qfi);
+        let old = lock(&self.shared.state.sessions).insert(
             session.uplink_teid,
             SessionEntry {
                 session,
+                incarnation: Arc::new(Incarnation::default()),
+                pending_marker: None,
                 #[cfg(all(target_os = "linux", feature = "tun"))]
-                incarnation: Arc::new(()),
+                attachment: None,
             },
         );
-        #[cfg(all(target_os = "linux", feature = "tun"))]
-        let attachment = lock(&self.shared.state.tuns).remove(&session.uplink_teid);
-        drop(sessions);
-        #[cfg(all(target_os = "linux", feature = "tun"))]
-        drop(attachment);
+        drop(old);
+    }
+
+    /// A snapshot of the current session, including the committed downlink path.
+    /// Separate calls to this method and [`pending_end_marker`](Self::pending_end_marker)
+    /// can observe different concurrent updates.
+    pub fn session(&self, uplink_teid: u32) -> Option<Session> {
+        lock(&self.shared.state.sessions)
+            .get(&uplink_teid)
+            .map(|entry| entry.session)
+    }
+
+    /// The old downlink path whose End Marker is pending after a failed or
+    /// cancelled switch. This snapshot does not guarantee delivery or make
+    /// separate status calls atomic with concurrent changes.
+    pub fn pending_end_marker(&self, uplink_teid: u32) -> Option<RemoteTunnel> {
+        lock(&self.shared.state.sessions)
+            .get(&uplink_teid)
+            .and_then(|entry| entry.pending_marker)
+            .map(|session| RemoteTunnel {
+                address: session.gnb_address,
+                teid: session.downlink_teid,
+            })
     }
 
     /// Move a session's downlink to `downlink_teid` at `gnb_address`, as
     /// after a handover, and send an End Marker on the old path (TS 23.502
     /// §4.9.1.2.2).
+    ///
+    /// The route changes before the marker is sent. A send error or
+    /// cancellation leaves the new route installed and its old-path marker
+    /// pending. Retrying, even with the same target, attempts that marker
+    /// again. A further path change first completes the pending send attempt,
+    /// keeping at most one pending marker per session. UDP send success does
+    /// not guarantee delivery. Replacing or removing the session discards its
+    /// pending marker. Downlink sends and switches are ordered per session.
     pub async fn switch_downlink(
         &self,
         uplink_teid: u32,
         gnb_address: SocketAddr,
         downlink_teid: u32,
     ) -> io::Result<()> {
-        let old = {
+        self.ensure_running()?;
+        let incarnation = incarnation(&self.shared.state, uplink_teid)?;
+        let _downlink = incarnation.downlink.lock().await;
+        self.ensure_running()?;
+        self.send_pending_marker(uplink_teid, &incarnation).await?;
+        let changed = {
             let mut sessions = lock(&self.shared.state.sessions);
-            let session = &mut sessions
-                .get_mut(&uplink_teid)
-                .ok_or_else(|| unknown_session(uplink_teid))?
-                .session;
-            let old = *session;
-            session.gnb_address = gnb_address;
-            session.downlink_teid = downlink_teid;
-            old
+            let entry = current_entry(&mut sessions, uplink_teid, &incarnation)?;
+            let old_path = (
+                path::canonical(entry.session.gnb_address),
+                entry.session.downlink_teid,
+            );
+            if old_path == (path::canonical(gnb_address), downlink_teid) {
+                false
+            } else {
+                entry.pending_marker = Some(entry.session);
+                entry.session.gnb_address = gnb_address;
+                entry.session.downlink_teid = downlink_teid;
+                true
+            }
         };
-        let old_path = (path::canonical(old.gnb_address), old.downlink_teid);
-        if old_path == (path::canonical(gnb_address), downlink_teid) {
-            return Ok(());
+        if changed {
+            self.send_pending_marker(uplink_teid, &incarnation).await?;
         }
-        let marker = Packet::end_marker(old.downlink_teid)
-            .encode()
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-        let to = path::destination(self.shared.ipv6, old.gnb_address);
-        self.shared.socket.send_to(&marker, to).await?;
+        Ok(())
+    }
+
+    async fn send_pending_marker(
+        &self,
+        uplink_teid: u32,
+        incarnation: &Arc<Incarnation>,
+    ) -> io::Result<()> {
+        self.ensure_running()?;
+        let pending = {
+            let mut sessions = lock(&self.shared.state.sessions);
+            current_entry(&mut sessions, uplink_teid, incarnation)?.pending_marker
+        };
+        if let Some(old) = pending {
+            let marker = Packet::end_marker(old.downlink_teid)
+                .encode()
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+            let to = path::destination(self.shared.ipv6, old.gnb_address);
+            loop {
+                self.shared.socket.writable().await?;
+                let sent = {
+                    let mut sessions = lock(&self.shared.state.sessions);
+                    self.ensure_running()?;
+                    let entry = current_entry(&mut sessions, uplink_teid, incarnation)?;
+                    // Recheck after readiness, then commit the nonblocking
+                    // syscall and marker state together before replacement.
+                    let sent = self.shared.socket.try_send_to(&marker, to);
+                    if sent.is_ok() {
+                        entry.pending_marker = None;
+                    }
+                    sent
+                };
+                match sent {
+                    Ok(_) => break,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+                    Err(error) => return Err(error),
+                }
+            }
+        }
         Ok(())
     }
 
     /// Remove a session and close its TUN.
     pub fn remove_session(&self, uplink_teid: u32) {
-        let mut sessions = lock(&self.shared.state.sessions);
-        sessions.remove(&uplink_teid);
-        #[cfg(all(target_os = "linux", feature = "tun"))]
-        let attachment = lock(&self.shared.state.tuns).remove(&uplink_teid);
-        drop(sessions);
+        let old = lock(&self.shared.state.sessions).remove(&uplink_teid);
         // Close after the registry locks are released.
-        #[cfg(all(target_os = "linux", feature = "tun"))]
-        drop(attachment);
+        drop(old);
     }
 
     /// Give a session a Linux TUN as N6: its uplink T-PDUs go to Linux, and
@@ -228,19 +421,23 @@ impl UpfSimulator {
     /// Outside a Tokio runtime.
     #[cfg(all(target_os = "linux", feature = "tun"))]
     pub fn attach_tun(&self, uplink_teid: u32, config: TunConfig) -> io::Result<()> {
-        let incarnation = lock(&self.shared.state.sessions)
-            .get(&uplink_teid)
-            .map(|entry| entry.incarnation.clone())
-            .ok_or_else(|| unknown_session(uplink_teid))?;
+        self.ensure_running()?;
         let already_attached = || {
             io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 format!("a TUN is already attached to uplink TEID {uplink_teid}"),
             )
         };
-        if lock(&self.shared.state.tuns).contains_key(&uplink_teid) {
-            return Err(already_attached());
-        }
+        let incarnation = {
+            let sessions = lock(&self.shared.state.sessions);
+            let entry = sessions
+                .get(&uplink_teid)
+                .ok_or_else(|| unknown_session(uplink_teid))?;
+            if entry.attachment.is_some() {
+                return Err(already_attached());
+            }
+            entry.incarnation.clone()
+        };
         let port = Arc::new(TunPort::create(config)?);
         let task = tokio::spawn(forward_tun_downlink(
             port.clone(),
@@ -249,44 +446,48 @@ impl UpfSimulator {
             self.shared.ipv6,
             uplink_teid,
             incarnation.clone(),
-        ))
-        .abort_handle();
-        let attachment = TunAttachment { port, task };
+        ));
+        let attachment = TunAttachment {
+            port,
+            task: Some(task),
+        };
         // Keep removal/replacement from interleaving the recheck and the
         // insertion. Removing a session then either prevents attachment
         // or removes the attachment that was just inserted.
-        let sessions = lock(&self.shared.state.sessions);
-        if !sessions
-            .get(&uplink_teid)
-            .is_some_and(|entry| Arc::ptr_eq(&entry.incarnation, &incarnation))
-        {
-            drop(sessions);
-            drop(attachment);
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!(
-                    "session with uplink TEID {uplink_teid} was removed or replaced during TUN creation"
-                ),
-            ));
-        }
-        let mut tuns = lock(&self.shared.state.tuns);
-        if tuns.contains_key(&uplink_teid) {
-            drop(tuns);
-            drop(sessions);
-            drop(attachment);
-            return Err(already_attached());
-        }
-        tuns.insert(uplink_teid, attachment);
-        Ok(())
+        let mut attachment = Some(attachment);
+        let result = {
+            let mut sessions = lock(&self.shared.state.sessions);
+            if self.shared.state.closed.load(Ordering::Relaxed) || self.shared.worker.is_finished()
+            {
+                Err(stopped())
+            } else {
+                match current_entry(&mut sessions, uplink_teid, &incarnation) {
+                    Err(error) => Err(error),
+                    Ok(entry) if entry.attachment.is_some() => Err(already_attached()),
+                    Ok(entry) => {
+                        entry.attachment = attachment.take();
+                        Ok(())
+                    }
+                }
+            }
+        };
+        drop(attachment);
+        result
     }
 
     /// Send `packet`, an IP packet, to a session's UE as a downlink G-PDU.
     pub async fn send_downlink(&self, uplink_teid: u32, packet: Vec<u8>) -> io::Result<()> {
-        let session = lock(&self.shared.state.sessions)
-            .get(&uplink_teid)
-            .map(|entry| entry.session)
-            .ok_or_else(|| unknown_session(uplink_teid))?;
-        send_downlink(&self.shared.socket, self.shared.ipv6, &session, packet).await
+        self.ensure_running()?;
+        let incarnation = incarnation(&self.shared.state, uplink_teid)?;
+        send_downlink(
+            &self.shared.socket,
+            &self.shared.state,
+            self.shared.ipv6,
+            uplink_teid,
+            &incarnation,
+            packet,
+        )
+        .await
     }
 }
 
@@ -306,19 +507,74 @@ fn unknown_session(uplink_teid: u32) -> io::Error {
     )
 }
 
+fn stopped() -> io::Error {
+    io::Error::new(io::ErrorKind::BrokenPipe, "UPF simulator has stopped")
+}
+
+fn incarnation(state: &State, uplink_teid: u32) -> io::Result<Arc<Incarnation>> {
+    lock(&state.sessions)
+        .get(&uplink_teid)
+        .map(|entry| entry.incarnation.clone())
+        .ok_or_else(|| unknown_session(uplink_teid))
+}
+
+fn current_entry<'a>(
+    sessions: &'a mut HashMap<u32, SessionEntry>,
+    uplink_teid: u32,
+    incarnation: &Arc<Incarnation>,
+) -> io::Result<&'a mut SessionEntry> {
+    sessions
+        .get_mut(&uplink_teid)
+        .filter(|entry| Arc::ptr_eq(&entry.incarnation, incarnation))
+        .ok_or_else(|| unknown_session(uplink_teid))
+}
+
+fn uplink_target(state: &State, uplink_teid: u32) -> Option<UplinkTarget> {
+    lock(&state.sessions)
+        .get(&uplink_teid)
+        .map(|entry| UplinkTarget {
+            incarnation: entry.incarnation.clone(),
+            #[cfg(all(target_os = "linux", feature = "tun"))]
+            port: entry
+                .attachment
+                .as_ref()
+                .map(|attachment| attachment.port.clone()),
+        })
+}
+
 async fn send_downlink(
     socket: &UdpSocket,
+    state: &State,
     ipv6: bool,
-    session: &Session,
+    uplink_teid: u32,
+    incarnation: &Arc<Incarnation>,
     packet: Vec<u8>,
 ) -> io::Result<()> {
+    let _downlink = incarnation.downlink.lock().await;
+    if state.closed.load(Ordering::Relaxed) {
+        return Err(stopped());
+    }
+    let session = current_entry(&mut lock(&state.sessions), uplink_teid, incarnation)?.session;
     let bytes = Packet::downlink(session.downlink_teid, session.qfi, packet)
         .encode()
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-    socket
-        .send_to(&bytes, path::destination(ipv6, session.gnb_address))
-        .await?;
-    Ok(())
+    let to = path::destination(ipv6, session.gnb_address);
+    loop {
+        socket.writable().await?;
+        let sent = {
+            let mut sessions = lock(&state.sessions);
+            if state.closed.load(Ordering::Relaxed) {
+                return Err(stopped());
+            }
+            current_entry(&mut sessions, uplink_teid, incarnation)?;
+            socket.try_send_to(&bytes, to)
+        };
+        match sent {
+            Ok(_) => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 /// The echo service's reply to an uplink T-PDU, if it answers it.
@@ -334,26 +590,36 @@ async fn receive(
     state: Arc<State>,
     ipv6: bool,
     tx: mpsc::Sender<UplinkPacket>,
-) {
+) -> io::Result<()> {
     let mut buffer = vec![0; 65536];
     loop {
         let (size, from) = match socket.recv_from(&mut buffer).await {
             Ok(received) => received,
             Err(error) if path::transient(&error) => continue,
             Err(error) => {
+                state.closed.store(true, Ordering::Relaxed);
                 warn!("UPF simulator stopped receiving: {error}");
-                return;
+                return Err(error);
             }
         };
+        state
+            .counters
+            .received_datagrams
+            .fetch_add(1, Ordering::Relaxed);
         let packet = match Packet::decode(&buffer[..size]) {
             Ok(packet) => packet,
             Err(error) => {
+                state
+                    .counters
+                    .malformed_datagrams
+                    .fetch_add(1, Ordering::Relaxed);
                 debug!("UPF dropped a malformed message from {from}: {error}");
                 path::answer_length_error(&socket, &buffer[..size], from).await;
                 continue;
             }
         };
         if path::answer(&socket, &packet, from).await {
+            state.counters.path_messages.fetch_add(1, Ordering::Relaxed);
             continue;
         }
         match packet.message_type {
@@ -370,36 +636,57 @@ async fn receive(
                 continue;
             }
         }
-        let session = lock(&state.sessions)
-            .get(&packet.teid)
-            .map(|entry| entry.session);
-        let Some(session) = session else {
+        let Some(target) = uplink_target(&state, packet.teid) else {
             debug!("UPF G-PDU for unknown TEID {} from {from}", packet.teid);
             path::error_indication(&socket, packet.teid, from).await;
             continue;
         };
-        if !write_to_tun(&state, packet.teid, &packet.payload).await {
+        if !write_to_tun(&target, &packet.payload).await {
             if let Some(reply) = echo_service(&packet.payload) {
-                if let Err(error) = send_downlink(&socket, ipv6, &session, reply).await {
-                    debug!("UPF echo reply to {} failed: {error}", session.gnb_address);
+                if let Err(error) = send_downlink(
+                    &socket,
+                    &state,
+                    ipv6,
+                    packet.teid,
+                    &target.incarnation,
+                    reply,
+                )
+                .await
+                {
+                    debug!(
+                        "UPF echo reply on uplink TEID {} failed: {error}",
+                        packet.teid
+                    );
                 }
             }
         }
-        let _ = tx.try_send(UplinkPacket {
+        let observed = UplinkPacket {
             uplink_teid: packet.teid,
             from: path::canonical(from),
             packet,
-        });
+        };
+        match tx.try_send(observed) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                state
+                    .counters
+                    .queue_full_drops
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            Err(TrySendError::Closed(_)) => {
+                state
+                    .counters
+                    .receiver_closed_drops
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
     }
 }
 
 /// Write an uplink T-PDU to its session's TUN; false if it has none.
 #[cfg(all(target_os = "linux", feature = "tun"))]
-async fn write_to_tun(state: &State, uplink_teid: u32, packet: &[u8]) -> bool {
-    let port = lock(&state.tuns)
-        .get(&uplink_teid)
-        .map(|attachment| attachment.port.clone());
-    let Some(port) = port else {
+async fn write_to_tun(target: &UplinkTarget, packet: &[u8]) -> bool {
+    let Some(port) = &target.port else {
         return false;
     };
     if let Err(error) = port.send(packet).await {
@@ -409,7 +696,7 @@ async fn write_to_tun(state: &State, uplink_teid: u32, packet: &[u8]) -> bool {
 }
 
 #[cfg(not(all(target_os = "linux", feature = "tun")))]
-async fn write_to_tun(_state: &State, _uplink_teid: u32, _packet: &[u8]) -> bool {
+async fn write_to_tun(_target: &UplinkTarget, _packet: &[u8]) -> bool {
     false
 }
 
@@ -421,7 +708,7 @@ async fn forward_tun_downlink(
     state: Arc<State>,
     ipv6: bool,
     uplink_teid: u32,
-    incarnation: Arc<()>,
+    incarnation: Arc<Incarnation>,
 ) {
     let mut buffer = vec![0; 65536];
     loop {
@@ -432,15 +719,74 @@ async fn forward_tun_downlink(
                 return;
             }
         };
-        let session = lock(&state.sessions)
-            .get(&uplink_teid)
-            .filter(|entry| Arc::ptr_eq(&entry.incarnation, &incarnation))
-            .map(|entry| entry.session);
-        let Some(session) = session else {
-            return;
-        };
-        if let Err(error) = send_downlink(&socket, ipv6, &session, buffer[..size].to_vec()).await {
+        if let Err(error) = send_downlink(
+            &socket,
+            &state,
+            ipv6,
+            uplink_teid,
+            &incarnation,
+            buffer[..size].to_vec(),
+        )
+        .await
+        {
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::BrokenPipe
+            ) {
+                return;
+            }
             warn!("UPF TUN {} downlink failed: {error}", port.name());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
+    use tokio::time::{Duration, timeout};
+
+    #[tokio::test]
+    async fn replacing_a_session_rejects_waiting_sends_and_stale_uplink_snapshots() {
+        let (upf, _) = UpfSimulator::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        upf.set_session(Session::new(1, 2, peer.local_addr().unwrap(), 9));
+        let target = uplink_target(&upf.shared.state, 1).unwrap();
+        let guard = target.incarnation.downlink.lock().await;
+        let mut waiting = Box::pin(upf.send_downlink(1, vec![0x45]));
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(matches!(waiting.as_mut().poll(&mut context), Poll::Pending));
+        upf.set_session(Session::new(1, 3, peer.local_addr().unwrap(), 9));
+        drop(guard);
+        assert_eq!(waiting.await.unwrap_err().kind(), io::ErrorKind::NotFound);
+        assert_eq!(
+            send_downlink(
+                &upf.shared.socket,
+                &upf.shared.state,
+                upf.shared.ipv6,
+                1,
+                &target.incarnation,
+                vec![0x45]
+            )
+            .await
+            .unwrap_err()
+            .kind(),
+            io::ErrorKind::NotFound
+        );
+        let mut buffer = [0; 128];
+        assert!(
+            timeout(Duration::from_millis(25), peer.recv_from(&mut buffer))
+                .await
+                .is_err()
+        );
+        upf.send_downlink(1, vec![0x45]).await.unwrap();
+        let (size, _) = timeout(Duration::from_secs(1), peer.recv_from(&mut buffer))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(Packet::decode(&buffer[..size]).unwrap().teid, 3);
     }
 }

@@ -1,7 +1,6 @@
 //! The rtnetlink requests of the TUN module. Each waits for the kernel's
 //! acknowledgement, which comes at once.
 
-use std::ffi::CString;
 use std::io;
 use std::net::Ipv4Addr;
 
@@ -52,6 +51,14 @@ impl Netlink {
 
     /// Send `message` and wait for the kernel's acknowledgement.
     fn request(&mut self, message: RouteNetlinkMessage, flags: u16) -> io::Result<()> {
+        self.request_with_link_reply(message, flags).map(|_| ())
+    }
+
+    fn request_with_link_reply(
+        &mut self,
+        message: RouteNetlinkMessage,
+        flags: u16,
+    ) -> io::Result<Option<LinkMessage>> {
         self.sequence = self.sequence.wrapping_add(1);
         let mut header = NetlinkHeader::default();
         header.flags = NLM_F_REQUEST | NLM_F_ACK | flags;
@@ -62,6 +69,7 @@ impl Netlink {
         request.serialize(&mut bytes);
         self.socket.send(&bytes, 0)?;
         let mut buffer = Vec::with_capacity(65536);
+        let mut link = None;
         loop {
             buffer.clear();
             self.socket.recv(&mut buffer, 0)?;
@@ -70,11 +78,17 @@ impl Netlink {
                 let reply = NetlinkMessage::<RouteNetlinkMessage>::deserialize(datagram)
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
                 if reply.header.sequence_number == self.sequence {
-                    if let NetlinkPayload::Error(error) = reply.payload {
-                        return match error.code {
-                            None => Ok(()),
-                            Some(_) => Err(error.to_io()),
-                        };
+                    match reply.payload {
+                        NetlinkPayload::Error(error) => {
+                            return match error.code {
+                                None => Ok(link),
+                                Some(_) => Err(error.to_io()),
+                            };
+                        }
+                        NetlinkPayload::InnerMessage(RouteNetlinkMessage::NewLink(message)) => {
+                            link = Some(message);
+                        }
+                        _ => {}
                     }
                 }
                 // Messages are aligned to 4 octets.
@@ -85,6 +99,38 @@ impl Netlink {
                 datagram = &datagram[length..];
             }
         }
+    }
+
+    /// Resolve a link in the namespace this socket was created in.
+    fn get_link(&mut self, message: LinkMessage) -> io::Result<LinkMessage> {
+        self.request_with_link_reply(RouteNetlinkMessage::GetLink(message), 0)?
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing link reply"))
+    }
+
+    pub fn index_of(&mut self, name: &str) -> io::Result<u32> {
+        let mut message = LinkMessage::default();
+        message
+            .attributes
+            .push(LinkAttribute::IfName(name.to_owned()));
+        Ok(self.get_link(message)?.header.index)
+    }
+
+    pub fn name_of(&mut self, index: u32) -> io::Result<Option<String>> {
+        let mut message = LinkMessage::default();
+        message.header.index = index;
+        let link = match self.get_link(message) {
+            Ok(link) => link,
+            Err(error) if error.raw_os_error() == Some(libc::ENODEV) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        link.attributes
+            .into_iter()
+            .find_map(|attribute| match attribute {
+                LinkAttribute::IfName(name) => Some(name),
+                _ => None,
+            })
+            .map(Some)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing link name"))
     }
 
     pub fn set_up(&mut self, index: u32) -> io::Result<()> {
@@ -131,7 +177,7 @@ impl Netlink {
             RouteNetlinkMessage::NewLink(message),
             NLM_F_CREATE | NLM_F_EXCL,
         )?;
-        index_of(name)
+        self.index_of(name)
     }
 
     pub fn delete_link(&mut self, index: u32) -> io::Result<()> {
@@ -213,27 +259,4 @@ fn rule_message(rule: Rule) -> RuleMessage {
         .push(RuleAttribute::Source(rule.source.into()));
     message.attributes.push(RuleAttribute::Table(rule.table));
     message
-}
-
-/// The name of the network interface with index `index`, if any.
-pub(crate) fn name_of(index: u32) -> Option<String> {
-    let mut name = [0; libc::IF_NAMESIZE];
-    // SAFETY: the buffer has the IF_NAMESIZE bytes if_indextoname writes to.
-    if unsafe { libc::if_indextoname(index, name.as_mut_ptr()) }.is_null() {
-        return None;
-    }
-    // SAFETY: on success, the buffer holds a NUL-terminated name.
-    let name = unsafe { std::ffi::CStr::from_ptr(name.as_ptr()) };
-    Some(name.to_string_lossy().into_owned())
-}
-
-/// The index of network interface `name`.
-pub(crate) fn index_of(name: &str) -> io::Result<u32> {
-    let name = CString::new(name).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
-    // SAFETY: `name` is a NUL-terminated string that outlives the call.
-    let index = unsafe { libc::if_nametoindex(name.as_ptr()) };
-    if index == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(index)
 }

@@ -17,6 +17,89 @@ use tokio::time::timeout;
 const WAIT: Duration = Duration::from_secs(2);
 const QUIET: Duration = Duration::from_millis(100);
 
+#[tokio::test]
+async fn custom_packet_send_preserves_fields_and_source_socket() {
+    let (endpoint, _, peer, _) = setup().await;
+    let mut packet = Packet::g_pdu(44, vec![0x45]);
+    packet.sequence = Some(123);
+    packet.extension_headers.push(ExtensionHeader::UdpPort(42));
+    endpoint
+        .send_to(&packet, peer.local_addr().unwrap())
+        .await
+        .unwrap();
+    let mut buffer = [0; 128];
+    let (size, from) = timeout(WAIT, peer.recv_from(&mut buffer))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(from, endpoint.local_addr().unwrap());
+    assert_eq!(Packet::decode(&buffer[..size]).unwrap(), packet);
+}
+
+#[tokio::test]
+async fn explicit_local_teids_are_validated_and_replace_routes_atomically() {
+    let (endpoint, mut received, peer, original) = setup().await;
+    let remote = RemoteTunnel {
+        address: peer.local_addr().unwrap(),
+        teid: 44,
+    };
+    endpoint.install_with_teid(7, 1, 99, remote, None).unwrap();
+    assert_ne!(original, 99);
+    assert_eq!(endpoint.local_teid(7, 1), Some(99));
+    assert_eq!(
+        endpoint
+            .install_with_teid(8, 1, 99, remote, None)
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::AlreadyExists
+    );
+    assert!(endpoint.install_with_teid(7, 1, 0, remote, None).is_err());
+    assert!(
+        endpoint
+            .install_with_teid(7, 1, 100, remote, Some(64))
+            .is_err()
+    );
+    assert_eq!(endpoint.local_teid(7, 1), Some(99));
+    send(&peer, &endpoint, &Packet::g_pdu(99, vec![1])).await;
+    assert_eq!(delivered(&mut received).await.packet.teid, 99);
+}
+
+#[tokio::test]
+async fn shutdown_is_shared_and_awaits_receiver_completion() {
+    let (endpoint, mut received, peer, _) = setup().await;
+    let clone = endpoint.clone();
+    assert!(endpoint.is_running());
+    endpoint.shutdown().await.unwrap();
+    assert!(!clone.is_running());
+    assert!(received.recv().await.is_none());
+    clone.shutdown().await.unwrap();
+    assert_eq!(
+        clone
+            .send_to(&Packet::echo_request(1), peer.local_addr().unwrap())
+            .await
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::BrokenPipe
+    );
+}
+
+#[tokio::test]
+async fn counters_distinguish_malformed_closed_and_path_messages() {
+    let (endpoint, received, peer, teid) = setup().await;
+    drop(received);
+    peer.send_to(&[0], endpoint.local_addr().unwrap())
+        .await
+        .unwrap();
+    send(&peer, &endpoint, &Packet::g_pdu(teid, vec![1])).await;
+    send(&peer, &endpoint, &Packet::echo_request(7)).await;
+    assert_eq!(reply(&peer).await.sequence, Some(7));
+    let stats = endpoint.stats();
+    assert_eq!(stats.received_datagrams, 3);
+    assert_eq!(stats.malformed_datagrams, 1);
+    assert_eq!(stats.receiver_closed_drops, 1);
+    assert_eq!(stats.path_messages, 1);
+}
+
 /// An endpoint and a peer socket, both on 127.0.0.1, with the tunnel of RAN
 /// UE 7 and PDU session 1 between them. Returns the tunnel's local TEID.
 async fn setup() -> (Endpoint, Receiver<ReceivedPacket>, UdpSocket, u32) {
@@ -239,6 +322,7 @@ async fn keeps_answering_echo_while_the_receiver_lags() {
         (response.message_type, response.sequence),
         (ECHO_RESPONSE, Some(1))
     );
+    assert!(endpoint.stats().queue_full_drops > 0);
 }
 
 #[cfg(not(target_os = "macos"))]

@@ -85,7 +85,19 @@ async fn serve(args: Args) -> Result<(), Box<dyn Error>> {
         session.downlink_teid,
         session.gnb_address
     );
-    while let Some(packet) = packets.recv().await {
+    let stopped = shutdown_signal();
+    tokio::pin!(stopped);
+    loop {
+        let packet = tokio::select! {
+            result = &mut stopped => {
+                result?;
+                break;
+            }
+            packet = packets.recv() => match packet {
+                Some(packet) => packet,
+                None => break,
+            },
+        };
         println!(
             "uplink TEID {} from {}: {} bytes",
             packet.uplink_teid,
@@ -93,7 +105,22 @@ async fn serve(args: Args) -> Result<(), Box<dyn Error>> {
             packet.packet.payload.len()
         );
     }
+    upf.shutdown().await?;
     Ok(())
+}
+
+async fn shutdown_signal() -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result,
+            _ = terminate.recv() => Ok(()),
+        }
+    }
+    #[cfg(not(unix))]
+    tokio::signal::ctrl_c().await
 }
 
 #[cfg(all(target_os = "linux", feature = "tun"))]

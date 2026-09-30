@@ -3,6 +3,46 @@
 
 use crate::Error;
 
+// The same serializer counts validated bytes before writing them. This avoids
+// maintaining separate length and field-validation implementations.
+pub(crate) trait EncodeBuffer {
+    fn len(&self) -> usize;
+    fn push(&mut self, byte: u8);
+    fn extend_from_slice(&mut self, bytes: &[u8]);
+    fn set(&mut self, index: usize, byte: u8);
+}
+
+impl EncodeBuffer for Vec<u8> {
+    fn len(&self) -> usize {
+        Vec::len(self)
+    }
+    fn push(&mut self, byte: u8) {
+        Vec::push(self, byte);
+    }
+    fn extend_from_slice(&mut self, bytes: &[u8]) {
+        Vec::extend_from_slice(self, bytes);
+    }
+    fn set(&mut self, index: usize, byte: u8) {
+        self[index] = byte;
+    }
+}
+
+#[derive(Default)]
+struct EncodedLength(usize);
+
+impl EncodeBuffer for EncodedLength {
+    fn len(&self) -> usize {
+        self.0
+    }
+    fn push(&mut self, _: u8) {
+        self.0 += 1;
+    }
+    fn extend_from_slice(&mut self, bytes: &[u8]) {
+        self.0 += bytes.len();
+    }
+    fn set(&mut self, _: usize, _: u8) {}
+}
+
 /// A GTP-U extension header (TS 29.281 §5.2).
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -78,7 +118,13 @@ impl ExtensionHeader {
     }
 
     /// Append this header, followed by `next`, the type of the next one.
-    pub(crate) fn encode(&self, next: u8, out: &mut Vec<u8>) -> Result<(), Error> {
+    pub(crate) fn encoded_len(&self) -> Result<usize, Error> {
+        let mut length = EncodedLength::default();
+        self.encode(0, &mut length)?;
+        Ok(length.0)
+    }
+
+    pub(crate) fn encode(&self, next: u8, out: &mut impl EncodeBuffer) -> Result<(), Error> {
         let start = out.len();
         out.push(0); // length, set below
         match self {
@@ -99,8 +145,9 @@ impl ExtensionHeader {
             out.push(0);
         }
         out.push(next);
-        out[start] = u8::try_from((out.len() - start) / 4)
+        let length = u8::try_from((out.len() - start) / 4)
             .map_err(|_| Error::OutOfRange("extension header length"))?;
+        out.set(start, length);
         Ok(())
     }
 }
@@ -149,7 +196,7 @@ impl PduSessionContainer {
         }
     }
 
-    fn encode(&self, out: &mut Vec<u8>) -> Result<(), Error> {
+    fn encode(&self, out: &mut impl EncodeBuffer) -> Result<(), Error> {
         match self {
             PduSessionContainer::Downlink(information) => information.encode(out),
             PduSessionContainer::Uplink(information) => information.encode(out),
@@ -228,7 +275,7 @@ impl DownlinkPduSessionInformation {
         })
     }
 
-    fn encode(&self, out: &mut Vec<u8>) -> Result<(), Error> {
+    fn encode(&self, out: &mut impl EncodeBuffer) -> Result<(), Error> {
         check_qfi(self.qfi)?;
         if self.ppi.is_some_and(|ppi| ppi > 7) {
             return Err(Error::OutOfRange("PPI"));
@@ -384,7 +431,7 @@ impl UplinkPduSessionInformation {
         Ok(information)
     }
 
-    fn encode(&self, out: &mut Vec<u8>) -> Result<(), Error> {
+    fn encode(&self, out: &mut impl EncodeBuffer) -> Result<(), Error> {
         let start = out.len();
         check_qfi(self.qfi)?;
         check_u24(self.ul_qfi_sequence_number, "UL QFI Sequence Number")?;

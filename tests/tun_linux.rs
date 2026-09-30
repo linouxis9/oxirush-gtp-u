@@ -6,9 +6,12 @@
 #![cfg(target_os = "linux")]
 
 use std::ffi::CString;
+use std::fs;
+use std::future::Future;
 use std::io;
 use std::net::Ipv4Addr;
 use std::process::Stdio;
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use oxirush_gtp_u::tun::{Routing, TunConfig, TunPort};
@@ -62,6 +65,88 @@ fn rules() -> String {
     String::from_utf8(output.stdout).unwrap()
 }
 
+fn loopback_udp_inode(port: u16) -> String {
+    let local = format!("{:08X}:{port:04X}", u32::from_ne_bytes([127, 0, 0, 1]));
+    fs::read_to_string("/proc/thread-self/net/udp")
+        .unwrap()
+        .lines()
+        .find_map(|line| {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            (fields.get(1) == Some(&local.as_str())).then(|| fields[9].to_owned())
+        })
+        .expect("the bound loopback UDP socket is listed in its network namespace")
+}
+
+fn process_has_socket(inode: &str) -> bool {
+    let socket = format!("socket:[{inode}]");
+    fs::read_dir("/proc/self/fd").unwrap().any(|entry| {
+        entry
+            .ok()
+            .and_then(|entry| fs::read_link(entry.path()).ok())
+            .is_some_and(|target| target.to_str() == Some(socket.as_str()))
+    })
+}
+
+#[repr(C)]
+struct CapabilityHeader {
+    version: u32,
+    pid: i32,
+}
+
+#[derive(Clone, Copy, Default)]
+#[repr(C)]
+struct CapabilityData {
+    effective: u32,
+    permitted: u32,
+    inheritable: u32,
+}
+
+struct RestoreCapabilities([CapabilityData; 2]);
+
+impl Drop for RestoreCapabilities {
+    fn drop(&mut self) {
+        let header = CapabilityHeader {
+            version: 0x2008_0522,
+            pid: 0,
+        };
+        // SAFETY: Linux capability version 3 reads exactly two data entries.
+        let result = unsafe { libc::syscall(libc::SYS_capset, &header, self.0.as_ptr()) };
+        assert_eq!(
+            result,
+            0,
+            "restore capabilities: {}",
+            io::Error::last_os_error()
+        );
+    }
+}
+
+fn without_net_admin() -> RestoreCapabilities {
+    let header = CapabilityHeader {
+        version: 0x2008_0522,
+        pid: 0,
+    };
+    let mut original = [CapabilityData::default(); 2];
+    // SAFETY: the writable entries match Linux capability version 3's layout.
+    let result = unsafe { libc::syscall(libc::SYS_capget, &header, original.as_mut_ptr()) };
+    assert_eq!(
+        result,
+        0,
+        "read capabilities: {}",
+        io::Error::last_os_error()
+    );
+    let mut reduced = original;
+    reduced[0].effective &= !(1 << 12); // CAP_NET_ADMIN
+    // SAFETY: as above; pid 0 changes only the calling thread's capabilities.
+    let result = unsafe { libc::syscall(libc::SYS_capset, &header, reduced.as_ptr()) };
+    assert_eq!(
+        result,
+        0,
+        "drop CAP_NET_ADMIN: {}",
+        io::Error::last_os_error()
+    );
+    RestoreCapabilities(original)
+}
+
 #[tokio::test]
 #[ignore = "needs root"]
 async fn removing_a_session_during_tun_creation_does_not_leave_an_orphan() {
@@ -103,6 +188,103 @@ async fn replacing_an_attached_session_closes_its_old_tun() {
         !exists("oxreplace"),
         "replacement session inherited the old TUN"
     );
+}
+
+#[tokio::test]
+#[ignore = "needs root"]
+async fn shutting_down_the_upf_closes_attachments_and_rejects_new_ones() {
+    isolate();
+    let (upf, mut observed) = UpfSimulator::bind("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    let other = upf.clone();
+    let address = upf.local_addr().unwrap();
+    let socket_inode = loopback_udp_inode(address.port());
+    upf.set_session(Session::new(1, 2, address, 9));
+    let config = TunConfig::new(
+        "oxshutdown",
+        Routing::Upf {
+            ue_address: Ipv4Addr::new(198, 19, 0, 11),
+        },
+    );
+    upf.attach_tun(1, config.clone()).unwrap();
+    assert!(exists("oxshutdown"));
+    let mut shutdown = Box::pin(upf.shutdown());
+    let mut context = Context::from_waker(Waker::noop());
+    assert!(matches!(
+        shutdown.as_mut().poll(&mut context),
+        Poll::Pending
+    ));
+    drop(shutdown);
+    assert!(
+        exists("oxshutdown"),
+        "cancelled shutdown lost its retained attachment"
+    );
+    other.shutdown().await.unwrap();
+    assert!(!other.is_running());
+    assert!(!exists("oxshutdown"));
+    assert_eq!(
+        other.attach_tun(1, config).unwrap_err().kind(),
+        io::ErrorKind::BrokenPipe
+    );
+    assert!(observed.recv().await.is_none());
+    drop(upf);
+    drop(other);
+    // Joined shutdown must release every socket descriptor in this process.
+    assert!(
+        !process_has_socket(&socket_inode),
+        "UPF retained UDP socket inode {socket_inode} after joined shutdown"
+    );
+    // Parallel tests spawn ip/ping. Their pre-exec children temporarily
+    // inherit our CLOEXEC descriptor, retaining its binding until exec.
+    // Wait for that external ownership without concealing a parent leak.
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match tokio::net::UdpSocket::bind(address).await {
+                Ok(_) => break,
+                Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                Err(error) => panic!("rebind after shutdown: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("external child retained the closed UDP socket beyond its exec window");
+}
+
+#[tokio::test]
+#[ignore = "needs root"]
+async fn failed_upf_shutdown_retains_cleanup_resources_for_retry() {
+    isolate();
+    let (upf, _) = UpfSimulator::bind("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    upf.set_session(Session::new(1, 2, "127.0.0.1:2152".parse().unwrap(), 9));
+    upf.attach_tun(
+        1,
+        TunConfig::new(
+            "oxretry",
+            Routing::UePolicy {
+                address: Ipv4Addr::new(198, 19, 0, 12),
+                table: 29010,
+                priority: 15010,
+            },
+        ),
+    )
+    .unwrap();
+    let restore = without_net_admin();
+    let error = upf.shutdown().await.unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    assert!(
+        exists("oxretry"),
+        "failed cleanup lost ownership of the TUN"
+    );
+    assert!(rules().contains("15010:"));
+    drop(restore);
+    upf.shutdown().await.unwrap();
+    assert!(!exists("oxretry"));
+    assert!(!rules().contains("15010:"));
 }
 
 async fn session_creation_race(replace: bool) {

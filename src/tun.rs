@@ -1,8 +1,9 @@
 //! Linux TUN devices and their routing, for UE and UPF sessions.
 //!
 //! [`TunPort::create`] makes the TUN and sets up its address, routes, rule
-//! or VRF over rtnetlink. [`TunPort::close`], or dropping the port, removes
-//! all of them. It needs `CAP_NET_ADMIN`.
+//! or VRF over rtnetlink. [`TunPort::try_close`] removes them, reporting
+//! cleanup failures so they can be retried. [`TunPort::close`] and dropping
+//! the port perform best-effort cleanup. It needs `CAP_NET_ADMIN`.
 
 use std::fmt;
 use std::fs::{File, OpenOptions};
@@ -14,7 +15,7 @@ use std::sync::Mutex;
 use tokio::io::Interest;
 use tokio::io::unix::AsyncFd;
 
-use crate::netlink::{MAIN_TABLE, Netlink, Rule, index_of, name_of};
+use crate::netlink::{MAIN_TABLE, Netlink, Rule};
 use crate::path::lock;
 
 /// How Linux routes a TUN's traffic.
@@ -77,10 +78,12 @@ pub struct TunPort {
 
 /// What `close` removes. The TUN's address and routes go with it.
 struct Cleanup {
-    index: u32,
+    // A netlink socket remains in its creation namespace even when the
+    // port moves to a task running in another namespace.
+    netlink: Netlink,
+    index: Option<u32>,
     rule: Option<Rule>,
     vrf: Option<(u32, String)>,
-    closed: bool,
 }
 
 fn invalid(message: String) -> io::Error {
@@ -113,7 +116,42 @@ fn validate_table(table: u32) -> io::Result<()> {
 }
 
 fn context(error: io::Error, what: impl fmt::Display) -> io::Error {
-    io::Error::new(error.kind(), format!("{what}: {error}"))
+    io::Error::new(
+        error.kind(),
+        OperationError {
+            operation: what.to_string(),
+            source: error,
+        },
+    )
+}
+
+#[derive(Debug)]
+struct OperationError {
+    operation: String,
+    source: io::Error,
+}
+
+impl fmt::Display for OperationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.operation, self.source)
+    }
+}
+
+impl std::error::Error for OperationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+fn remove_link(netlink: &mut Netlink, index: u32, name: &str) -> io::Result<()> {
+    // An externally removed interface can leave its index to another one.
+    if netlink.name_of(index)?.as_deref() != Some(name) {
+        return Ok(());
+    }
+    match netlink.delete_link(index) {
+        Err(error) if error.raw_os_error() == Some(libc::ENODEV) => Ok(()),
+        result => result,
+    }
 }
 
 impl TunPort {
@@ -145,6 +183,7 @@ impl TunPort {
             }
             Routing::Upf { .. } => {}
         }
+        let mut netlink = Netlink::new()?;
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -171,15 +210,15 @@ impl TunPort {
             });
         }
         set_nonblocking(&file)?;
-        let index = index_of(&config.name)?;
+        let index = netlink.index_of(&config.name)?;
         let port = Self {
             io: AsyncFd::new(file)?,
             name: config.name,
             cleanup: Mutex::new(Cleanup {
-                index,
+                netlink,
+                index: Some(index),
                 rule: None,
                 vrf: None,
-                closed: false,
             }),
         };
         // On error, dropping `port` removes what was set up.
@@ -188,8 +227,14 @@ impl TunPort {
     }
 
     fn configure(&self, routing: Routing) -> io::Result<()> {
-        let mut netlink = Netlink::new()?;
-        let index = lock(&self.cleanup).index;
+        let mut cleanup = lock(&self.cleanup);
+        let Cleanup {
+            netlink,
+            index,
+            rule: saved_rule,
+            vrf: saved_vrf,
+        } = &mut *cleanup;
+        let index = index.expect("new TUN has an interface index");
         let name = &self.name;
         // The routing is IPv4 only. Without IPv6 addresses, Linux sends no
         // router solicitations through the TUN. A kernel without IPv6 has
@@ -237,7 +282,7 @@ impl TunPort {
                         format_args!("add rule {priority}: from {address} lookup {table}"),
                     )
                 })?;
-                lock(&self.cleanup).rule = Some(rule);
+                *saved_rule = Some(rule);
             }
             Routing::UeVrf {
                 address,
@@ -247,7 +292,7 @@ impl TunPort {
                 let vrf = netlink.add_vrf(&vrf_name, table).map_err(|e| {
                     context(e, format_args!("add VRF {vrf_name} for table {table}"))
                 })?;
-                lock(&self.cleanup).vrf = Some((vrf, vrf_name.clone()));
+                *saved_vrf = Some((vrf, vrf_name.clone()));
                 netlink
                     .set_controller(index, vrf)
                     .map_err(|e| context(e, format_args!("put {name} in VRF {vrf_name}")))?;
@@ -312,42 +357,70 @@ impl TunPort {
         }
     }
 
-    /// Remove the TUN, with its address and routes, and the rule or VRF it
-    /// got, even while other tasks still hold the port: their `recv` and
-    /// `send` then fail. Later calls, and the one by `Drop`, do nothing. It
-    /// acts in the network namespace of the calling thread, which should be
-    /// the one the port was created in.
-    pub fn close(&self) {
+    /// Remove the TUN, its address and routes, and its rule or VRF in the
+    /// network namespace where it was created. Other tasks holding the
+    /// port then observe `recv` and `send` errors.
+    ///
+    /// Attempts every remaining resource and returns the first failure.
+    /// Successfully removed or already absent resources are forgotten;
+    /// failed removals are retained for the next call. This blocks while
+    /// waiting for netlink acknowledgements and requires `CAP_NET_ADMIN`
+    /// in the creation namespace.
+    pub fn try_close(&self) -> io::Result<()> {
         let mut cleanup = lock(&self.cleanup);
-        if cleanup.closed {
-            return;
-        }
-        cleanup.closed = true;
-        let mut netlink = match Netlink::new() {
-            Ok(netlink) => netlink,
-            Err(error) => {
-                tracing::warn!("TUN {} not removed: {error}", self.name);
-                return;
-            }
-        };
-        let mut removals = Vec::new();
-        if let Some(rule) = cleanup.rule.take() {
-            removals.push(("rule", netlink.delete_rule(rule)));
-        }
-        // An interface removed by someone else may have left its index to
-        // another one.
-        if name_of(cleanup.index).as_deref() == Some(self.name.as_str()) {
-            removals.push(("TUN", netlink.delete_link(cleanup.index)));
-        }
-        if let Some((vrf, vrf_name)) = cleanup.vrf.take() {
-            if name_of(vrf).as_deref() == Some(vrf_name.as_str()) {
-                removals.push(("VRF", netlink.delete_link(vrf)));
+        let Cleanup {
+            netlink,
+            index,
+            rule,
+            vrf,
+        } = &mut *cleanup;
+        let mut failure = None;
+        if let Some(value) = *rule {
+            match netlink.delete_rule(value) {
+                Ok(()) => *rule = None,
+                Err(error) if matches!(error.raw_os_error(), Some(libc::ENOENT | libc::ESRCH)) => {
+                    *rule = None
+                }
+                Err(error) => {
+                    failure = Some(context(
+                        error,
+                        format_args!("remove rule of TUN {}", self.name),
+                    ))
+                }
             }
         }
-        for (what, result) in removals {
-            if let Err(error) = result {
-                tracing::warn!("{what} of TUN {} not removed: {error}", self.name);
+        if let Some(value) = *index {
+            match remove_link(netlink, value, &self.name) {
+                Ok(()) => *index = None,
+                Err(error) => {
+                    failure.get_or_insert_with(|| {
+                        context(error, format_args!("remove TUN {}", self.name))
+                    });
+                }
             }
+        }
+        if let Some((value, name)) = vrf {
+            match remove_link(netlink, *value, name) {
+                Ok(()) => *vrf = None,
+                Err(error) => {
+                    failure.get_or_insert_with(|| {
+                        context(error, format_args!("remove VRF of TUN {}", self.name))
+                    });
+                }
+            }
+        }
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    /// Perform best-effort cleanup, logging any failure. Later calls
+    /// retry remaining resources; use [`try_close`](Self::try_close) to
+    /// inspect failures.
+    pub fn close(&self) {
+        if let Err(error) = self.try_close() {
+            tracing::warn!("{error}");
         }
     }
 }
@@ -375,4 +448,27 @@ fn set_nonblocking(file: &File) -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn context_preserves_the_original_io_error() {
+        let error = context(io::Error::from_raw_os_error(libc::EPERM), "remove TUN");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(error.to_string().starts_with("remove TUN: "));
+        let source = error.get_ref().unwrap().source().unwrap();
+        assert_eq!(
+            source.downcast_ref::<io::Error>().unwrap().raw_os_error(),
+            Some(libc::EPERM)
+        );
+    }
+
+    #[test]
+    fn tun_port_can_be_shared_between_tasks() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<TunPort>();
+    }
 }

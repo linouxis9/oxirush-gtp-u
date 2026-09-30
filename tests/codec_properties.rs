@@ -207,6 +207,11 @@ proptest! {
     #[test]
     fn decode_inverts_encode(packet in packet(true)) {
         let bytes = packet.encode().unwrap();
+        let mut buffer = Vec::with_capacity(bytes.len() + 1);
+        buffer.push(0xaa);
+        packet.encode_into(&mut buffer).unwrap();
+        prop_assert_eq!(&buffer[1..], &bytes);
+        prop_assert_eq!(packet.encoded_len().unwrap(), bytes.len());
         prop_assert_eq!(Packet::decode(&bytes).unwrap(), packet);
     }
 
