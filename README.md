@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/oxirush-gtp-u.svg)](https://crates.io/crates/oxirush-gtp-u)
 [![Documentation](https://docs.rs/oxirush-gtp-u/badge.svg)](https://docs.rs/oxirush-gtp-u)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](https://github.com/linouxis9/oxirush-gtp-u/blob/master/LICENSE)
 
 GTPv1-U for Rust: a codec for 3GPP TS 29.281 with the PDU Session Container
 of TS 38.415, a Tokio endpoint for the N3 side of a gNB, a UPF for tests,
@@ -273,4 +273,4 @@ All commits should be signed-off with `git commit -s` to indicate your agreement
 
 Copyright 2025 - 2026 Valentin D'Emmanuele
 
-Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for details.
+Licensed under the Apache License, Version 2.0. See [LICENSE](https://github.com/linouxis9/oxirush-gtp-u/blob/master/LICENSE) for details.
