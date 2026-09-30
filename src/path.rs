@@ -123,8 +123,9 @@ pub(crate) async fn error_indication(socket: &UdpSocket, teid: u32, from: Socket
 /// Port 2152 of `address`, where Error Indication and Supported Extension
 /// Headers Notification go whatever the source port of what triggered them
 /// (TS 29.281 §4.4.2.4, §4.4.2.5).
-fn user_plane_port(address: SocketAddr) -> SocketAddr {
-    SocketAddr::new(address.ip(), PORT)
+fn user_plane_port(mut address: SocketAddr) -> SocketAddr {
+    address.set_port(PORT);
+    address
 }
 
 async fn send(socket: &UdpSocket, packet: &Packet, to: SocketAddr) {
@@ -150,7 +151,10 @@ pub(crate) fn destination(ipv6_socket: bool, address: SocketAddr) -> SocketAddr 
 /// `address` with an IPv4-mapped IPv6 address, as a dual-stack socket
 /// reports IPv4 peers, turned into the IPv4 address.
 pub(crate) fn canonical(address: SocketAddr) -> SocketAddr {
-    SocketAddr::new(address.ip().to_canonical(), address.port())
+    match address.ip().to_canonical() {
+        IpAddr::V4(ip) => SocketAddr::new(ip.into(), address.port()),
+        IpAddr::V6(_) => address,
+    }
 }
 
 /// Whether two addresses are the same host, IPv4-mapped or not.
@@ -171,4 +175,40 @@ pub(crate) fn transient(error: &std::io::Error) -> bool {
 /// Lock a mutex whose data stays consistent even if a holder panicked.
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{Ipv4Addr, SocketAddrV6};
+
+    #[test]
+    fn path_reply_port_preserves_native_ipv6_metadata() {
+        let address = SocketAddr::V6(SocketAddrV6::new(
+            "fe80::1".parse().unwrap(),
+            49152,
+            0x12345,
+            7,
+        ));
+        let mut expected = address;
+        expected.set_port(PORT);
+        assert_eq!(user_plane_port(address), expected);
+    }
+
+    #[test]
+    fn canonicalization_preserves_native_ipv6_and_converts_mapped_ipv4() {
+        let address = SocketAddr::V6(SocketAddrV6::new(
+            "fe80::1".parse().unwrap(),
+            2152,
+            0x12345,
+            7,
+        ));
+        assert_eq!(canonical(address), address);
+
+        let ipv4 = Ipv4Addr::new(192, 0, 2, 1);
+        let native = SocketAddr::new(ipv4.into(), 2152);
+        assert_eq!(canonical(native), native);
+        let mapped = SocketAddr::V6(SocketAddrV6::new(ipv4.to_ipv6_mapped(), 2152, 0, 0));
+        assert_eq!(canonical(mapped), native);
+    }
 }
