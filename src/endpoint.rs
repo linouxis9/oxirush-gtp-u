@@ -95,11 +95,31 @@ struct Shared {
     worker: AbortHandle,
     completion: tokio::sync::Mutex<Option<JoinHandle<io::Result<()>>>>,
     stopped: AtomicBool,
+    /// With the N3 address.
+    #[cfg(all(target_os = "linux", feature = "ebpf"))]
+    fast_path: std::sync::OnceLock<(crate::ebpf::FastPath, std::net::Ipv4Addr)>,
+}
+
+impl Shared {
+    /// Apply a tunnel's change, or its removal, to its short-cut.
+    #[cfg(all(target_os = "linux", feature = "ebpf"))]
+    fn sync(&self, local_teid: u32, route: Option<(RemoteTunnel, Option<u8>)>) {
+        if let Some((fast_path, local)) = self.fast_path.get() {
+            fast_path.refresh(*local, local_teid, route);
+        }
+    }
+
+    #[cfg(not(all(target_os = "linux", feature = "ebpf")))]
+    fn sync(&self, _local_teid: u32, _route: Option<(RemoteTunnel, Option<u8>)>) {}
 }
 
 impl Drop for Shared {
     fn drop(&mut self) {
         self.worker.abort();
+        #[cfg(all(target_os = "linux", feature = "ebpf"))]
+        for local_teid in self.routes.local_teids() {
+            self.sync(local_teid, None);
+        }
     }
 }
 
@@ -129,6 +149,8 @@ impl Endpoint {
             worker,
             completion: tokio::sync::Mutex::new(Some(completion)),
             stopped: AtomicBool::new(false),
+            #[cfg(all(target_os = "linux", feature = "ebpf"))]
+            fast_path: std::sync::OnceLock::new(),
         };
         Ok((
             Self {
@@ -160,6 +182,10 @@ impl Endpoint {
     pub async fn shutdown(&self) -> io::Result<()> {
         self.shared.stopped.store(true, Ordering::Relaxed);
         self.shared.worker.abort();
+        #[cfg(all(target_os = "linux", feature = "ebpf"))]
+        for local_teid in self.shared.routes.local_teids() {
+            self.shared.sync(local_teid, None);
+        }
         let mut completion = self.shared.completion.lock().await;
         let result = match completion.as_mut() {
             Some(worker) => match worker.await {
@@ -197,9 +223,82 @@ impl Endpoint {
         remote: RemoteTunnel,
         qfi: Option<u8>,
     ) -> io::Result<()> {
+        let replaced = self.local_teid(ran_id, session_id);
         self.shared
             .routes
-            .install_with_teid((ran_id, session_id), local_teid, remote, qfi)
+            .install_with_teid((ran_id, session_id), local_teid, remote, qfi)?;
+        if let Some(replaced) = replaced.filter(|replaced| *replaced != local_teid) {
+            self.shared.sync(replaced, None);
+        }
+        self.shared.sync(local_teid, Some((remote, qfi)));
+        Ok(())
+    }
+
+    /// Give the endpoint, bound to an IPv4 address and the GTP-U port, its
+    /// fast path: it then carries in the kernel the tunnels that
+    /// [`shortcut`](Self::shortcut) gives a TUN, until they are removed or
+    /// the endpoint is shut down.
+    #[cfg(all(target_os = "linux", feature = "ebpf"))]
+    #[cfg_attr(docsrs, doc(cfg(feature = "ebpf")))]
+    pub fn set_fast_path(&self, fast_path: crate::ebpf::FastPath) -> io::Result<()> {
+        let local = match self.local_addr()? {
+            SocketAddr::V4(local) if local.port() == crate::PORT => *local.ip(),
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "the fast path needs an IPv4 N3 address and the GTP-U port",
+                ));
+            }
+        };
+        self.shared.fast_path.set((fast_path, local)).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "the endpoint has its fast path",
+            )
+        })
+    }
+
+    /// Carry a tunnel's packets in the kernel, between TUN interface `tun`
+    /// ([`TunPort::index`](crate::tun::TunPort::index)), which
+    /// [`FastPath::open`](crate::ebpf::FastPath::open) put on the fast path,
+    /// and the peer. This lasts until the tunnel is removed, `tun` gets
+    /// another tunnel, or [`FastPath::detach`](crate::ebpf::FastPath::detach)
+    /// or [`close`](crate::ebpf::FastPath::close); later changes of the
+    /// tunnel's remote end and QFI apply to it. It asks Linux for the route
+    /// to the peer and writes two map entries.
+    ///
+    /// # Errors
+    ///
+    /// On an error the tunnel stays in userspace, and `tun` loses the
+    /// short-cut it had.
+    ///
+    /// - [`WouldBlock`](io::ErrorKind::WouldBlock): the N3 interface is
+    ///   still getting its program, attached off the caller's task when a
+    ///   first tunnel through it was installed. Ask again later, such as
+    ///   with the next packet.
+    /// - [`NotFound`](io::ErrorKind::NotFound): the endpoint has no such
+    ///   tunnel, or `tun` is not on the fast path.
+    /// - [`Unsupported`](io::ErrorKind::Unsupported): the endpoint has no
+    ///   fast path, or the peer is not IPv4 on the GTP-U port.
+    /// - Another error: the route lookup or a map write failed, or the N3
+    ///   interface could not get its program, which is not tried again.
+    #[cfg(all(target_os = "linux", feature = "ebpf"))]
+    #[cfg_attr(docsrs, doc(cfg(feature = "ebpf")))]
+    pub fn shortcut(&self, ran_id: u32, session_id: u8, tun: u32) -> io::Result<()> {
+        let (fast_path, local) = self.shared.fast_path.get().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::Unsupported, "the endpoint has no fast path")
+        })?;
+        self.shared
+            .routes
+            .with_route((ran_id, session_id), |route| {
+                fast_path.attach(tun, *local, route.local_teid, route.remote, route.qfi)
+            })
+            .unwrap_or_else(|| {
+                Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("no tunnel for RAN UE {ran_id} session {session_id}"),
+                ))
+            })
     }
 
     /// Set up the tunnel of RAN UE `ran_id` and PDU session `session_id`
@@ -230,9 +329,12 @@ impl Endpoint {
         remote: RemoteTunnel,
         qfi: Option<u8>,
     ) -> u32 {
-        self.shared
+        let local_teid = self
+            .shared
             .routes
-            .install((ran_id, session_id), remote, qfi)
+            .install((ran_id, session_id), remote, qfi);
+        self.shared.sync(local_teid, Some((remote, qfi)));
+        local_teid
     }
 
     /// The local TEID of a tunnel.
@@ -245,12 +347,16 @@ impl Endpoint {
 
     /// Remove a tunnel. Its G-PDUs then get an Error Indication.
     pub fn remove(&self, ran_id: u32, session_id: u8) {
-        self.shared.routes.remove((ran_id, session_id));
+        if let Some(local_teid) = self.shared.routes.remove((ran_id, session_id)) {
+            self.shared.sync(local_teid, None);
+        }
     }
 
     /// Remove every tunnel of RAN UE `ran_id`.
     pub fn remove_ran(&self, ran_id: u32) {
-        self.shared.routes.remove_ran(ran_id);
+        for local_teid in self.shared.routes.remove_ran(ran_id) {
+            self.shared.sync(local_teid, None);
+        }
     }
 
     /// Send an owned or borrowed IP packet as an uplink G-PDU in a tunnel.

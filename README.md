@@ -74,10 +74,12 @@ oxirush-gtp-u = "0.1"
 | ---------- | ------- | ---- |
 | `endpoint` | yes     | `Endpoint` and `upf_sim`, on Tokio |
 | `tun`      | no      | `tun` and `UpfSimulator::attach_tun`, on Linux |
+| `ebpf`     | no      | `ebpf`, the fast path of an endpoint's tunnels, on Linux 6.6 (with `tun`) |
 | `serde`    | no      | `Serialize` and `Deserialize` for `RemoteTunnel`, with `endpoint` |
 
 Without default features the crate is the codec and the IPv4 helpers, with
-no dependencies. The minimum supported Rust version is 1.85.
+no dependencies. The minimum supported Rust version is 1.85; the `ebpf`
+feature needs 1.87.
 
 ## Usage
 
@@ -198,6 +200,90 @@ process, but the policy rule or VRF stays behind when the process ends
 without running destructors: on SIGKILL, `process::exit`, or a panic with
 `panic = "abort"`.
 
+### The eBPF fast path
+
+Between a TUN and the endpoint's socket, each packet of a tunnel crosses
+userspace twice. With the `ebpf` feature three TCX programs carry it in the
+kernel instead:
+
+```rust,ignore
+let fast_path = oxirush_gtp_u::ebpf::FastPath::load()?;
+endpoint.set_fast_path(fast_path.clone())?;
+// Put a TUN on the fast path once, when it is created...
+fast_path.open(port.index())?;
+// ... then give it its tunnel, for example on the first packet read from it.
+endpoint.shortcut(ran_id, session_id, port.index())?;
+// When the tunnel moves to another endpoint, and before the TUN is closed:
+fast_path.detach(port.index());
+fast_path.close(port.index());
+```
+
+Attaching a program takes milliseconds: `open` does it, once per TUN. An
+N3 interface gets its program when a first tunnel through it is installed,
+on a blocking thread of the Tokio runtime; until it is there `shortcut`
+fails with `WouldBlock` and the tunnel stays in userspace. A `shortcut`
+itself asks Linux for the route to the peer and writes two map entries.
+Outside a Tokio runtime, whoever installs the tunnel attaches the program.
+
+- `uplink`, at the egress of the TUN, hands the IPv4 packets of a
+  short-cut tunnel to the stage: a veth pair without checksum offload, so
+  that Linux splits the large segments of the UE's TCP stack and completes
+  their checksums before the encapsulation. The stage has the largest MTU:
+  whatever a TUN lets through crosses it.
+- `encap`, at the ingress of the stage's far end, writes the IPv4, UDP and
+  GTP-U headers, with the PDU Session Container of an N3 tunnel, and sends
+  the G-PDU out of the N3 interface. The G-PDU is byte for byte the one the
+  endpoint's encoder writes.
+- `decap`, at the ingress of the N3 interface, delivers the G-PDUs of
+  short-cut tunnels to their TUN.
+
+The N3 interface of a tunnel is the one Linux routes it through, from the
+endpoint's address to the peer's, when the tunnel is short-cut or changes:
+the loopback interface for a peer on the same host, and not necessarily
+the interface that holds the endpoint's address.
+
+The tunnel's route stays the reference: `install` on it updates the
+short-cut, and `remove` or the endpoint's `shutdown` ends it, as does giving
+the TUN another tunnel or the tunnel another TUN. A
+TUN that is not on the fast path, or whose `shortcut` failed, stays in
+userspace. The
+programs leave to userspace, which keeps working underneath, anything
+else: other messages than G-PDUs, unknown TEIDs, extension headers other
+than one PDU Session Container, fragments, inner packets that are not IPv4,
+G-PDUs longer than the N3 MTU (the socket fragments them) and ICMP Echo
+Replies, which whoever pings through the endpoint expects on its receiver.
+What they leave also goes on to the other TCX programs and the tc filters
+of the interface (`TC_ACT_UNSPEC`): several fast paths, or another tool's
+programs, share an N3 interface.
+`FastPath::stats` counts what the programs carried, returned as too long
+and dropped.
+
+`load` and `open` also spread what the stage's far end and the TUN receive
+over the CPUs the process may use (RPS, `rps_cpus`): otherwise the CPU of
+whoever transmits, an application or the N3 interface, also encapsulates
+or receives the UE's packets. They do so only when `/sys` shows the
+process's network namespace; after `unshare --net` alone it still shows the
+former one, and nothing is steered.
+
+It needs TCX, which Linux has since 6.6 (it is tested on 7.0), `CAP_BPF`
+and `CAP_NET_ADMIN`; `load` fails otherwise and leaves nothing behind. N3 is
+IPv4 and the endpoint is on the GTP-U port; the tests run it on the
+loopback interface and on a veth to another network namespace. Everything
+happens in the network namespace `load` was called in. The links go with
+the process, whatever ends it. The stage, `oxs` with eight random digits,
+stays behind a process that was killed; the next `load` in that network
+namespace removes it, as an `oxs` veth that is up and whose far end has no
+program left.
+
+The programs' source is `src/ebpf/programs.rs`, which the crate in `ebpf/`
+builds for the eBPF target, and their object is committed next to it as
+`src/ebpf/gtpu.o`: building this crate needs neither a nightly toolchain
+nor a linker for eBPF. `ebpf/build.sh` rebuilds it, with the nightly
+toolchain `ebpf/rust-toolchain.toml` pins, `rust-src` and `bpf-linker`; the
+committed object comes from that toolchain, bpf-linker 0.11.1 and the
+locked aya-ebpf 0.2.1. CI rebuilds the object the same way and fails when
+it differs from the committed one.
+
 ## Architecture
 
 ```text
@@ -217,7 +303,12 @@ src/
 ├── tun/routing.rs         routing ownership and cleanup (tun)
 ├── tun/error.rs           contextual I/O errors (tun)
 ├── netlink.rs             rtnetlink operations (tun)
+├── ebpf.rs                loader of the fast path and its tunnels (ebpf)
+├── ebpf/layout.rs         map layouts shared with the programs (ebpf)
+├── ebpf/programs.rs       the TCX programs: uplink, encap, decap
+├── ebpf/gtpu.o            their object, built by ../ebpf (ebpf)
 └── bin/oxirush-upf-sim.rs
+ebpf/                      the crate that builds programs.rs for eBPF
 ```
 
 `Endpoint` and `UpfSimulator` use the same datagram receive path. It handles malformed
@@ -236,6 +327,9 @@ CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER=sudo \
   cargo test --features tun --test tun_linux -- --ignored
 CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER=sudo \
   cargo test --features tun --test tun_cleanup -- --ignored
+# The fast path tests too, on Linux 6.6: they load the programs.
+CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER=sudo \
+  cargo test --features ebpf --test ebpf_linux -- --ignored
 # Compare the wire format with Wireshark's dissector (needs tshark).
 cargo test --test wireshark -- --ignored
 ```
@@ -262,6 +356,10 @@ Contributions welcome! Please:
 2. Create a feature branch (`git checkout -b feature/amazing-feature`)
 3. Sign off your commits (`git commit -s`)
 4. Open a Pull Request
+
+A change to `src/ebpf/gtpu.o` is only accepted with the change to
+`src/ebpf/programs.rs`, `src/ebpf/layout.rs` or the build files in `ebpf/`
+that produces it: CI rebuilds the object and compares.
 
 ### Developer Certificate of Origin (DCO)
 

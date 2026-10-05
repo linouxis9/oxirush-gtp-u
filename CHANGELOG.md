@@ -35,5 +35,17 @@ First release.
   routing set up over rtnetlink, and without IPv6 addresses, so Linux sends
   nothing through them unasked.
 - IPv4 UDP and ICMP Echo helpers to exercise tunnels without a TUN.
-- Features: `endpoint` (default), `tun`, `serde`. Without default features
-  the crate has no dependencies. MSRV 1.85.
+- `ebpf::FastPath` (Linux 6.6, `ebpf` feature): three TCX programs carry an
+  endpoint's tunnels in the kernel between a TUN and N3
+  (`FastPath::load`, `open`, `detach`, `close` and `stats`,
+  `Endpoint::set_fast_path`, `Endpoint::shortcut`, `TunPort::index`). The
+  tunnel's route updates and ends its short-cut, as does the endpoint's
+  `shutdown`; a tunnel has one short-cut. What the programs leave
+  alone still goes through the endpoint's socket and the TUN's reader, and
+  on to the interface's other TCX programs and tc filters. N3 is the
+  interface Linux routes the tunnel through; it gets its program when a
+  first tunnel through it is installed, off the caller's task. The
+  programs' object is committed next to its source
+  (`src/ebpf/programs.rs`); CI rebuilds it and compares.
+- Features: `endpoint` (default), `tun`, `ebpf`, `serde`. Without default
+  features the crate has no dependencies. MSRV 1.85; `ebpf` needs Rust 1.87.

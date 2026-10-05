@@ -38,10 +38,10 @@ impl Routes {
         }
     }
 
-    fn remove(&mut self, key: SessionKey) {
-        if let Some(route) = self.by_session.remove(&key) {
-            self.by_teid.remove(&route.local_teid);
-        }
+    fn remove(&mut self, key: SessionKey) -> Option<Route> {
+        let route = self.by_session.remove(&key)?;
+        self.by_teid.remove(&route.local_teid);
+        Some(route)
     }
 
     fn insert(&mut self, key: SessionKey, route: Route) {
@@ -110,15 +110,28 @@ impl RouteTable {
         lock(&self.0).by_session.get(&key).copied()
     }
 
+    /// Run `f` on a route that cannot change or go away meanwhile.
+    #[cfg(all(target_os = "linux", feature = "ebpf"))]
+    pub(super) fn with_route<T>(&self, key: SessionKey, f: impl FnOnce(Route) -> T) -> Option<T> {
+        lock(&self.0).by_session.get(&key).copied().map(f)
+    }
+
+    #[cfg(all(target_os = "linux", feature = "ebpf"))]
+    pub(super) fn local_teids(&self) -> Vec<u32> {
+        lock(&self.0).by_teid.keys().copied().collect()
+    }
+
     pub(super) fn session(&self, local_teid: u32) -> Option<SessionKey> {
         lock(&self.0).by_teid.get(&local_teid).copied()
     }
 
-    pub(super) fn remove(&self, key: SessionKey) {
-        lock(&self.0).remove(key);
+    /// Returns the local TEID of the removed tunnel.
+    pub(super) fn remove(&self, key: SessionKey) -> Option<u32> {
+        lock(&self.0).remove(key).map(|route| route.local_teid)
     }
 
-    pub(super) fn remove_ran(&self, ran_id: u32) {
+    /// Returns the local TEIDs of the removed tunnels.
+    pub(super) fn remove_ran(&self, ran_id: u32) -> Vec<u32> {
         let mut routes = lock(&self.0);
         let keys: Vec<_> = routes
             .by_session
@@ -126,9 +139,10 @@ impl RouteTable {
             .filter(|(ran, _)| *ran == ran_id)
             .copied()
             .collect();
-        for key in keys {
-            routes.remove(key);
-        }
+        keys.into_iter()
+            .filter_map(|key| routes.remove(key))
+            .map(|route| route.local_teid)
+            .collect()
     }
 
     pub(super) fn len(&self) -> usize {

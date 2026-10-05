@@ -10,7 +10,7 @@ documentation = "https://docs.rs/oxirush-gtp-u"
 keywords = ["5g", "gtp-u", "upf", "3gpp", "telecom"]
 categories = ["network-programming", "parser-implementations", "development-tools::testing"]
 readme = "README.md"
-exclude = ["/.github", "/fuzz"]
+exclude = ["/.github", "/ebpf", "/fuzz"]
 
 [features]
 default = ["endpoint"]
@@ -24,6 +24,8 @@ tun = [
     "dep:netlink-packet-route",
     "dep:netlink-sys",
 ]
+# The eBPF fast path of the endpoint's tunnels (Linux 6.6, Rust 1.87).
+ebpf = ["tun", "dep:aya"]
 # Serialize and Deserialize for RemoteTunnel (with endpoint).
 serde = ["dep:serde"]
 
@@ -33,6 +35,7 @@ tokio = { version = "1.38", features = ["macros", "net", "rt", "sync", "signal"]
 tracing = { version = "0.1.40", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+aya = { version = "0.14", optional = true }
 libc = { version = "0.2.164", optional = true }
 netlink-packet-core = { version = "0.9", optional = true }
 netlink-packet-route = { version = "0.33", optional = true }
@@ -40,7 +43,7 @@ netlink-sys = { version = "0.9", optional = true }
 
 [dev-dependencies]
 proptest = "1.5"
-tokio = { version = "1.38", features = ["macros", "net", "process", "rt", "sync", "time"] }
+tokio = { version = "1.38", features = ["io-util", "macros", "net", "process", "rt", "sync", "time"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 libc = "0.2.164"
@@ -60,6 +63,10 @@ required-features = ["endpoint"]
 [[test]]
 name = "tun_linux"
 required-features = ["tun"]
+
+[[test]]
+name = "ebpf_linux"
+required-features = ["ebpf"]
 
 [package.metadata.docs.rs]
 all-features = true

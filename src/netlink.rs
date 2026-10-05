@@ -51,14 +51,16 @@ impl Netlink {
 
     /// Send `message` and wait for the kernel's acknowledgement.
     fn request(&mut self, message: RouteNetlinkMessage, flags: u16) -> io::Result<()> {
-        self.request_with_link_reply(message, flags).map(|_| ())
+        self.exchange(message, flags).map(|_| ())
     }
 
-    fn request_with_link_reply(
+    /// Send `message` and return what the kernel answers before its
+    /// acknowledgement: the link or the route asked for.
+    fn exchange(
         &mut self,
         message: RouteNetlinkMessage,
         flags: u16,
-    ) -> io::Result<Option<LinkMessage>> {
+    ) -> io::Result<Option<RouteNetlinkMessage>> {
         self.sequence = self.sequence.wrapping_add(1);
         let mut header = NetlinkHeader::default();
         header.flags = NLM_F_REQUEST | NLM_F_ACK | flags;
@@ -69,7 +71,7 @@ impl Netlink {
         request.serialize(&mut bytes);
         self.socket.send(&bytes, 0)?;
         let mut buffer = Vec::with_capacity(65536);
-        let mut link = None;
+        let mut answer = None;
         loop {
             buffer.clear();
             self.socket.recv(&mut buffer, 0)?;
@@ -81,13 +83,11 @@ impl Netlink {
                     match reply.payload {
                         NetlinkPayload::Error(error) => {
                             return match error.code {
-                                None => Ok(link),
+                                None => Ok(answer),
                                 Some(_) => Err(error.to_io()),
                             };
                         }
-                        NetlinkPayload::InnerMessage(RouteNetlinkMessage::NewLink(message)) => {
-                            link = Some(message);
-                        }
+                        NetlinkPayload::InnerMessage(message) => answer = Some(message),
                         _ => {}
                     }
                 }
@@ -103,8 +103,46 @@ impl Netlink {
 
     /// Resolve a link in the namespace this socket was created in.
     fn get_link(&mut self, message: LinkMessage) -> io::Result<LinkMessage> {
-        self.request_with_link_reply(RouteNetlinkMessage::GetLink(message), 0)?
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing link reply"))
+        match self.exchange(RouteNetlinkMessage::GetLink(message), 0)? {
+            Some(RouteNetlinkMessage::NewLink(link)) => Ok(link),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "missing link reply",
+            )),
+        }
+    }
+
+    /// The interface through which Linux routes packets from the local
+    /// address `source` to `destination`: loopback when both are this host's.
+    #[cfg(feature = "ebpf")]
+    pub fn route_interface(&mut self, source: Ipv4Addr, destination: Ipv4Addr) -> io::Result<u32> {
+        let mut message = RouteMessage::default();
+        message.header.address_family = AddressFamily::Inet;
+        message.header.destination_prefix_length = 32;
+        message.header.source_prefix_length = 32;
+        message
+            .attributes
+            .push(RouteAttribute::Destination(RouteAddress::Inet(destination)));
+        message
+            .attributes
+            .push(RouteAttribute::Source(RouteAddress::Inet(source)));
+        let interface =
+            match self.exchange(RouteNetlinkMessage::GetRoute(message), 0)? {
+                Some(RouteNetlinkMessage::NewRoute(route)) => route
+                    .attributes
+                    .into_iter()
+                    .find_map(|attribute| match attribute {
+                        RouteAttribute::Oif(index) => Some(index),
+                        _ => None,
+                    }),
+                _ => None,
+            };
+        interface.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NetworkUnreachable,
+                format!("no route from {source} to {destination}"),
+            )
+        })
     }
 
     pub fn index_of(&mut self, name: &str) -> io::Result<u32> {
@@ -178,6 +216,59 @@ impl Netlink {
             NLM_F_CREATE | NLM_F_EXCL,
         )?;
         self.index_of(name)
+    }
+
+    /// Create veth `name` with its other end `peer`, both with the largest
+    /// MTU: whatever enters one end must be let through the other.
+    #[cfg(feature = "ebpf")]
+    pub fn add_veth(&mut self, name: &str, peer: &str) -> io::Result<()> {
+        use netlink_packet_route::link::InfoVeth;
+        let mtu = u32::from(u16::MAX);
+        let mut far = LinkMessage::default();
+        far.attributes.push(LinkAttribute::IfName(peer.to_owned()));
+        far.attributes.push(LinkAttribute::Mtu(mtu));
+        let mut message = LinkMessage::default();
+        message
+            .attributes
+            .push(LinkAttribute::IfName(name.to_owned()));
+        message.attributes.push(LinkAttribute::Mtu(mtu));
+        message.attributes.push(LinkAttribute::LinkInfo(vec![
+            LinkInfo::Kind(InfoKind::Veth),
+            LinkInfo::Data(InfoData::Veth(InfoVeth::Peer(far))),
+        ]));
+        self.request(
+            RouteNetlinkMessage::NewLink(message),
+            NLM_F_CREATE | NLM_F_EXCL,
+        )
+    }
+
+    /// Whether link `index` is a veth that was set up.
+    #[cfg(feature = "ebpf")]
+    pub fn is_up_veth(&mut self, index: u32) -> bool {
+        let mut message = LinkMessage::default();
+        message.header.index = index;
+        self.get_link(message).is_ok_and(|link| {
+            link.header.flags.contains(LinkFlags::Up)
+                && link.attributes.iter().any(|attribute| {
+                    matches!(attribute, LinkAttribute::LinkInfo(info)
+                        if info.contains(&LinkInfo::Kind(InfoKind::Veth)))
+                })
+        })
+    }
+
+    /// The MTU of link `index`.
+    #[cfg(feature = "ebpf")]
+    pub fn mtu_of(&mut self, index: u32) -> io::Result<u32> {
+        let mut message = LinkMessage::default();
+        message.header.index = index;
+        self.get_link(message)?
+            .attributes
+            .into_iter()
+            .find_map(|attribute| match attribute {
+                LinkAttribute::Mtu(mtu) => Some(mtu),
+                _ => None,
+            })
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing link MTU"))
     }
 
     pub fn delete_link(&mut self, index: u32) -> io::Result<()> {

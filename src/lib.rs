@@ -12,6 +12,9 @@ mod packet;
 
 #[cfg(feature = "endpoint")]
 mod datagram;
+#[cfg(all(target_os = "linux", feature = "ebpf"))]
+#[allow(unsafe_code)]
+pub mod ebpf;
 #[cfg(feature = "endpoint")]
 mod endpoint;
 #[cfg(all(target_os = "linux", feature = "tun"))]

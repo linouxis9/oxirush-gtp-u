@@ -72,6 +72,7 @@ pub struct TunPort {
     // Routing must drop before the descriptor: cleanup still identifies the live device.
     routing: RoutingLease,
     device: TunDevice,
+    index: u32,
 }
 
 impl TunPort {
@@ -88,12 +89,21 @@ impl TunPort {
         let device = TunDevice::create(&config.name)?;
         let index = netlink.index_of(&config.name)?;
         let routing = RoutingLease::create(config.name, netlink, index, config.routing)?;
-        Ok(Self { routing, device })
+        Ok(Self {
+            routing,
+            device,
+            index,
+        })
     }
 
     /// The interface name.
     pub fn name(&self) -> &str {
         self.routing.name()
+    }
+
+    /// The interface index, in the network namespace of its creation.
+    pub fn index(&self) -> u32 {
+        self.index
     }
 
     /// Read a raw IPv4 or IPv6 packet that Linux routed to the TUN.
