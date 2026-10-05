@@ -475,7 +475,7 @@ async fn upf_tun_routes_the_kernel_s_reply_back_to_n3() {
         address: upf.local_addr().unwrap(),
         teid: 0x1001,
     };
-    let downlink_teid = gnb.install(1, 1, remote, 9);
+    let downlink_teid = gnb.install(1, 1, remote, 9).unwrap();
     upf.set_session(Session::new(
         remote.teid,
         downlink_teid,
@@ -546,7 +546,7 @@ async fn upf_routes_32_tun_sessions_without_crossing_teids() {
             address: upf.local_addr().unwrap(),
             teid: uplink_teid,
         };
-        let downlink_teid = gnb.install(u32::from(i), 1, remote, 9);
+        let downlink_teid = gnb.install(u32::from(i), 1, remote, 9).unwrap();
         upf.set_session(Session::new(
             uplink_teid,
             downlink_teid,

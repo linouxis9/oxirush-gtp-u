@@ -79,9 +79,9 @@ pub struct ReceivedPacket {
 /// let (gnb, _) = Endpoint::bind("127.0.0.1:0".parse().unwrap()).await?;
 /// let (peer, mut received) = Endpoint::bind("127.0.0.1:0".parse().unwrap()).await?;
 /// // Each side assigns the TEID it receives on; the other sends to it.
-/// let peer_teid = peer.install(1, 5, RemoteTunnel::new(gnb.local_addr()?, 0), 9);
-/// let gnb_teid = gnb.install(1, 5, RemoteTunnel::new(peer.local_addr()?, peer_teid), 9);
-/// peer.install(1, 5, RemoteTunnel::new(gnb.local_addr()?, gnb_teid), 9);
+/// let peer_teid = peer.install(1, 5, RemoteTunnel::new(gnb.local_addr()?, 0), 9)?;
+/// let gnb_teid = gnb.install(1, 5, RemoteTunnel::new(peer.local_addr()?, peer_teid), 9)?;
+/// peer.install(1, 5, RemoteTunnel::new(gnb.local_addr()?, gnb_teid), 9)?;
 ///
 /// gnb.send(1, 5, b"an IP packet".to_vec()).await?;
 /// let packet = received.recv().await.unwrap();
@@ -310,12 +310,24 @@ impl Endpoint {
     /// local TEID. For an existing tunnel this updates the remote end and
     /// QFI and keeps the TEID.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// If `qfi` is above 63.
-    pub fn install(&self, ran_id: u32, session_id: u8, remote: RemoteTunnel, qfi: u8) -> u32 {
-        assert!(qfi <= 63, "QFI {qfi} is outside 0..=63");
-        self.install_route(ran_id, session_id, remote, Some(qfi))
+    /// [`InvalidInput`](io::ErrorKind::InvalidInput) if `qfi` is above 63:
+    /// the tunnel then stays as it was.
+    pub fn install(
+        &self,
+        ran_id: u32,
+        session_id: u8,
+        remote: RemoteTunnel,
+        qfi: u8,
+    ) -> io::Result<u32> {
+        if qfi > 63 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("QFI {qfi} is outside 0..=63"),
+            ));
+        }
+        Ok(self.install_route(ran_id, session_id, remote, Some(qfi)))
     }
 
     /// Set up the S1-U tunnel of eNB UE `ran_id` and E-RAB `erab_id`

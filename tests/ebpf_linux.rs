@@ -191,7 +191,7 @@ async fn installing_a_tunnel_attaches_the_n3_program() {
         address: UPF.parse().unwrap(),
         teid: 0x1001,
     };
-    gnb.install(1, 1, remote, 9);
+    gnb.install(1, 1, remote, 9).unwrap();
     let attached = async {
         while ingress_programs("lo") == 0 {
             tokio::time::sleep(Duration::from_millis(1)).await;
@@ -268,7 +268,7 @@ async fn a_tunnel_is_carried_in_the_kernel_once_its_tun_sent_through_userspace()
         address: UPF.parse().unwrap(),
         teid: 0x1001,
     };
-    let downlink_teid = gnb.install(1, 1, remote, 9);
+    let downlink_teid = gnb.install(1, 1, remote, 9).unwrap();
     let (_upf, _observed) = upf(remote.teid, downlink_teid, &gnb).await;
     let port = Arc::new(ue_tun(&fast_path));
     assert_ne!(steering(port.name()), 0);
@@ -370,7 +370,7 @@ async fn the_short_cut_follows_handover_modification_and_release() {
         address: UPF.parse().unwrap(),
         teid: 0x2001,
     };
-    let source_teid = source.install(1, 1, remote, 9);
+    let source_teid = source.install(1, 1, remote, 9).unwrap();
     let (upf, mut observed) = upf(remote.teid, source_teid, &source).await;
     let port = ue_tun(&fast_path);
     shortcut(&source, 1, 1, port.index()).await;
@@ -388,7 +388,7 @@ async fn the_short_cut_follows_handover_modification_and_release() {
 
     // Handover: the target's tunnel has another TEID and N3 address. The
     // source's routes go later, which must leave the target's short-cut.
-    let target_teid = target.install(7, 1, remote, 9);
+    let target_teid = target.install(7, 1, remote, 9).unwrap();
     fast_path.detach(port.index());
     shortcut(&target, 7, 1, port.index()).await;
     upf.switch_downlink(remote.teid, target.local_addr().unwrap(), target_teid)
@@ -398,7 +398,7 @@ async fn the_short_cut_follows_handover_modification_and_release() {
     source.remove_ran(1);
     exchange("127.0.0.2:2152", 9).await;
     // Modification: the uplink gets another QFI.
-    target.install(7, 1, remote, 5);
+    target.install(7, 1, remote, 5).unwrap();
     exchange("127.0.0.2:2152", 5).await;
     let stats = fast_path.stats();
     assert_eq!((stats.uplink_packets, stats.downlink_packets), (4, 4));
@@ -439,7 +439,7 @@ async fn tunnels_keep_their_teids_and_qfis_apart_and_match_the_encoder() {
             teid: 0x7000 + u32::from(i),
         };
         let teid = match qfi {
-            Some(qfi) => gnb.install(u32::from(i), 1, remote, qfi),
+            Some(qfi) => gnb.install(u32::from(i), 1, remote, qfi).unwrap(),
             None => gnb.install_s1u(u32::from(i), 1, remote),
         };
         let address = Ipv4Addr::new(198, 19, 1, i);
@@ -540,8 +540,8 @@ async fn only_plain_ipv4_g_pdus_of_short_cut_tunnels_leave_userspace() {
         address: peer.local_addr().unwrap(),
         teid: 0x3001,
     };
-    let teid = gnb.install(1, 1, remote, 9);
-    let other = gnb.install(2, 1, remote, 9);
+    let teid = gnb.install(1, 1, remote, 9).unwrap();
+    let other = gnb.install(2, 1, remote, 9).unwrap();
     let routing = Routing::UePolicy {
         address: UE,
         table: 29100,
@@ -629,7 +629,7 @@ async fn a_peer_on_this_host_is_reached_through_loopback_whatever_its_address() 
         address: peer.local_addr().unwrap(),
         teid: 0x4001,
     };
-    let teid = gnb.install(1, 1, remote, 9);
+    let teid = gnb.install(1, 1, remote, 9).unwrap();
     let routing = Routing::UePolicy {
         address: UE,
         table: 29100,
@@ -701,7 +701,7 @@ async fn a_peer_on_another_host_is_reached_through_the_interface_of_its_route() 
         address: peer.local_addr().unwrap(),
         teid: 0x4001,
     };
-    let teid = gnb.install(1, 1, remote, 9);
+    let teid = gnb.install(1, 1, remote, 9).unwrap();
     let routing = Routing::UePolicy {
         address: UE,
         table: 29100,
@@ -759,7 +759,7 @@ async fn two_fast_paths_share_an_n3_interface() {
             address: peer.local_addr().unwrap(),
             teid: 0x5000 + u32::from(i),
         };
-        let teid = gnb.install(1, 1, remote, 9);
+        let teid = gnb.install(1, 1, remote, 9).unwrap();
         let address = Ipv4Addr::new(198, 19, 2, i);
         let routing = Routing::UePolicy {
             address,
@@ -820,7 +820,7 @@ async fn a_tunnel_given_to_another_tun_leaves_the_first() {
         address: peer.local_addr().unwrap(),
         teid: 0x6001,
     };
-    let teid = gnb.install(1, 1, remote, 9);
+    let teid = gnb.install(1, 1, remote, 9).unwrap();
     let old = policy_tun(&fast_path, "oxm1", Ipv4Addr::new(198, 19, 3, 1), 29101);
     let address = Ipv4Addr::new(198, 19, 3, 2);
     let new = policy_tun(&fast_path, "oxm2", address, 29102);
@@ -881,7 +881,7 @@ async fn shutting_an_endpoint_down_ends_its_short_cuts() {
         address: peer.local_addr().unwrap(),
         teid: 0x6003,
     };
-    gnb.install(1, 1, remote, 9);
+    gnb.install(1, 1, remote, 9).unwrap();
     let address = Ipv4Addr::new(198, 19, 5, 1);
     let port = policy_tun(&fast_path, "oxm1", address, 29100);
     shortcut(&gnb, 1, 1, port.index()).await;

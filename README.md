@@ -94,7 +94,7 @@ async fn main() -> std::io::Result<()> {
     // What the control plane negotiates: the UPF receives the session's
     // uplink on TEID 0x1001, the gNB its downlink on the TEID it assigns
     // to RAN UE 1, PDU session 5.
-    let teid = gnb.install(1, 5, RemoteTunnel::new(upf.local_addr()?, 0x1001), 9);
+    let teid = gnb.install(1, 5, RemoteTunnel::new(upf.local_addr()?, 0x1001), 9)?;
     upf.set_session(Session::new(0x1001, teid, gnb.local_addr()?, 9));
 
     // Uplink: an IP packet of the UE, which the UPF's echo service reflects.
@@ -140,7 +140,7 @@ async fn main() -> std::io::Result<()> {
 
     let (upf, _observed) = UpfSimulator::bind("127.0.0.8:2152".parse().unwrap()).await?;
     let (gnb, mut received) = Endpoint::bind("127.0.0.1:2152".parse().unwrap()).await?;
-    let teid = gnb.install(1, 5, RemoteTunnel::new(upf.local_addr()?, 0x1001), 9);
+    let teid = gnb.install(1, 5, RemoteTunnel::new(upf.local_addr()?, 0x1001), 9)?;
     upf.set_session(Session::new(0x1001, teid, gnb.local_addr()?, 9));
 
     // The TUN gets the UE's address, and a rule routes what is sent from
@@ -288,9 +288,10 @@ peer may send from another address than its F-TEID's.
 
 - `install` sets up the tunnel of a RAN UE and PDU session toward a remote
   TEID and returns the local TEID to give the peer; on an existing tunnel
-  it updates the remote end and the QFI. `install_s1u` does so for an
-  eNB's E-RAB, whose G-PDUs carry no PDU Session Container.
-  `install_with_teid` takes a local TEID that something else assigned.
+  it updates the remote end and the QFI. A QFI above 63 is `InvalidInput`.
+  `install_s1u` does so for an eNB's E-RAB, whose G-PDUs carry no PDU
+  Session Container, and cannot fail. `install_with_teid` takes a local
+  TEID that something else assigned.
 - `send` sends an IP packet in a tunnel. `send_to` sends any `Packet` from
   the endpoint's socket, with its sequence number and extension headers.
 - `remove` and `remove_ran` remove tunnels; `local_teid` looks one up.

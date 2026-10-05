@@ -24,7 +24,8 @@ First release.
   port 2152, and delivers G-PDUs, End Markers and the peer's Error
   Indications with their source address; the TEID alone identifies a
   tunnel. `install_s1u` gives an eNB's S1-U tunnels, without a PDU Session
-  Container.
+  Container. `install` returns an `io::Result`: a QFI above 63 is
+  `InvalidInput`, as with `install_with_teid`, and no longer a panic.
 - Endpoint and test-UPF binding require a specific local IP address;
   wildcard addresses return `InvalidInput` to preserve reply source addresses.
   TUN attachment and session replacement check the session's identity so a

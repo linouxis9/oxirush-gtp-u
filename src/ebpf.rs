@@ -23,7 +23,7 @@
 //! let (gnb, _received) = Endpoint::bind("192.0.2.1:2152".parse().unwrap()).await?;
 //! let fast_path = FastPath::load()?;
 //! gnb.set_fast_path(fast_path.clone())?;
-//! gnb.install(1, 5, RemoteTunnel::new("192.0.2.2:2152".parse().unwrap(), 0x1001), 9);
+//! gnb.install(1, 5, RemoteTunnel::new("192.0.2.2:2152".parse().unwrap(), 0x1001), 9)?;
 //!
 //! let routing = Routing::UePolicy {
 //!     address: "10.45.0.2".parse().unwrap(),

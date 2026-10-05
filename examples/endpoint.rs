@@ -15,7 +15,7 @@ async fn main() -> std::io::Result<()> {
     // What the control plane negotiates: the UPF receives the session's
     // uplink on TEID 0x1001, the gNB its downlink on the TEID it assigns
     // to RAN UE 1, PDU session 5.
-    let teid = gnb.install(1, 5, RemoteTunnel::new(upf.local_addr()?, 0x1001), 9);
+    let teid = gnb.install(1, 5, RemoteTunnel::new(upf.local_addr()?, 0x1001), 9)?;
     upf.set_session(Session::new(0x1001, teid, gnb.local_addr()?, 9));
 
     // Uplink: an IP packet of the UE, which the UPF's echo service reflects.

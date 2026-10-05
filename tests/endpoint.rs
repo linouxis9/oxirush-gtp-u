@@ -114,7 +114,7 @@ async fn setup() -> (Endpoint, Receiver<ReceivedPacket>, UdpSocket, u32) {
         address: peer.local_addr().unwrap(),
         teid: 44,
     };
-    let local_teid = endpoint.install(7, 1, remote, 9);
+    let local_teid = endpoint.install(7, 1, remote, 9).unwrap();
     (endpoint, received, peer, local_teid)
 }
 
@@ -522,13 +522,13 @@ async fn install_and_remove_tunnels() {
         teid: 50,
     };
     // Reinstalling keeps the TEID and moves the uplink.
-    assert_eq!(endpoint.install(7, 1, moved, 5), local_teid);
+    assert_eq!(endpoint.install(7, 1, moved, 5).unwrap(), local_teid);
     endpoint.send(7, 1, vec![0x45]).await.unwrap();
     let uplink = reply(&other).await;
     assert_eq!((uplink.teid, uplink.qfi()), (50, Some(5)));
 
-    let second = endpoint.install(7, 2, moved, 5);
-    let third = endpoint.install(8, 1, moved, 5);
+    let second = endpoint.install(7, 2, moved, 5).unwrap();
+    let third = endpoint.install(8, 1, moved, 5).unwrap();
     assert_eq!(
         [local_teid, second, third].len(),
         std::collections::HashSet::from([local_teid, second, third]).len()
@@ -551,6 +551,24 @@ async fn install_and_remove_tunnels() {
 }
 
 #[tokio::test]
+async fn a_qfi_above_63_is_refused_and_leaves_the_tunnel_as_it_was() {
+    let (endpoint, _received, peer, local_teid) = setup().await;
+    let other = RemoteTunnel::new("127.0.0.1:9".parse().unwrap(), 50);
+    // On the tunnel that exists and on a new one.
+    for (ran_id, session_id) in [(7, 1), (8, 1)] {
+        let error = endpoint.install(ran_id, session_id, other, 64).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
+    assert_eq!(endpoint.local_teid(8, 1), None);
+    assert_eq!(endpoint.local_teid(7, 1), Some(local_teid));
+    endpoint.send(7, 1, vec![0x45]).await.unwrap();
+    let uplink = reply(&peer).await;
+    assert_eq!((uplink.teid, uplink.qfi()), (44, Some(9)));
+    // 63 is the highest QFI.
+    endpoint.install(8, 1, other, 63).unwrap();
+}
+
+#[tokio::test]
 async fn works_over_ipv6() {
     let (endpoint, mut received) = Endpoint::bind("[::1]:0".parse().unwrap()).await.unwrap();
     let peer = UdpSocket::bind("[::1]:0").await.unwrap();
@@ -558,7 +576,7 @@ async fn works_over_ipv6() {
         address: peer.local_addr().unwrap(),
         teid: 45,
     };
-    let local_teid = endpoint.install(3, 2, remote, 1);
+    let local_teid = endpoint.install(3, 2, remote, 1).unwrap();
     endpoint.send(3, 2, vec![0x60, 0]).await.unwrap();
     assert_eq!(reply(&peer).await.teid, 45);
     send(
@@ -583,7 +601,7 @@ async fn ipv4_mapped_socket_serves_ipv4_peers() {
         address: peer.local_addr().unwrap(),
         teid: 46,
     };
-    let local_teid = endpoint.install(4, 1, remote, 2);
+    let local_teid = endpoint.install(4, 1, remote, 2).unwrap();
     endpoint.send(4, 1, vec![0x45]).await.unwrap();
     assert_eq!(reply(&peer).await.teid, 46);
     let port = endpoint.local_addr().unwrap().port();

@@ -26,7 +26,7 @@ async fn main() -> std::io::Result<()> {
     let fast_path = FastPath::load()?;
     gnb.set_fast_path(fast_path.clone())?;
 
-    let teid = gnb.install(1, 5, RemoteTunnel::new(upf.local_addr()?, 0x1001), 9);
+    let teid = gnb.install(1, 5, RemoteTunnel::new(upf.local_addr()?, 0x1001), 9)?;
     upf.set_session(Session::new(0x1001, teid, gnb.local_addr()?, 9));
 
     let ue = Ipv4Addr::new(10, 45, 0, 2);
