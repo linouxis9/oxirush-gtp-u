@@ -346,7 +346,7 @@ impl UpfSimulator {
     pub fn attach_tun(&self, uplink_teid: u32, config: TunConfig) -> io::Result<()> {
         self.ensure_running()?;
         let incarnation = self.shared.state.prepare_attachment(uplink_teid)?;
-        let port = Arc::new(TunPort::create(config)?);
+        let port = TunPort::create(config)?;
         let task = tokio::spawn(forward_tun_downlink(
             port.clone(),
             self.shared.socket.clone(),
@@ -504,7 +504,7 @@ async fn write_to_tun(_target: &UplinkTarget, _packet: &[u8]) -> bool {
 /// Send what Linux routes to a session's TUN as downlink G-PDUs.
 #[cfg(all(target_os = "linux", feature = "tun"))]
 async fn forward_tun_downlink(
-    port: Arc<TunPort>,
+    port: TunPort,
     socket: Arc<DatagramSocket>,
     state: Arc<SessionRegistry>,
     uplink_teid: u32,

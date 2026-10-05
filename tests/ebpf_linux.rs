@@ -270,7 +270,7 @@ async fn a_tunnel_is_carried_in_the_kernel_once_its_tun_sent_through_userspace()
     };
     let downlink_teid = gnb.install(1, 1, remote, 9).unwrap();
     let (_upf, _observed) = upf(remote.teid, downlink_teid, &gnb).await;
-    let port = Arc::new(ue_tun(&fast_path));
+    let port = ue_tun(&fast_path);
     assert_ne!(steering(port.name()), 0);
 
     // The N3 interface has its program by the time a UE sends.

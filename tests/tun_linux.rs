@@ -383,6 +383,35 @@ async fn ue_policy_routes_the_ue_s_traffic_through_the_tun() {
 }
 
 #[tokio::test]
+#[ignore = "needs root"]
+async fn clones_share_the_tun_which_goes_with_the_last_one() {
+    isolate();
+    let address = Ipv4Addr::new(198, 19, 0, 8);
+    let routing = Routing::UePolicy {
+        address,
+        table: 29005,
+        priority: 15005,
+    };
+    let port = TunPort::create(TunConfig::new("oxk0", routing)).unwrap();
+    let clone = port.clone();
+    assert_eq!((clone.name(), clone.index()), (port.name(), port.index()));
+    drop(port);
+    assert!(
+        exists("oxk0"),
+        "the TUN went with a clone that was not the last"
+    );
+    assert!(rules().contains("15005:"), "{}", rules());
+    let destination = Ipv4Addr::new(203, 0, 113, 3);
+    tokio::join!(
+        ping(&["-I", "198.19.0.8", "203.0.113.3"]),
+        answer_ping(&clone, address, destination)
+    );
+    drop(clone);
+    assert!(!exists("oxk0"));
+    assert!(!rules().contains("15005:"), "{}", rules());
+}
+
+#[tokio::test]
 #[ignore = "needs root and the vrf module"]
 async fn ue_vrf_routes_the_vrf_s_traffic_through_the_tun() {
     isolate();
@@ -618,7 +647,7 @@ async fn close_wakes_a_reader() {
     let routing = Routing::Upf {
         ue_address: Ipv4Addr::new(198, 18, 0, 7),
     };
-    let port = std::sync::Arc::new(TunPort::create(TunConfig::new("oxw0", routing)).unwrap());
+    let port = TunPort::create(TunConfig::new("oxw0", routing)).unwrap();
     let reader = port.clone();
     let task = tokio::spawn(async move {
         let mut buffer = vec![0u8; 65535];

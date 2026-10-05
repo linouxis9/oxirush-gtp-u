@@ -40,12 +40,12 @@ pub(super) struct Incarnation {
 pub(super) struct UplinkTarget {
     pub(super) incarnation: Arc<Incarnation>,
     #[cfg(all(target_os = "linux", feature = "tun"))]
-    pub(super) port: Option<Arc<TunPort>>,
+    pub(super) port: Option<TunPort>,
 }
 
 #[cfg(all(target_os = "linux", feature = "tun"))]
 pub(super) struct TunAttachment {
-    pub(super) port: Arc<TunPort>,
+    pub(super) port: TunPort,
     pub(super) task: Option<JoinHandle<()>>,
 }
 

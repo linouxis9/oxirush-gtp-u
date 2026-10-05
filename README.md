@@ -132,7 +132,6 @@ the UE's address sends is routed into the TUN.
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> std::io::Result<()> {
     use std::net::Ipv4Addr;
-    use std::sync::Arc;
 
     use oxirush_gtp_u::tun::{Routing, TunConfig, TunPort};
     use oxirush_gtp_u::upf_sim::{Session, UpfSimulator};
@@ -151,7 +150,7 @@ async fn main() -> std::io::Result<()> {
         table: 100,
         priority: 100,
     };
-    let tun = Arc::new(TunPort::create(TunConfig::new("ue0", routing))?);
+    let tun = TunPort::create(TunConfig::new("ue0", routing))?;
 
     // Uplink: what Linux routes into the TUN goes into the tunnel.
     let (reader, uplink) = (tun.clone(), gnb.clone());
@@ -208,7 +207,7 @@ before its tunnels are installed:
 It puts the TUN on the fast path:
 
 ```rust,ignore
-    let tun = Arc::new(TunPort::create(TunConfig::new("ue0", routing))?);
+    let tun = TunPort::create(TunConfig::new("ue0", routing))?;
     // Put the TUN on the fast path once, when it is created.
     fast_path.open(tun.index())?;
 ```
@@ -345,12 +344,13 @@ rtnetlink:
 
 The routing is IPv4 and the TUN has no IPv6 address, so Linux sends nothing
 through it unasked. `recv` and `send` exchange raw IP packets with Linux.
+A `TunPort` is `Clone`, for a task that reads it and one that writes.
 
-Dropping the port removes the TUN and its routing, as does `close`;
-`try_close` reports what could not be removed and keeps it for another
-call. Removal happens in the network namespace of the creation. A process
-that ends without running destructors, as on SIGKILL, leaves the rule or
-the VRF behind; the TUN goes with the process.
+Dropping the last clone removes the TUN and its routing, as does `close`
+at once; `try_close` reports what could not be removed and keeps it for
+another call. Removal happens in the network namespace of the creation. A
+process that ends without running destructors, as on SIGKILL, leaves the
+rule or the VRF behind; the TUN goes with the process.
 
 ### Fast path
 

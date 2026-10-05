@@ -3,12 +3,14 @@
 //! [`TunPort::create`] makes the TUN and sets up its address, routes, rule
 //! or VRF over rtnetlink. [`TunPort::try_close`] removes them, reporting
 //! cleanup failures so they can be retried. [`TunPort::close`] and dropping
-//! the port perform best-effort cleanup. It needs `CAP_NET_ADMIN`.
+//! the last clone of the port perform best-effort cleanup. It needs
+//! `CAP_NET_ADMIN`.
 
 use crate::netlink::Netlink;
 use std::fmt;
 use std::io;
 use std::net::Ipv4Addr;
+use std::sync::Arc;
 
 mod device;
 mod error;
@@ -68,6 +70,8 @@ impl TunConfig {
 }
 
 /// A TUN device that exchanges raw IPv4 and IPv6 packets with Linux.
+/// Clones share the device, as for a task that reads it and one that
+/// writes; dropping the last one removes the TUN and its routing.
 ///
 /// ```no_run
 /// use oxirush_gtp_u::tun::{Routing, TunConfig, TunPort};
@@ -91,7 +95,12 @@ impl TunConfig {
 /// # Ok(())
 /// # }
 /// ```
+#[derive(Clone)]
 pub struct TunPort {
+    inner: Arc<Inner>,
+}
+
+struct Inner {
     // Routing must drop before the descriptor: cleanup still identifies the live device.
     routing: RoutingLease,
     device: TunDevice,
@@ -113,36 +122,38 @@ impl TunPort {
         let index = netlink.index_of(&config.name)?;
         let routing = RoutingLease::create(config.name, netlink, index, config.routing)?;
         Ok(Self {
-            routing,
-            device,
-            index,
+            inner: Arc::new(Inner {
+                routing,
+                device,
+                index,
+            }),
         })
     }
 
     /// The interface name.
     pub fn name(&self) -> &str {
-        self.routing.name()
+        self.inner.routing.name()
     }
 
     /// The interface index, in the network namespace of its creation.
     pub fn index(&self) -> u32 {
-        self.index
+        self.inner.index
     }
 
     /// Read a raw IPv4 or IPv6 packet that Linux routed to the TUN. A
     /// packet longer than `buffer` is cut to it: 65535 bytes hold any, and
     /// 1500 those of a TUN whose MTU was not changed.
     pub async fn recv(&self, buffer: &mut [u8]) -> io::Result<usize> {
-        self.device.recv(buffer).await
+        self.inner.device.recv(buffer).await
     }
 
     /// Hand a raw IPv4 or IPv6 packet to Linux, as if the TUN received it.
     pub async fn send(&self, packet: &[u8]) -> io::Result<()> {
-        self.device.send(packet).await
+        self.inner.device.send(packet).await
     }
 
     /// Remove the TUN, its address and routes, and its rule or VRF in the
-    /// network namespace where it was created. Other tasks holding the
+    /// network namespace where it was created. The other clones of the
     /// port then observe `recv` and `send` errors.
     ///
     /// Attempts every remaining resource and returns the first failure.
@@ -151,13 +162,13 @@ impl TunPort {
     /// waiting for netlink acknowledgements and requires `CAP_NET_ADMIN`
     /// in the creation namespace.
     pub fn try_close(&self) -> io::Result<()> {
-        self.routing.try_close()
+        self.inner.routing.try_close()
     }
 
     /// Perform best-effort cleanup, logging any failure. Later calls retry
     /// remaining resources; use [`try_close`](Self::try_close) to inspect failures.
     pub fn close(&self) {
-        self.routing.close();
+        self.inner.routing.close();
     }
 }
 
@@ -188,7 +199,7 @@ mod tests {
 
     #[test]
     fn tun_port_can_be_shared_between_tasks() {
-        fn assert_send_sync<T: Send + Sync>() {}
-        assert_send_sync::<TunPort>();
+        fn assert_shared<T: Clone + Send + Sync>() {}
+        assert_shared::<TunPort>();
     }
 }

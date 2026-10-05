@@ -11,7 +11,6 @@
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> std::io::Result<()> {
     use std::net::Ipv4Addr;
-    use std::sync::Arc;
 
     use oxirush_gtp_u::tun::{Routing, TunConfig, TunPort};
     use oxirush_gtp_u::upf_sim::{Session, UpfSimulator};
@@ -30,7 +29,7 @@ async fn main() -> std::io::Result<()> {
         table: 100,
         priority: 100,
     };
-    let tun = Arc::new(TunPort::create(TunConfig::new("ue0", routing))?);
+    let tun = TunPort::create(TunConfig::new("ue0", routing))?;
 
     // Uplink: what Linux routes into the TUN goes into the tunnel.
     let (reader, uplink) = (tun.clone(), gnb.clone());

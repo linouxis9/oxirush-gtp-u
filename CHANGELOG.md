@@ -35,7 +35,8 @@ First release.
   optional TUN per session.
 - `tun::TunPort` (Linux, `tun` feature): TUN devices with policy, VRF or UPF
   routing set up over rtnetlink, and without IPv6 addresses, so Linux sends
-  nothing through them unasked.
+  nothing through them unasked. A `TunPort` is `Clone`: clones share the
+  device, and the TUN goes with the last one or on `close`.
 - IPv4 UDP and ICMP Echo helpers to exercise tunnels without a TUN.
 - `ebpf::FastPath` (Linux 6.6, `ebpf` feature): three TCX programs carry an
   endpoint's tunnels in the kernel between a TUN and N3

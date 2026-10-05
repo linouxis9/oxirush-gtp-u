@@ -11,7 +11,6 @@
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> std::io::Result<()> {
     use std::net::Ipv4Addr;
-    use std::sync::Arc;
 
     use oxirush_gtp_u::ebpf::FastPath;
     use oxirush_gtp_u::tun::{Routing, TunConfig, TunPort};
@@ -35,7 +34,7 @@ async fn main() -> std::io::Result<()> {
         table: 100,
         priority: 100,
     };
-    let tun = Arc::new(TunPort::create(TunConfig::new("ue0", routing))?);
+    let tun = TunPort::create(TunConfig::new("ue0", routing))?;
     // Put the TUN on the fast path once, when it is created.
     fast_path.open(tun.index())?;
 
