@@ -48,6 +48,8 @@ First release.
   first tunnel through it is installed, off the caller's task. The
   programs' object is committed next to its source
   (`src/ebpf/programs.rs`); CI rebuilds it and compares.
+- Examples: `codec`, `endpoint`, and on Linux as root `tun` and `fast_path`.
+  The README shows them, and a test compares the two.
 - Features: `endpoint` and `ebpf` (default), `tun`, `serde`. Without
   default features the crate has no dependencies. MSRV 1.87, which `ebpf`
   needs.

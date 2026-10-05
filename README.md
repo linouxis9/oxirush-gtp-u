@@ -4,287 +4,415 @@
 [![Documentation](https://docs.rs/oxirush-gtp-u/badge.svg)](https://docs.rs/oxirush-gtp-u)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](https://github.com/linouxis9/oxirush-gtp-u/blob/master/LICENSE)
 
-GTPv1-U for Rust: a codec for 3GPP TS 29.281 with the PDU Session Container
-of TS 38.415, a Tokio endpoint for the N3 side of a gNB, a UPF for tests,
-and Linux TUN devices routed for a UE or a UPF session.
+GTPv1-U, the protocol that tunnels user traffic in 4G and 5G networks, for
+Rust:
 
-## Features
+- a **codec** for the messages of 3GPP TS 29.281, with the PDU Session
+  Container of TS 38.415 that carries a 5G QoS flow identifier;
+- **`Endpoint`**, a Tokio UDP socket for the tunnels of a gNB (N3) or an eNB
+  (S1-U), which also answers what a GTP-U node must answer;
+- **`upf_sim`**, a UPF to test against, as a type and as a program;
+- **`tun`**, Linux TUN devices with the address and routes of a UE or of a
+  UPF session;
+- **`ebpf`**, an eBPF fast path that carries an endpoint's tunnels in the
+  kernel, between a TUN and the network.
 
-The codec handles every header field of TS 29.281 §5.1, chains of
-extension headers, and the information elements of §8. It builds Echo
-Request and Response, Error Indication, Supported Extension Headers
-Notification, End Marker, Tunnel Status and G-PDU messages. The PDU Session
-Container carries the downlink and uplink PDU Session Information of TS 38.415 V18
-§5.5.2, with the QoS monitoring, sequence number, delay and congestion
-fields, plus downlink Burst Size and Time To Next Burst. Later uplink IEs
-are kept as received when their format is not yet typed.
+It is made for simulators and test tools. It has no control plane: tunnels
+are set up by calls, with the TEIDs and addresses that NGAP, S1AP or PFCP
+would negotiate. The test UPF is not a UPF for real traffic. GTP-U has no
+authentication: anyone who reaches a socket can send on its tunnels.
 
-Decoding follows the receiver rules of §5.1: the flags decide which
-optional fields are read, the spare bit is ignored, and extension headers
-and unknown TLV IEs are kept. TV IEs imported from TS 29.060 are kept when
-their fixed length is known; an unknown TV type returns an error. Property
-tests and a fuzz target check for panics and decode/encode/decode equality,
-and the tests compare the wire format with Wireshark's dissector.
-The codec has also exchanged traffic with the free5GC and
-Open5GS UPFs.
-
-`Endpoint` is one UDP socket for all the tunnels of a gNB, keyed by a RAN
-UE identifier and a PDU session ID. It does the path management of
-TS 29.281 §7 by itself: it answers Echo Requests, sends an Error Indication
-for a G-PDU on an unknown TEID and a Supported Extension Headers
-Notification for an unsupported comprehension-required extension header,
-to port 2152 as the specification requires. It identifies a tunnel by its
-TEID alone, so peers may send from another address than their F-TEID's.
-A slow consumer never delays those replies: past 256 queued messages it
-drops new ones, as a full socket buffer would.
-
-`upf_sim::UpfSimulator` is a UPF for tests, with sessions provisioned
-through its API. Uplink packets go to a built-in N6 service that reflects
-IPv4 UDP and ICMP Echo Request packets, or to a TUN device. It sends an End
-Marker when a session's downlink moves to another gNB address.
-
-`tun::TunPort` creates a TUN device and sets up, over rtnetlink, the
-address and routes of a UE session (a source-address policy rule or a VRF)
-or of a UPF session. Dropping it removes them.
-
-`ipv4_udp` and `ipv4_icmp_echo_request` build inner IPv4 packets, and
-`parse_ipv4_udp` and `parse_ipv4_icmp_echo` read them, to exercise tunnels
-without a TUN.
-
-### Limitations
-
-- No PFCP: the test UPF's sessions are set with `set_session`, or by the
-  arguments of the `oxirush-upf-sim` binary.
-- The inner-packet helpers are IPv4 only. IPv6 T-PDUs are carried like any
-  other payload.
-- TUN devices are Linux only.
-- GTP-U has no authentication: anyone who reaches the socket can send on a
-  tunnel or report an Error Indication for it.
-
-## Quick start
+## Requirements
 
 ```toml
 [dependencies]
 oxirush-gtp-u = "0.1"
 ```
 
-### Feature flags
+Rust 1.87 or later, and for each part:
 
-| Feature    | Default | Adds |
-| ---------- | ------- | ---- |
-| `endpoint` | yes     | `Endpoint` and `upf_sim`, on Tokio |
-| `tun`      | with `ebpf` | `tun` and `UpfSimulator::attach_tun`, on Linux |
-| `ebpf`     | yes     | `ebpf`, the fast path of an endpoint's tunnels, on Linux 6.6 (with `tun`) |
-| `serde`    | no      | `Serialize` and `Deserialize` for `RemoteTunnel`, with `endpoint` |
+| Part | Feature | Needs |
+| ---- | ------- | ----- |
+| Codec, IPv4 helpers | none | nothing |
+| `Endpoint`, `upf_sim` | `endpoint` (default) | a Tokio runtime |
+| `tun`, `UpfSimulator::attach_tun` | `tun` (default, through `ebpf`) | Linux, `CAP_NET_ADMIN` |
+| `ebpf` | `ebpf` (default) | Linux 6.6, `CAP_BPF` and `CAP_NET_ADMIN` |
+| `Serialize` and `Deserialize` for `RemoteTunnel` | `serde` | |
 
-Without default features the crate is the codec and the IPv4 helpers, with
-no dependencies. The minimum supported Rust version is 1.87, which the
-`ebpf` feature needs.
+With `default-features = false` the crate is the codec and has no
+dependencies. The `tun` and `ebpf` modules exist on Linux only; elsewhere
+their features build and add nothing to `endpoint`. The fast path's
+programs are committed as an object: building the crate needs no nightly
+toolchain and no eBPF linker.
 
 ## Usage
 
-### Encoding and decoding
+The programs below are those of `examples/`; a test compares them with this
+page. The asynchronous ones also need `tokio` with its `macros`, `rt` and
+`net` features.
+
+### Encode and decode
 
 ```rust
-use oxirush_gtp_u::{Packet, PduSessionContainer};
+use oxirush_gtp_u::{DownlinkPduSessionInformation, Packet, PduSessionContainer};
 
 fn main() -> Result<(), oxirush_gtp_u::Error> {
     // An uplink G-PDU of QoS flow 9, as a gNB sends it on N3.
-    let packet = Packet::uplink(0x1234_5678, 9, b"an IP packet".to_vec());
-    let bytes = packet.encode()?;
-
+    let uplink = Packet::uplink(0x1234_5678, 9, b"an IP packet".to_vec());
+    let bytes = uplink.encode()?;
     let decoded = Packet::decode(&bytes)?;
-    assert_eq!(decoded, packet);
-    assert!(matches!(
-        decoded.pdu_session_container(),
-        Some(PduSessionContainer::Uplink(information)) if information.qfi == 9
-    ));
+    assert_eq!(decoded, uplink);
+    assert_eq!(decoded.qfi(), Some(9));
+
+    // A downlink one whose container has more than a QFI.
+    let mut information = DownlinkPduSessionInformation::new(9);
+    information.rqi = true;
+    let container = PduSessionContainer::Downlink(information);
+    let downlink = Packet::g_pdu(0x9abc_def0, b"an IP packet".as_slice())
+        .with_pdu_session_container(container.clone());
+    let bytes = downlink.encode()?;
+
+    // The payload of a borrowed message stays in the datagram.
+    let decoded = Packet::decode_borrowed(&bytes)?;
+    assert_eq!(decoded.pdu_session_container(), Some(&container));
+    assert_eq!(decoded.payload, b"an IP packet");
     Ok(())
 }
 ```
 
-`Packet::encoded_len` validates the wire length without allocating output.
-`encode_into` appends to a reusable `Vec<u8>` and leaves it unchanged on
-validation error; clear the buffer first to replace its previous contents.
+### An endpoint and the test UPF
 
-`Packet<P>` accepts any payload implementing `AsRef<[u8]>`, with `Vec<u8>`
-as the default. `Packet::decode_borrowed` returns a `Packet<&[u8]>` whose
-payload refers to the input datagram; extension headers are still owned.
-Call `into_owned` when the packet must outlive that datagram.
+```rust,ignore
+use oxirush_gtp_u::upf_sim::{Session, UpfSimulator};
+use oxirush_gtp_u::{Endpoint, RemoteTunnel, ipv4_udp, parse_ipv4_udp};
 
-```rust
-use oxirush_gtp_u::Packet;
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> std::io::Result<()> {
+    let (upf, mut observed) = UpfSimulator::bind("127.0.0.1:0".parse().unwrap()).await?;
+    let (gnb, mut received) = Endpoint::bind("127.0.0.1:0".parse().unwrap()).await?;
 
-fn main() -> Result<(), oxirush_gtp_u::Error> {
-    let packet = Packet::uplink(0x1234_5678, 9, b"an IP packet".as_slice());
-    let bytes = packet.encode()?;
-    let borrowed = Packet::decode_borrowed(&bytes)?;
-    assert_eq!(borrowed.encode()?, bytes);
+    // What the control plane negotiates: the UPF receives the session's
+    // uplink on TEID 0x1001, the gNB its downlink on the TEID it assigns
+    // to RAN UE 1, PDU session 5.
+    let teid = gnb.install(1, 5, RemoteTunnel::new(upf.local_addr()?, 0x1001), 9);
+    upf.set_session(Session::new(0x1001, teid, gnb.local_addr()?, 9));
+
+    // Uplink: an IP packet of the UE, which the UPF's echo service reflects.
+    let ue = "10.45.0.2:4000".parse().unwrap();
+    let server = "192.0.2.1:7".parse().unwrap();
+    gnb.send(1, 5, ipv4_udp(ue, server, b"hello")?).await?;
+    let uplink = observed.recv().await.expect("the UPF is running");
+    println!("UPF: TEID {:#x} from {}", uplink.uplink_teid, uplink.from);
+
+    // Downlink: the reply, with the tunnel it arrived on.
+    let downlink = received.recv().await.expect("the endpoint is running");
+    let (from, to, payload) = parse_ipv4_udp(&downlink.packet.payload)?;
+    println!(
+        "gNB: RAN UE {} session {}, QFI {:?}: {from} to {to}",
+        downlink.ran_id,
+        downlink.session_id,
+        downlink.packet.qfi()
+    );
+    assert_eq!((from, to, payload), (server, ue, b"hello".as_slice()));
     Ok(())
 }
 ```
 
-### Tunnels on an endpoint
+```sh
+cargo run --example endpoint
+```
 
-`Endpoint::bind` opens the socket and returns a receiver for the tunnels'
-messages. `install` adds the tunnel of a RAN UE and PDU session to a remote
-F-TEID and returns the local TEID to give the peer; `send` sends a G-PDU on
-it. `install_s1u` adds an eNB's S1-U tunnel instead, whose G-PDUs carry no
-PDU Session Container. The [`Endpoint` documentation](https://docs.rs/oxirush-gtp-u/latest/oxirush_gtp_u/struct.Endpoint.html)
-has a complete example with two endpoints.
+### A TUN for a UE
 
-`install_with_teid` accepts a local TEID assigned by another control-plane
-component. `send_to` sends a custom `Packet` from the endpoint's bound socket,
-including its sequence number and extension headers.
-`send`, `send_to` and `UpfSimulator::send_downlink` accept borrowed payloads
-as well as owned buffers.
+With a TUN, applications use a tunnel through Linux: what a socket bound to
+the UE's address sends is routed into the TUN.
 
-Both `Endpoint` and `UpfSimulator` expose receive/drop counters through `stats`,
-worker health through `is_running`, and an async `shutdown` that stops background
-processing for all clones and waits for their receiver. The UDP port stays bound
-until the final clone is dropped. Slow or closed application receivers do not stop
-path replies. UPF shutdown also waits for TUN forwarding tasks and reports cleanup
-failures; retry shutdown after resolving the error to finish releasing resources.
+```rust,ignore
+#[cfg(target_os = "linux")]
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> std::io::Result<()> {
+    use std::net::Ipv4Addr;
+    use std::sync::Arc;
 
-Bind port 2152 to receive the peer's Error Indications, which TS 29.281
-§4.4.2.4 sends there whatever port the G-PDUs came from, and bind a
-specific address: `Endpoint::bind` and `UpfSimulator::bind` reject wildcard
-addresses with `InvalidInput` so replies use the address that received the
-request.
+    use oxirush_gtp_u::tun::{Routing, TunConfig, TunPort};
+    use oxirush_gtp_u::upf_sim::{Session, UpfSimulator};
+    use oxirush_gtp_u::{Endpoint, G_PDU, RemoteTunnel};
 
-### The test UPF
+    let (upf, _observed) = UpfSimulator::bind("127.0.0.8:2152".parse().unwrap()).await?;
+    let (gnb, mut received) = Endpoint::bind("127.0.0.1:2152".parse().unwrap()).await?;
+    let teid = gnb.install(1, 5, RemoteTunnel::new(upf.local_addr()?, 0x1001), 9);
+    upf.set_session(Session::new(0x1001, teid, gnb.local_addr()?, 9));
 
-The binary runs one session:
+    // The TUN gets the UE's address, and a rule routes what is sent from
+    // that address into it.
+    let ue = Ipv4Addr::new(10, 45, 0, 2);
+    let routing = Routing::UePolicy {
+        address: ue,
+        table: 100,
+        priority: 100,
+    };
+    let tun = Arc::new(TunPort::create(TunConfig::new("ue0", routing))?);
 
-```bash
+    // Uplink: what Linux routes into the TUN goes into the tunnel.
+    let (reader, uplink) = (tun.clone(), gnb.clone());
+    tokio::spawn(async move {
+        let mut packet = vec![0; 65535];
+        while let Ok(length) = reader.recv(&mut packet).await {
+            let _ = uplink.send(1, 5, &packet[..length]).await;
+        }
+    });
+    // Downlink: the IP packets of the tunnel's G-PDUs go to Linux.
+    let writer = tun.clone();
+    tokio::spawn(async move {
+        while let Some(message) = received.recv().await {
+            if message.packet.message_type == G_PDU {
+                let _ = writer.send(&message.packet.payload).await;
+            }
+        }
+    });
+
+    // A socket bound to the UE's address now goes through the tunnel. The
+    // test UPF's echo service answers for any destination.
+    let socket = tokio::net::UdpSocket::bind((ue, 0)).await?;
+    socket.send_to(b"hello", "192.0.2.1:7").await?;
+    let mut reply = [0; 16];
+    let (length, from) = socket.recv_from(&mut reply).await?;
+    let reply = String::from_utf8_lossy(&reply[..length]);
+    println!("{from} answered {reply:?}");
+    Ok(())
+}
+```
+
+It creates an interface and a routing rule, which needs root. A network
+namespace of its own keeps them off the host:
+
+```sh
+cargo build --example tun
+sudo unshare --net sh -c 'ip link set lo up && target/debug/examples/tun'
+```
+
+### The eBPF fast path
+
+In the program above every packet crosses userspace twice, through the
+TUN's reader and the endpoint's socket. With the fast path, eBPF programs
+carry a tunnel's packets in the kernel instead, and userspace keeps
+carrying what they leave. `examples/fast_path.rs` is the program above with
+three additions. It loads the programs and gives them to the endpoint,
+before its tunnels are installed:
+
+```rust,ignore
+    let fast_path = FastPath::load()?;
+    gnb.set_fast_path(fast_path.clone())?;
+```
+
+It puts the TUN on the fast path:
+
+```rust,ignore
+    let tun = Arc::new(TunPort::create(TunConfig::new("ue0", routing))?);
+    // Put the TUN on the fast path once, when it is created.
+    fast_path.open(tun.index())?;
+```
+
+And it asks for the tunnel's short-cut whenever userspace carried a packet
+of it:
+
+```rust,ignore
+        while let Ok(length) = reader.recv(&mut packet).await {
+            let _ = uplink.send(1, 5, &packet[..length]).await;
+            // Userspace carried a packet of the tunnel: have the kernel carry
+            // the next ones. While the tunnel's interface is still getting
+            // its program this is `WouldBlock`, and the next packet asks again.
+            if let Err(error) = uplink.shortcut(1, 5, reader.index()) {
+                eprintln!("still in userspace: {error}");
+            }
+        }
+```
+
+It runs like the `tun` example and prints `FastPath::stats`, the packets
+that the programs carried.
+
+### The test UPF as a program
+
+```sh
 cargo run --bin oxirush-upf-sim -- 127.0.0.8:2152 127.0.0.1:2152 1001 2001 9
 ```
 
 The arguments are the UPF's N3 address, the gNB's N3 address, the uplink
-TEID, the downlink TEID and the QFI; the gNB uses the same TEIDs the other
-way round. Tests that change sessions as they run, or move a session's
-downlink with `switch_downlink`, use the Rust API instead.
+TEID, the downlink TEID and the QFI. It serves that one session until
+Ctrl-C or SIGTERM, with the echo service as N6, or as root with a TUN:
 
-A failed or cancelled `switch_downlink` can leave the new route installed.
-The old path's End Marker remains pending and a retry to the same target
-attempts it again. `session` and `pending_end_marker` expose those outcomes;
-UDP send success does not guarantee delivery. The binary handles Ctrl-C and
-SIGTERM by awaiting shutdown and closing attached TUNs.
-
-### TUN devices
-
-`TunPort` needs `CAP_NET_ADMIN` and sets up one of three routings:
-
-- `Routing::UePolicy` gives a UE session an address and a source-address
-  rule to its own table, whose default route is the TUN.
-- `Routing::UeVrf` puts the TUN in a new VRF with its own table.
-- `Routing::Upf` routes one UE address to the TUN in the main table, so
-  that Linux handles N6, including forwarding when the host enables it.
-
-`try_close` reports cleanup failures and retains failed resources for retry.
-Cleanup uses the network namespace where the port was created, even when
-another thread or namespace closes it. `close` and `Drop` perform best-effort
-cleanup using the same operation.
-
-`UpfSimulator::attach_tun` connects such a TUN to a session:
-
-```bash
-cargo build --features tun --bin oxirush-upf-sim
+```sh
+cargo build --bin oxirush-upf-sim
 sudo ./target/debug/oxirush-upf-sim \
   127.0.0.8:2152 127.0.0.1:2152 1001 2001 9 --tun oxupf0 10.45.0.2
 ```
 
-To reach another network over N6, enable IPv4 forwarding and add the routes
-or NAT that network needs. The TUN device always goes away with the
-process, but the policy rule or VRF stays behind when the process ends
-without running destructors: on SIGKILL, `process::exit`, or a panic with
-`panic = "abort"`.
+## Reference
 
-### The eBPF fast path
+### Codec
 
-Between a TUN and the endpoint's socket, each packet of a tunnel crosses
-userspace twice. With the `ebpf` feature three TCX programs carry it in the
-kernel instead:
+`Packet` has every header field of TS 29.281 §5.1, the chain of extension
+headers and the payload. There are constructors for G-PDU, Echo Request and
+Response, Error Indication, Supported Extension Headers Notification and End
+Marker; `Packet::new` and `InformationElement::encode_all` build any other
+message. The PDU Session Container has the downlink and uplink PDU Session
+Information of TS 38.415 V18 §5.5.2, with the QoS monitoring, sequence
+number, delay and congestion fields, and the downlink Burst Size and Time
+To Next Burst.
 
-```rust,ignore
-let fast_path = oxirush_gtp_u::ebpf::FastPath::load()?;
-endpoint.set_fast_path(fast_path.clone())?;
-// Put a TUN on the fast path once, when it is created...
-fast_path.open(port.index())?;
-// ... then give it its tunnel, for example on the first packet read from it.
-endpoint.shortcut(ran_id, session_id, port.index())?;
-// When the tunnel moves to another endpoint, and before the TUN is closed:
-fast_path.detach(port.index());
-fast_path.close(port.index());
-```
+Decoding follows the receiver rules of §5.1: the flags decide which
+optional fields are read and the spare bit is ignored. Extension headers,
+TLV information elements and uplink New IEs that have no type of their own
+are kept as received. A TV information element imported from TS 29.060 is
+kept when its fixed length is known; an unknown TV type is an error. What
+decodes encodes to a message that decodes to the same value.
 
-Attaching a program takes milliseconds: `open` does it, once per TUN. An
-N3 interface gets its program when a first tunnel through it is installed,
-on a blocking thread of the Tokio runtime; until it is there `shortcut`
-fails with `WouldBlock` and the tunnel stays in userspace. A `shortcut`
-itself asks Linux for the route to the peer and writes two map entries.
-Outside a Tokio runtime, whoever installs the tunnel attaches the program.
+`Packet<P>` takes any payload that is `AsRef<[u8]>`, `Vec<u8>` by default.
+`decode_borrowed` returns a `Packet<&[u8]>` whose payload stays in the
+datagram, and `into_owned` copies it. `encoded_len` gives the wire length
+without encoding. `encode_into` appends to a `Vec<u8>` and leaves it as it
+was on an error. The codec's `Error` converts into a `std::io::Error`, for
+`?` next to an endpoint's calls.
 
-- `uplink`, at the egress of the TUN, hands the IPv4 packets of a
-  short-cut tunnel to the stage: a veth pair without checksum offload, so
-  that Linux splits the large segments of the UE's TCP stack and completes
-  their checksums before the encapsulation. The stage has the largest MTU:
-  whatever a TUN lets through crosses it.
-- `encap`, at the ingress of the stage's far end, writes the IPv4, UDP and
-  GTP-U headers, with the PDU Session Container of an N3 tunnel, and sends
-  the G-PDU out of the N3 interface. The G-PDU is byte for byte the one the
-  endpoint's encoder writes.
+`ipv4_udp` and `ipv4_icmp_echo_request` build inner packets, and
+`parse_ipv4_udp` and `parse_ipv4_icmp_echo` read them, to exercise a tunnel
+without a TUN. They are IPv4 only; any payload, IPv6 included, is carried
+as it is.
+
+### Endpoint
+
+`Endpoint::bind` opens the socket and returns the receiver of the tunnels'
+messages: G-PDUs, End Markers and the peer's Error Indications, each with
+its tunnel and source address. The TEID alone identifies a tunnel, so a
+peer may send from another address than its F-TEID's.
+
+- `install` sets up the tunnel of a RAN UE and PDU session toward a remote
+  TEID and returns the local TEID to give the peer; on an existing tunnel
+  it updates the remote end and the QFI. `install_s1u` does so for an
+  eNB's E-RAB, whose G-PDUs carry no PDU Session Container.
+  `install_with_teid` takes a local TEID that something else assigned.
+- `send` sends an IP packet in a tunnel. `send_to` sends any `Packet` from
+  the endpoint's socket, with its sequence number and extension headers.
+- `remove` and `remove_ran` remove tunnels; `local_teid` looks one up.
+
+The endpoint does the path management of TS 29.281 §7 by itself. It answers
+Echo Requests, sends an Error Indication for a G-PDU on an unknown TEID and
+a Supported Extension Headers Notification for an extension header it must
+understand and does not. The last two go to port 2152, as the specification
+requires. A slow receiver never delays these replies: past 256 queued
+messages new ones are dropped and counted, and a dropped receiver changes
+nothing else.
+
+Bind a specific address: a wildcard is refused with `InvalidInput`, so that
+replies leave from the address the request reached. Bind port 2152 to
+receive the peer's Error Indications, which TS 29.281 §4.4.2.4 sends there
+whatever port the G-PDUs came from.
+
+`stats` has the receive and drop counters and `is_running` the state of the
+background task. `shutdown` stops it for all clones and waits for it; the
+port stays bound until the last clone is dropped.
+
+### Test UPF
+
+`UpfSimulator` is an N3 peer whose sessions are set with `set_session`.
+Uplink packets go to the echo service, which reflects IPv4 UDP and answers
+ICMP Echo Requests, or to the TUN that `attach_tun` gives the session.
+`send_downlink` sends a packet to the UE. The receiver of `bind` observes
+the uplink G-PDUs.
+
+`switch_downlink` moves a session's downlink to another gNB address and
+TEID and sends an End Marker on the old path. When that send fails or is
+cancelled the new path stays, the marker stays pending
+(`pending_end_marker`) and the next call sends it first.
+
+`shutdown` also closes the attached TUNs and returns what could not be
+cleaned up; call it again to retry.
+
+### TUN devices
+
+`TunPort::create` makes the TUN and sets up one of three routings over
+rtnetlink:
+
+- `Routing::UePolicy` gives the TUN a UE's address, and a rule sends what
+  comes from that address to a table of its own, whose default route is the
+  TUN.
+- `Routing::UeVrf` gives the TUN a UE's address and puts it in a new VRF,
+  whose table has the TUN as its default route.
+- `Routing::Upf` routes one UE address to the TUN in the main table, so
+  that Linux is the UPF's N6. To reach another network, enable IPv4
+  forwarding and add the routes or NAT that network needs.
+
+The routing is IPv4 and the TUN has no IPv6 address, so Linux sends nothing
+through it unasked. `recv` and `send` exchange raw IP packets with Linux.
+
+Dropping the port removes the TUN and its routing, as does `close`;
+`try_close` reports what could not be removed and keeps it for another
+call. Removal happens in the network namespace of the creation. A process
+that ends without running destructors, as on SIGKILL, leaves the rule or
+the VRF behind; the TUN goes with the process.
+
+### Fast path
+
+`FastPath::load` loads three TCX programs:
+
+- `uplink`, at the egress of a TUN, hands the IPv4 packets of a short-cut
+  tunnel to the stage. The stage is a veth pair without checksum offload,
+  so that Linux splits the large segments of the UE's TCP stack and
+  completes their checksums before the encapsulation. It has the largest
+  MTU: whatever a TUN lets through crosses it.
+- `encap`, at the far end of the stage, writes the IPv4, UDP and GTP-U
+  headers, with the PDU Session Container of an N3 tunnel, and sends the
+  G-PDU out of the N3 interface. The G-PDU is the one the codec encodes.
 - `decap`, at the ingress of the N3 interface, delivers the G-PDUs of
   short-cut tunnels to their TUN.
 
 The N3 interface of a tunnel is the one Linux routes it through, from the
-endpoint's address to the peer's, when the tunnel is short-cut or changes:
-the loopback interface for a peer on the same host, and not necessarily
-the interface that holds the endpoint's address.
+endpoint's address to the peer's: the loopback interface for a peer on the
+same host. It gets `decap` when a first tunnel through it is installed, on
+a blocking thread of the Tokio runtime, so that the task that installs the
+tunnel does not wait for it (outside a runtime the caller attaches it).
+Until it is there `Endpoint::shortcut` fails with `WouldBlock`.
+`FastPath::open` attaches `uplink` to a TUN in the caller's thread.
 
-The tunnel's route stays the reference: `install` on it updates the
-short-cut, and `remove` or the endpoint's `shutdown` ends it, as does giving
-the TUN another tunnel or the tunnel another TUN. A
-TUN that is not on the fast path, or whose `shortcut` failed, stays in
-userspace. The
-programs leave to userspace, which keeps working underneath, anything
-else: other messages than G-PDUs, unknown TEIDs, extension headers other
-than one PDU Session Container, fragments, inner packets that are not IPv4,
-G-PDUs longer than the N3 MTU (the socket fragments them) and ICMP Echo
-Replies, which whoever pings through the endpoint expects on its receiver.
-What they leave also goes on to the other TCX programs and the tc filters
-of the interface (`TC_ACT_UNSPEC`): several fast paths, or another tool's
-programs, share an N3 interface.
-`FastPath::stats` counts what the programs carried, returned as too long
-and dropped.
+A short-cut follows its tunnel. `install` on the tunnel updates it;
+`remove` and the endpoint's `shutdown` end it, and so does giving the TUN
+another tunnel or the tunnel another TUN. `FastPath::detach` leaves a TUN's
+tunnel to userspace until the next `shortcut`, as when its UE moves to
+another endpoint. `FastPath::close` also takes the TUN off the fast path:
+call it before closing the TUN. When `shortcut` fails the tunnel stays in
+userspace.
+
+The programs leave to userspace, which keeps working underneath: other
+messages than G-PDUs, unknown TEIDs, extension headers other than one PDU
+Session Container, fragments, inner packets that are not IPv4, G-PDUs
+longer than the N3 MTU (the socket fragments them), and ICMP Echo Replies,
+which a caller that pings through the endpoint expects on its receiver.
+What they leave also goes on to the interface's other TCX programs and tc
+filters (`TC_ACT_UNSPEC`), so several fast paths or other tools can share
+an N3 interface. `FastPath::stats` counts the packets carried, returned as
+too long and dropped.
+
+The endpoint must be bound to an IPv4 address and port 2152, and a
+tunnel's peer must be IPv4 on port 2152 too. Everything happens in the
+network namespace `load` was called in. `load` fails without TCX or the
+capabilities and then leaves nothing behind. The programs' links go with
+the process, whatever ends it. The stage, `oxs` with eight hexadecimal
+digits, outlives a killed process; the next `load` in that namespace
+removes it, as an `oxs` veth that is up and whose far end has no program
+left.
 
 `load` and `open` also spread what the stage's far end and the TUN receive
-over the CPUs the process may use (RPS, `rps_cpus`): otherwise the CPU of
-whoever transmits, an application or the N3 interface, also encapsulates
-or receives the UE's packets. They do so only when `/sys` shows the
-process's network namespace; after `unshare --net` alone it still shows the
-former one, and nothing is steered.
+over the CPUs the process may use (RPS), when `/sys` shows the process's
+network namespace. After `unshare --net` alone it shows the former one, and
+nothing is steered.
 
-It needs TCX, which Linux has since 6.6 (it is tested on 7.0), `CAP_BPF`
-and `CAP_NET_ADMIN`; `load` fails otherwise and leaves nothing behind. N3 is
-IPv4 and the endpoint is on the GTP-U port; the tests run it on the
-loopback interface and on a veth to another network namespace. Everything
-happens in the network namespace `load` was called in. The links go with
-the process, whatever ends it. The stage, `oxs` with eight random digits,
-stays behind a process that was killed; the next `load` in that network
-namespace removes it, as an `oxs` veth that is up and whose far end has no
-program left.
+The programs' source is `src/ebpf/programs.rs` and their object
+`src/ebpf/gtpu.o`. `ebpf/build.sh` rebuilds the object, with the nightly
+toolchain that `ebpf/rust-toolchain.toml` pins, `rust-src` and
+`bpf-linker`; CI rebuilds it the same way with bpf-linker 0.11.1 and fails
+when it differs from the committed one.
 
-The programs' source is `src/ebpf/programs.rs`, which the crate in `ebpf/`
-builds for the eBPF target, and their object is committed next to it as
-`src/ebpf/gtpu.o`: building this crate needs neither a nightly toolchain
-nor a linker for eBPF. `ebpf/build.sh` rebuilds it, with the nightly
-toolchain `ebpf/rust-toolchain.toml` pins, `rust-src` and `bpf-linker`; the
-committed object comes from that toolchain, bpf-linker 0.11.1 and the
-locked aya-ebpf 0.2.1. CI rebuilds the object the same way and fails when
-it differs from the committed one.
-
-## Architecture
+### Source layout
 
 ```text
 src/
@@ -309,15 +437,10 @@ src/
 ├── ebpf/gtpu.o            their object, built by ../ebpf (ebpf)
 └── bin/oxirush-upf-sim.rs
 ebpf/                      the crate that builds programs.rs for eBPF
+examples/                  the programs of this page
 ```
 
-`Endpoint` and `UpfSimulator` use the same datagram receive path. It handles malformed
-packets and path replies before tunnel dispatch, and copies a payload only
-after reserving space in the application receiver. Session changes remain
-atomic with the nonblocking send that uses them. TUN routing cleanup runs
-before its device descriptor is released.
-
-## Tests
+### Tests
 
 ```bash
 cargo test --all-features
@@ -334,9 +457,10 @@ CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER=sudo \
 cargo test --test wireshark -- --ignored
 ```
 
-`fuzz/` has a cargo-fuzz target for the decoders.
+Property tests check the codec for panics and for decode, encode, decode
+equality, and `fuzz/` has a cargo-fuzz target for the same.
 
-## 3GPP references
+### 3GPP references
 
 - 3GPP TS 29.281: GTPv1-U (header, extension headers, messages, information
   elements, path management)

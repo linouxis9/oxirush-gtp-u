@@ -1,0 +1,67 @@
+//! A UE's TUN whose packets cross an N3 tunnel in userspace, to the test UPF
+//! and back. It needs Linux and root, and is best run in a network namespace
+//! of its own:
+//!
+//! ```sh
+//! cargo build --example tun
+//! sudo unshare --net sh -c 'ip link set lo up && target/debug/examples/tun'
+//! ```
+
+#[cfg(target_os = "linux")]
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> std::io::Result<()> {
+    use std::net::Ipv4Addr;
+    use std::sync::Arc;
+
+    use oxirush_gtp_u::tun::{Routing, TunConfig, TunPort};
+    use oxirush_gtp_u::upf_sim::{Session, UpfSimulator};
+    use oxirush_gtp_u::{Endpoint, G_PDU, RemoteTunnel};
+
+    let (upf, _observed) = UpfSimulator::bind("127.0.0.8:2152".parse().unwrap()).await?;
+    let (gnb, mut received) = Endpoint::bind("127.0.0.1:2152".parse().unwrap()).await?;
+    let teid = gnb.install(1, 5, RemoteTunnel::new(upf.local_addr()?, 0x1001), 9);
+    upf.set_session(Session::new(0x1001, teid, gnb.local_addr()?, 9));
+
+    // The TUN gets the UE's address, and a rule routes what is sent from
+    // that address into it.
+    let ue = Ipv4Addr::new(10, 45, 0, 2);
+    let routing = Routing::UePolicy {
+        address: ue,
+        table: 100,
+        priority: 100,
+    };
+    let tun = Arc::new(TunPort::create(TunConfig::new("ue0", routing))?);
+
+    // Uplink: what Linux routes into the TUN goes into the tunnel.
+    let (reader, uplink) = (tun.clone(), gnb.clone());
+    tokio::spawn(async move {
+        let mut packet = vec![0; 65535];
+        while let Ok(length) = reader.recv(&mut packet).await {
+            let _ = uplink.send(1, 5, &packet[..length]).await;
+        }
+    });
+    // Downlink: the IP packets of the tunnel's G-PDUs go to Linux.
+    let writer = tun.clone();
+    tokio::spawn(async move {
+        while let Some(message) = received.recv().await {
+            if message.packet.message_type == G_PDU {
+                let _ = writer.send(&message.packet.payload).await;
+            }
+        }
+    });
+
+    // A socket bound to the UE's address now goes through the tunnel. The
+    // test UPF's echo service answers for any destination.
+    let socket = tokio::net::UdpSocket::bind((ue, 0)).await?;
+    socket.send_to(b"hello", "192.0.2.1:7").await?;
+    let mut reply = [0; 16];
+    let (length, from) = socket.recv_from(&mut reply).await?;
+    let reply = String::from_utf8_lossy(&reply[..length]);
+    println!("{from} answered {reply:?}");
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn main() {
+    eprintln!("this example needs Linux");
+}

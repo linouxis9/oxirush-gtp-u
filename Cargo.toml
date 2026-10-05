@@ -3,7 +3,7 @@ name = "oxirush-gtp-u"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.87"
-description = "GTPv1-U codec (TS 29.281, TS 38.415), async N3 endpoint, test UPF and Linux TUN routing"
+description = "GTPv1-U codec (TS 29.281, TS 38.415), async N3 endpoint, test UPF, Linux TUN routing and eBPF fast path"
 license = "Apache-2.0"
 repository = "https://github.com/linouxis9/oxirush-gtp-u"
 documentation = "https://docs.rs/oxirush-gtp-u"
@@ -51,6 +51,18 @@ libc = "0.2.164"
 [[bin]]
 name = "oxirush-upf-sim"
 required-features = ["endpoint"]
+
+[[example]]
+name = "endpoint"
+required-features = ["endpoint"]
+
+[[example]]
+name = "tun"
+required-features = ["tun"]
+
+[[example]]
+name = "fast_path"
+required-features = ["ebpf"]
 
 [[test]]
 name = "endpoint"
