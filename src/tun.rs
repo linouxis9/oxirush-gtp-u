@@ -68,6 +68,29 @@ impl TunConfig {
 }
 
 /// A TUN device that exchanges raw IPv4 and IPv6 packets with Linux.
+///
+/// ```no_run
+/// use oxirush_gtp_u::tun::{Routing, TunConfig, TunPort};
+///
+/// # #[tokio::main(flavor = "current_thread")]
+/// # async fn main() -> std::io::Result<()> {
+/// // A UE's TUN: Linux routes into it what is sent from the UE's address.
+/// let routing = Routing::UePolicy {
+///     address: "10.45.0.2".parse().unwrap(),
+///     table: 100,
+///     priority: 100,
+/// };
+/// let tun = TunPort::create(TunConfig::new("ue0", routing))?;
+///
+/// let mut packet = vec![0; 65535];
+/// let length = tun.recv(&mut packet).await?;
+/// // `packet[..length]` goes into the UE's tunnel, and what the tunnel
+/// // brings for the UE goes to Linux:
+/// # let downlink = &packet[..length];
+/// tun.send(downlink).await?;
+/// # Ok(())
+/// # }
+/// ```
 pub struct TunPort {
     // Routing must drop before the descriptor: cleanup still identifies the live device.
     routing: RoutingLease,
@@ -106,7 +129,9 @@ impl TunPort {
         self.index
     }
 
-    /// Read a raw IPv4 or IPv6 packet that Linux routed to the TUN.
+    /// Read a raw IPv4 or IPv6 packet that Linux routed to the TUN. A
+    /// packet longer than `buffer` is cut to it: 65535 bytes hold any, and
+    /// 1500 those of a TUN whose MTU was not changed.
     pub async fn recv(&self, buffer: &mut [u8]) -> io::Result<usize> {
         self.device.recv(buffer).await
     }

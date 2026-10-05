@@ -75,6 +75,32 @@ pub struct UplinkPacket {
 /// address the gNB sends from. Clones share the socket and sessions; the
 /// task stops and the TUNs close when the last clone is dropped. Must be
 /// used within a Tokio runtime.
+///
+/// ```
+/// use oxirush_gtp_u::upf_sim::{Session, UpfSimulator};
+/// use oxirush_gtp_u::{Packet, ipv4_udp, parse_ipv4_udp};
+///
+/// # #[tokio::main(flavor = "current_thread")]
+/// # async fn main() -> std::io::Result<()> {
+/// let (upf, mut observed) = UpfSimulator::bind("127.0.0.1:0".parse().unwrap()).await?;
+/// // The gNB under test: here a socket that sends and receives G-PDUs.
+/// let gnb = tokio::net::UdpSocket::bind("127.0.0.1:0").await?;
+/// upf.set_session(Session::new(0x1001, 0x2001, gnb.local_addr()?, 9));
+///
+/// let (ue, server) = ("10.45.0.2:4000".parse().unwrap(), "192.0.2.1:7".parse().unwrap());
+/// let uplink = Packet::uplink(0x1001, 9, ipv4_udp(ue, server, b"hello")?);
+/// gnb.send_to(&uplink.encode()?, upf.local_addr()?).await?;
+/// assert_eq!(observed.recv().await.unwrap().packet, uplink);
+///
+/// // The echo service answers on the session's downlink tunnel.
+/// let mut datagram = [0; 128];
+/// let length = gnb.recv(&mut datagram).await?;
+/// let downlink = Packet::decode(&datagram[..length])?;
+/// assert_eq!((downlink.teid, downlink.qfi()), (0x2001, Some(9)));
+/// assert_eq!(parse_ipv4_udp(&downlink.payload)?, (server, ue, b"hello".as_slice()));
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Clone)]
 pub struct UpfSimulator {
     shared: Arc<Shared>,

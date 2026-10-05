@@ -12,10 +12,40 @@
 //! Replies, which whoever pings through the endpoint expects there.
 //!
 //! It needs Linux 6.6 (TCX), `CAP_BPF` and `CAP_NET_ADMIN`.
+//!
+//! ```no_run
+//! use oxirush_gtp_u::ebpf::FastPath;
+//! use oxirush_gtp_u::tun::{Routing, TunConfig, TunPort};
+//! use oxirush_gtp_u::{Endpoint, RemoteTunnel};
+//!
+//! # #[tokio::main(flavor = "current_thread")]
+//! # async fn main() -> std::io::Result<()> {
+//! let (gnb, _received) = Endpoint::bind("192.0.2.1:2152".parse().unwrap()).await?;
+//! let fast_path = FastPath::load()?;
+//! gnb.set_fast_path(fast_path.clone())?;
+//! gnb.install(1, 5, RemoteTunnel::new("192.0.2.2:2152".parse().unwrap(), 0x1001), 9);
+//!
+//! let routing = Routing::UePolicy {
+//!     address: "10.45.0.2".parse().unwrap(),
+//!     table: 100,
+//!     priority: 100,
+//! };
+//! let tun = TunPort::create(TunConfig::new("ue0", routing))?;
+//! fast_path.open(tun.index())?;
+//! // Once userspace carried a packet of the tunnel from the TUN, and again
+//! // after a `WouldBlock`:
+//! gnb.shortcut(1, 5, tun.index())?;
+//!
+//! // Before the TUN is closed:
+//! fast_path.close(tun.index());
+//! # Ok(())
+//! # }
+//! ```
 
 use std::collections::HashMap;
 use std::collections::hash_map::RandomState;
 use std::ffi::CStr;
+use std::fmt;
 use std::hash::{BuildHasher, Hasher};
 use std::io;
 use std::net::{IpAddr, Ipv4Addr};
@@ -366,6 +396,14 @@ impl FastPath {
             N3::Attaching => Err(io::ErrorKind::WouldBlock.into()),
             N3::Failed(error) => Err(io::Error::other(error.clone())),
         }
+    }
+}
+
+impl fmt::Debug for FastPath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FastPath")
+            .field("tuns", &lock(&self.inner.state).tuns.len())
+            .finish()
     }
 }
 

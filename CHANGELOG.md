@@ -9,6 +9,7 @@ First release.
   Indication, Supported Extension Headers Notification, End Marker and
   G-PDUs. Decoding follows the receiver rules of §5.1 and never panics;
   what it produces encodes to a message that decodes to the same value.
+  Its `Error` converts into a `std::io::Error`.
 - PDU Session Container (TS 38.415 V18 §5.5.2): downlink and uplink PDU
   Session Information with their QoS monitoring, sequence number, delay and
   congestion fields; new IEs of later releases are kept as received. The

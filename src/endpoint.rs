@@ -32,6 +32,13 @@ pub struct RemoteTunnel {
     pub teid: u32,
 }
 
+impl RemoteTunnel {
+    /// The tunnel that the peer at `address` receives on `teid`.
+    pub fn new(address: SocketAddr, teid: u32) -> Self {
+        Self { address, teid }
+    }
+}
+
 /// A message for one of the endpoint's tunnels.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -72,10 +79,9 @@ pub struct ReceivedPacket {
 /// let (gnb, _) = Endpoint::bind("127.0.0.1:0".parse().unwrap()).await?;
 /// let (peer, mut received) = Endpoint::bind("127.0.0.1:0".parse().unwrap()).await?;
 /// // Each side assigns the TEID it receives on; the other sends to it.
-/// let tunnel = |address, teid| RemoteTunnel { address, teid };
-/// let peer_teid = peer.install(1, 5, tunnel(gnb.local_addr()?, 0), 9);
-/// let gnb_teid = gnb.install(1, 5, tunnel(peer.local_addr()?, peer_teid), 9);
-/// peer.install(1, 5, tunnel(gnb.local_addr()?, gnb_teid), 9);
+/// let peer_teid = peer.install(1, 5, RemoteTunnel::new(gnb.local_addr()?, 0), 9);
+/// let gnb_teid = gnb.install(1, 5, RemoteTunnel::new(peer.local_addr()?, peer_teid), 9);
+/// peer.install(1, 5, RemoteTunnel::new(gnb.local_addr()?, gnb_teid), 9);
 ///
 /// gnb.send(1, 5, b"an IP packet".to_vec()).await?;
 /// let packet = received.recv().await.unwrap();
@@ -239,7 +245,6 @@ impl Endpoint {
     /// [`shortcut`](Self::shortcut) gives a TUN, until they are removed or
     /// the endpoint is shut down.
     #[cfg(all(target_os = "linux", feature = "ebpf"))]
-    #[cfg_attr(docsrs, doc(cfg(feature = "ebpf")))]
     pub fn set_fast_path(&self, fast_path: crate::ebpf::FastPath) -> io::Result<()> {
         let local = match self.local_addr()? {
             SocketAddr::V4(local) if local.port() == crate::PORT => *local.ip(),
@@ -283,7 +288,6 @@ impl Endpoint {
     /// - Another error: the route lookup or a map write failed, or the N3
     ///   interface could not get its program, which is not tried again.
     #[cfg(all(target_os = "linux", feature = "ebpf"))]
-    #[cfg_attr(docsrs, doc(cfg(feature = "ebpf")))]
     pub fn shortcut(&self, ran_id: u32, session_id: u8, tun: u32) -> io::Result<()> {
         let (fast_path, local) = self.shared.fast_path.get().ok_or_else(|| {
             io::Error::new(io::ErrorKind::Unsupported, "the endpoint has no fast path")

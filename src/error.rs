@@ -42,3 +42,26 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+/// As [`InvalidData`](std::io::ErrorKind::InvalidData), so that `?` also
+/// works on the codec's results where an endpoint's are returned.
+impl From<Error> for std::io::Error {
+    fn from(error: Error) -> Self {
+        Self::new(std::io::ErrorKind::InvalidData, error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_io_error_keeps_the_codec_error() {
+        let error = std::io::Error::from(Error::Truncated("GTP-U header"));
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(
+            error.get_ref().and_then(|inner| inner.downcast_ref()),
+            Some(&Error::Truncated("GTP-U header"))
+        );
+    }
+}

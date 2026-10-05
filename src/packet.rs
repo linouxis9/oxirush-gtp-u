@@ -39,6 +39,21 @@ const OPTIONAL_LEN: usize = 4;
 /// `P` defaults to an owned `Vec<u8>`. Constructors also accept slices and
 /// other byte buffers implementing `AsRef<[u8]>`. Borrowed decoding keeps the
 /// payload in the original datagram; extension metadata remains owned.
+///
+/// ```
+/// use oxirush_gtp_u::{G_PDU, Packet};
+///
+/// # fn main() -> Result<(), oxirush_gtp_u::Error> {
+/// let packet = Packet::uplink(0x1234_5678, 9, b"an IP packet".to_vec());
+/// let bytes = packet.encode()?;
+///
+/// let decoded = Packet::decode(&bytes)?;
+/// assert_eq!(decoded, packet);
+/// assert_eq!((decoded.message_type, decoded.teid), (G_PDU, 0x1234_5678));
+/// assert_eq!(decoded.qfi(), Some(9));
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Packet<P = Vec<u8>> {
@@ -79,16 +94,18 @@ impl<P: AsRef<[u8]>> Packet<P> {
     /// An uplink G-PDU on N3 or N9: its PDU Session Container holds UL PDU
     /// Session Information of QoS flow `qfi`.
     pub fn uplink(teid: u32, qfi: u8, payload: P) -> Self {
-        Self::g_pdu(teid, payload).with_container(PduSessionContainer::uplink(qfi))
+        Self::g_pdu(teid, payload).with_pdu_session_container(PduSessionContainer::uplink(qfi))
     }
 
     /// A downlink G-PDU on N3 or N9: its PDU Session Container holds DL PDU
     /// Session Information of QoS flow `qfi`.
     pub fn downlink(teid: u32, qfi: u8, payload: P) -> Self {
-        Self::g_pdu(teid, payload).with_container(PduSessionContainer::downlink(qfi))
+        Self::g_pdu(teid, payload).with_pdu_session_container(PduSessionContainer::downlink(qfi))
     }
 
-    fn with_container(mut self, container: PduSessionContainer) -> Self {
+    /// This message with `container` after its extension headers: a G-PDU
+    /// whose PDU Session Information has more than a QFI.
+    pub fn with_pdu_session_container(mut self, container: PduSessionContainer) -> Self {
         self.extension_headers
             .push(ExtensionHeader::PduSessionContainer(container));
         self
