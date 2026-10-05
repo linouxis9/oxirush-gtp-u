@@ -73,13 +73,13 @@ oxirush-gtp-u = "0.1"
 | Feature    | Default | Adds |
 | ---------- | ------- | ---- |
 | `endpoint` | yes     | `Endpoint` and `upf_sim`, on Tokio |
-| `tun`      | no      | `tun` and `UpfSimulator::attach_tun`, on Linux |
-| `ebpf`     | no      | `ebpf`, the fast path of an endpoint's tunnels, on Linux 6.6 (with `tun`) |
+| `tun`      | with `ebpf` | `tun` and `UpfSimulator::attach_tun`, on Linux |
+| `ebpf`     | yes     | `ebpf`, the fast path of an endpoint's tunnels, on Linux 6.6 (with `tun`) |
 | `serde`    | no      | `Serialize` and `Deserialize` for `RemoteTunnel`, with `endpoint` |
 
 Without default features the crate is the codec and the IPv4 helpers, with
-no dependencies. The minimum supported Rust version is 1.85; the `ebpf`
-feature needs 1.87.
+no dependencies. The minimum supported Rust version is 1.87, which the
+`ebpf` feature needs.
 
 ## Usage
 

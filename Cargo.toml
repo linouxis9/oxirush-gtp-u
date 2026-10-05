@@ -2,7 +2,7 @@
 name = "oxirush-gtp-u"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.87"
 description = "GTPv1-U codec (TS 29.281, TS 38.415), async N3 endpoint, test UPF and Linux TUN routing"
 license = "Apache-2.0"
 repository = "https://github.com/linouxis9/oxirush-gtp-u"
@@ -13,7 +13,7 @@ readme = "README.md"
 exclude = ["/.github", "/ebpf", "/fuzz"]
 
 [features]
-default = ["endpoint"]
+default = ["endpoint", "ebpf"]
 # The Tokio N3 endpoint and the test UPF.
 endpoint = ["dep:tokio", "dep:tracing"]
 # Linux TUN devices and their routing, set up over rtnetlink.

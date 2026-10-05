@@ -141,7 +141,7 @@ impl ExtensionHeader {
             }
         }
         // Padding of the typed contents to a multiple of 4 octets.
-        while (out.len() - start + 1) % 4 != 0 {
+        while !(out.len() - start + 1).is_multiple_of(4) {
             out.push(0);
         }
         out.push(next);
@@ -502,7 +502,7 @@ impl UplinkPduSessionInformation {
             if let Some(unknown) = &self.unknown_new_ies {
                 out.extend_from_slice(&unknown.content);
                 // Padding added to it would decode as part of it.
-                if (out.len() - start + 2) % 4 != 0 {
+                if !(out.len() - start + 2).is_multiple_of(4) {
                     return Err(Error::InvalidLength("PDU Session Container"));
                 }
             }

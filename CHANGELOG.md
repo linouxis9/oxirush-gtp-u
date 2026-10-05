@@ -47,5 +47,6 @@ First release.
   first tunnel through it is installed, off the caller's task. The
   programs' object is committed next to its source
   (`src/ebpf/programs.rs`); CI rebuilds it and compares.
-- Features: `endpoint` (default), `tun`, `ebpf`, `serde`. Without default
-  features the crate has no dependencies. MSRV 1.85; `ebpf` needs Rust 1.87.
+- Features: `endpoint` and `ebpf` (default), `tun`, `serde`. Without
+  default features the crate has no dependencies. MSRV 1.87, which `ebpf`
+  needs.

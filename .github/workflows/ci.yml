@@ -27,14 +27,13 @@ jobs:
       - run: cargo test --locked --no-default-features
 
   msrv:
-    name: MSRV (1.85)
+    name: MSRV (1.87)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: dtolnay/rust-toolchain@1.87.0
       - uses: Swatinem/rust-cache@v2
-      # Every feature but ebpf, whose aya dependency needs Rust 1.87.
-      - run: cargo test --locked --features serde,tun
+      - run: cargo test --locked --all-features
 
   minimal-versions:
     name: Minimal dependency versions
