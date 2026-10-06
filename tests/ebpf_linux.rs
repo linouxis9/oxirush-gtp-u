@@ -150,7 +150,7 @@ fn ue_tun(fast_path: &FastPath) -> TunPort {
         vrf_name: "oxr1".into(),
     };
     let port = TunPort::create(TunConfig::new("oxu1", routing)).unwrap();
-    fast_path.open(port.index()).unwrap();
+    fast_path.add_tun(port.index()).unwrap();
     // The VRF's table goes before the namespace's own addresses, N6 among
     // them, as Documentation/networking/vrf.rst has it.
     ip(&["rule", "add", "pref", "32765", "table", "local"]);
@@ -275,7 +275,7 @@ async fn a_tunnel_is_carried_in_the_kernel_once_its_tun_sent_through_userspace()
 
     // The N3 interface has its program by the time a UE sends.
     shortcut(&gnb, 1, 1, port.index()).await;
-    fast_path.detach(port.index());
+    fast_path.end_shortcut(port.index());
 
     // The userspace path, as an application runs it: what the TUN's reader gets
     // goes to N3, with the request to short-cut its tunnel, and what the
@@ -389,7 +389,7 @@ async fn the_short_cut_follows_handover_modification_and_release() {
     // Handover: the target's tunnel has another TEID and N3 address. The
     // source's routes go later, which must leave the target's short-cut.
     let target_teid = target.install(7, 1, remote, 9).unwrap();
-    fast_path.detach(port.index());
+    fast_path.end_shortcut(port.index());
     shortcut(&target, 7, 1, port.index()).await;
     upf.switch_downlink(remote.teid, target.local_addr().unwrap(), target_teid)
         .await
@@ -452,7 +452,7 @@ async fn tunnels_keep_their_teids_and_qfis_apart_and_match_the_encoder() {
         // Without the TUN on the fast path its tunnel stays in userspace.
         let error = gnb.shortcut(u32::from(i), 1, port.index()).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
-        fast_path.open(port.index()).unwrap();
+        fast_path.add_tun(port.index()).unwrap();
         shortcut(&gnb, u32::from(i), 1, port.index()).await;
         ports.push((port, address, remote.teid, teid, qfi));
     }
@@ -513,7 +513,7 @@ async fn tunnels_keep_their_teids_and_qfis_apart_and_match_the_encoder() {
     // packets are for its reader.
     for (port, address, ..) in &ports {
         assert_eq!(programs(port.name(), TcAttachType::Egress), 1);
-        fast_path.close(port.index());
+        fast_path.remove_tun(port.index());
         assert_eq!(programs(port.name(), TcAttachType::Egress), 0);
         let application = UdpSocket::bind((*address, 4002)).await.unwrap();
         application.send_to(b"closed", server).await.unwrap();
@@ -548,7 +548,7 @@ async fn only_plain_ipv4_g_pdus_of_short_cut_tunnels_leave_userspace() {
         priority: 15100,
     };
     let port = TunPort::create(TunConfig::new("oxu1", routing)).unwrap();
-    fast_path.open(port.index()).unwrap();
+    fast_path.add_tun(port.index()).unwrap();
     shortcut(&gnb, 1, 1, port.index()).await;
     // A tunnel the endpoint does not have.
     assert_eq!(
@@ -636,7 +636,7 @@ async fn a_peer_on_this_host_is_reached_through_loopback_whatever_its_address() 
         priority: 15100,
     };
     let port = TunPort::create(TunConfig::new("oxu1", routing)).unwrap();
-    fast_path.open(port.index()).unwrap();
+    fast_path.add_tun(port.index()).unwrap();
     shortcut(&gnb, 1, 1, port.index()).await;
 
     let server = SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 9), 9);
@@ -708,7 +708,7 @@ async fn a_peer_on_another_host_is_reached_through_the_interface_of_its_route() 
         priority: 15100,
     };
     let port = TunPort::create(TunConfig::new("oxu1", routing)).unwrap();
-    fast_path.open(port.index()).unwrap();
+    fast_path.add_tun(port.index()).unwrap();
     shortcut(&gnb, 1, 1, port.index()).await;
     let decap = ["oxn3a", "oxdummy", "lo"].map(ingress_programs);
     assert_eq!(decap, [1, 0, 0]);
@@ -767,7 +767,7 @@ async fn two_fast_paths_share_an_n3_interface() {
             priority: 15100 + u32::from(i),
         };
         let port = TunPort::create(TunConfig::new(format!("oxm{i}"), routing)).unwrap();
-        fast_path.open(port.index()).unwrap();
+        fast_path.add_tun(port.index()).unwrap();
         shortcut(&gnb, 1, 1, port.index()).await;
         let application = UdpSocket::bind((address, 4000)).await.unwrap();
         applications.push((gnb, port, teid, address, application));
@@ -799,7 +799,7 @@ fn policy_tun(fast_path: &FastPath, name: &str, address: Ipv4Addr, table: u32) -
         priority: 15100 + (table - 29100),
     };
     let port = TunPort::create(TunConfig::new(name, routing)).unwrap();
-    fast_path.open(port.index()).unwrap();
+    fast_path.add_tun(port.index()).unwrap();
     port
 }
 
@@ -826,7 +826,7 @@ async fn a_tunnel_given_to_another_tun_leaves_the_first() {
     let new = policy_tun(&fast_path, "oxm2", address, 29102);
     shortcut(&gnb, 1, 1, old.index()).await;
     shortcut(&gnb, 1, 1, new.index()).await;
-    fast_path.close(old.index());
+    fast_path.remove_tun(old.index());
 
     let server = SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 9), 9);
     let application = UdpSocket::bind((address, 4000)).await.unwrap();

@@ -40,7 +40,7 @@ First release.
 - IPv4 UDP and ICMP Echo helpers to exercise tunnels without a TUN.
 - `ebpf::FastPath` (Linux 6.6, `ebpf` feature): three TCX programs carry an
   endpoint's tunnels in the kernel between a TUN and N3
-  (`FastPath::load`, `open`, `detach`, `close` and `stats`,
+  (`FastPath::load`, `add_tun`, `remove_tun`, `end_shortcut` and `stats`,
   `Endpoint::set_fast_path`, `Endpoint::shortcut`, `TunPort::index`). The
   tunnel's route updates and ends its short-cut, as does the endpoint's
   `shutdown`; a tunnel has one short-cut. What the programs leave

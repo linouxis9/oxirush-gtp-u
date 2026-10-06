@@ -265,12 +265,13 @@ impl Endpoint {
 
     /// Carry a tunnel's packets in the kernel, between TUN interface `tun`
     /// ([`TunPort::index`](crate::tun::TunPort::index)), which
-    /// [`FastPath::open`](crate::ebpf::FastPath::open) put on the fast path,
-    /// and the peer. This lasts until the tunnel is removed, `tun` gets
-    /// another tunnel, or [`FastPath::detach`](crate::ebpf::FastPath::detach)
-    /// or [`close`](crate::ebpf::FastPath::close); later changes of the
-    /// tunnel's remote end and QFI apply to it. It asks Linux for the route
-    /// to the peer and writes two map entries.
+    /// [`FastPath::add_tun`](crate::ebpf::FastPath::add_tun) put on the fast
+    /// path, and the peer. This lasts until the tunnel is removed, `tun`
+    /// gets another tunnel, or
+    /// [`FastPath::end_shortcut`](crate::ebpf::FastPath::end_shortcut) or
+    /// [`remove_tun`](crate::ebpf::FastPath::remove_tun); later changes of
+    /// the tunnel's remote end and QFI apply to it. It asks Linux for the
+    /// route to the peer and writes two map entries.
     ///
     /// # Errors
     ///
@@ -295,7 +296,7 @@ impl Endpoint {
         self.shared
             .routes
             .with_route((ran_id, session_id), |route| {
-                fast_path.attach(tun, *local, route.local_teid, route.remote, route.qfi)
+                fast_path.shortcut(tun, *local, route.local_teid, route.remote, route.qfi)
             })
             .unwrap_or_else(|| {
                 Err(io::Error::new(

@@ -209,7 +209,7 @@ It puts the TUN on the fast path:
 ```rust,ignore
     let tun = TunPort::create(TunConfig::new("ue0", routing))?;
     // Put the TUN on the fast path once, when it is created.
-    fast_path.open(tun.index())?;
+    fast_path.add_tun(tun.index())?;
 ```
 
 And it asks for the tunnel's short-cut whenever userspace carried a packet
@@ -373,15 +373,15 @@ same host. It gets `decap` when a first tunnel through it is installed, on
 a blocking thread of the Tokio runtime, so that the task that installs the
 tunnel does not wait for it (outside a runtime the caller attaches it).
 Until it is there `Endpoint::shortcut` fails with `WouldBlock`.
-`FastPath::open` attaches `uplink` to a TUN in the caller's thread.
+`FastPath::add_tun` attaches `uplink` to a TUN in the caller's thread.
 
 A short-cut follows its tunnel. `install` on the tunnel updates it;
 `remove` and the endpoint's `shutdown` end it, and so does giving the TUN
-another tunnel or the tunnel another TUN. `FastPath::detach` leaves a TUN's
-tunnel to userspace until the next `shortcut`, as when its UE moves to
-another endpoint. `FastPath::close` also takes the TUN off the fast path:
-call it before closing the TUN. When `shortcut` fails the tunnel stays in
-userspace.
+another tunnel or the tunnel another TUN. `FastPath::end_shortcut` leaves
+a TUN's tunnel to userspace until the next `shortcut`, as when its UE moves
+to another endpoint. `FastPath::remove_tun` also takes the TUN off the fast
+path: call it before closing the TUN. When `shortcut` fails the tunnel stays
+in userspace.
 
 The programs leave to userspace, which keeps working underneath: other
 messages than G-PDUs, unknown TEIDs, extension headers other than one PDU
@@ -402,10 +402,10 @@ digits, outlives a killed process; the next `load` in that namespace
 removes it, as an `oxs` veth that is up and whose far end has no program
 left.
 
-`load` and `open` also spread what the stage's far end and the TUN receive
-over the CPUs the process may use (RPS), when `/sys` shows the process's
-network namespace. After `unshare --net` alone it shows the former one, and
-nothing is steered.
+`load` and `add_tun` also spread what the stage's far end and the TUN
+receive over the CPUs the process may use (RPS), when `/sys` shows the
+process's network namespace. After `unshare --net` alone it shows the former
+one, and nothing is steered.
 
 The programs' source is `src/ebpf/programs.rs` and their object
 `src/ebpf/gtpu.o`. `ebpf/build.sh` rebuilds the object, with the nightly

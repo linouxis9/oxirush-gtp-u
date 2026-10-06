@@ -36,7 +36,7 @@ async fn main() -> std::io::Result<()> {
     };
     let tun = TunPort::create(TunConfig::new("ue0", routing))?;
     // Put the TUN on the fast path once, when it is created.
-    fast_path.open(tun.index())?;
+    fast_path.add_tun(tun.index())?;
 
     // Userspace keeps carrying what the programs leave: at first, everything.
     let (reader, uplink) = (tun.clone(), gnb.clone());
@@ -70,7 +70,7 @@ async fn main() -> std::io::Result<()> {
     println!("{:?}", fast_path.stats());
 
     // Take the TUN off the fast path before closing it.
-    fast_path.close(tun.index());
+    fast_path.remove_tun(tun.index());
     tun.close();
     Ok(())
 }

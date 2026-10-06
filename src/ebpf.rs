@@ -2,7 +2,7 @@
 //!
 //! [`FastPath::load`] loads three TCX programs. Once an endpoint has the fast
 //! path ([`Endpoint::set_fast_path`](crate::Endpoint::set_fast_path)), a TUN
-//! is on it ([`FastPath::open`]) and a tunnel has that TUN
+//! is on it ([`FastPath::add_tun`]) and a tunnel has that TUN
 //! ([`Endpoint::shortcut`](crate::Endpoint::shortcut)), they encapsulate
 //! what Linux routes into the TUN and decapsulate what the N3 interface
 //! receives for it. What they leave alone still goes through
@@ -31,13 +31,13 @@
 //!     priority: 100,
 //! };
 //! let tun = TunPort::create(TunConfig::new("ue0", routing))?;
-//! fast_path.open(tun.index())?;
+//! fast_path.add_tun(tun.index())?;
 //! // Once userspace carried a packet of the tunnel from the TUN, and again
 //! // after a `WouldBlock`:
 //! gnb.shortcut(1, 5, tun.index())?;
 //!
 //! // Before the TUN is closed:
-//! fast_path.close(tun.index());
+//! fast_path.remove_tun(tun.index());
 //! # Ok(())
 //! # }
 //! ```
@@ -254,7 +254,7 @@ impl FastPath {
     /// packets once [`Endpoint::shortcut`](crate::Endpoint::shortcut) gives
     /// it a tunnel. Attaching a program takes milliseconds: call it once,
     /// when the TUN is created.
-    pub fn open(&self, tun: u32) -> io::Result<()> {
+    pub fn add_tun(&self, tun: u32) -> io::Result<()> {
         if lock(&self.inner.state).tuns.contains_key(&tun) {
             return Ok(());
         }
@@ -276,10 +276,10 @@ impl FastPath {
     /// Take TUN interface `tun` off the fast path, with its tunnel's
     /// short-cut. Call it before the TUN is closed, whose index another
     /// interface may then get.
-    pub fn close(&self, tun: u32) {
+    pub fn remove_tun(&self, tun: u32) {
         let removed = {
             let mut state = lock(&self.inner.state);
-            state.detach(tun);
+            state.end_shortcut(tun);
             state.tuns.remove(&tun)
         };
         let Some(tun) = removed else {
@@ -292,14 +292,14 @@ impl FastPath {
 
     /// Leave the tunnel of TUN interface `tun` to userspace again, until its
     /// next short-cut: when its UE leaves for another endpoint.
-    pub fn detach(&self, tun: u32) {
-        lock(&self.inner.state).detach(tun);
+    pub fn end_shortcut(&self, tun: u32) {
+        lock(&self.inner.state).end_shortcut(tun);
     }
 
     /// Short-cut the tunnel of the endpoint at `local` with local TEID
     /// `teid` through TUN interface `tun`, in place of the TUN's former
     /// tunnel if any. A failure leaves the tunnel to userspace.
-    pub(crate) fn attach(
+    pub(crate) fn shortcut(
         &self,
         tun: u32,
         local: Ipv4Addr,
@@ -308,9 +308,9 @@ impl FastPath {
         qfi: Option<u8>,
     ) -> io::Result<()> {
         let mut state = lock(&self.inner.state);
-        let result = self.shortcut(&mut state, tun, local, teid, remote, qfi);
+        let result = self.try_shortcut(&mut state, tun, local, teid, remote, qfi);
         if result.is_err() {
-            state.detach(tun);
+            state.end_shortcut(tun);
         }
         result
     }
@@ -332,17 +332,17 @@ impl FastPath {
             return;
         };
         let kept = route.is_some_and(|(remote, qfi)| {
-            self.shortcut(&mut state, tun, local, teid, remote, qfi)
+            self.try_shortcut(&mut state, tun, local, teid, remote, qfi)
                 .is_ok()
         });
         if !kept {
-            state.detach(tun);
+            state.end_shortcut(tun);
         }
     }
 
     /// A route lookup and two map entries, once the N3 interface has its
     /// program.
-    fn shortcut(
+    fn try_shortcut(
         &self,
         state: &mut State,
         tun: u32,
@@ -436,7 +436,7 @@ impl State {
         // A tunnel has one short-cut: the TUN that had it goes back to
         // userspace.
         match self.downlinks.get(&key, 0) {
-            Ok(other) if other != tun => self.detach(other),
+            Ok(other) if other != tun => self.end_shortcut(other),
             _ => {}
         }
         let former = self.tuns.get_mut(&tun).and_then(|tun| tun.key.replace(key));
@@ -460,7 +460,7 @@ impl State {
             .map_err(io::Error::other)
     }
 
-    fn detach(&mut self, tun: u32) {
+    fn end_shortcut(&mut self, tun: u32) {
         if let Some(key) = self.tuns.get_mut(&tun).and_then(|tun| tun.key.take()) {
             let _ = self.uplinks.remove(&tun);
             let _ = self.downlinks.remove(&key);
