@@ -520,13 +520,16 @@ async fn receive(
         };
         // A tunnel's IP packets go to its TUN, if it has one.
         #[cfg(all(target_os = "linux", feature = "tun"))]
-        if packet.message_type == G_PDU {
-            if let Some(port) = routes.tun(key) {
-                if let Err(error) = port.send(packet.payload).await {
-                    debug!("N3 TUN {} write failed: {error}", port.name());
-                }
-                continue;
+        let tun = match packet.message_type {
+            G_PDU => routes.tun(key),
+            _ => None,
+        };
+        #[cfg(all(target_os = "linux", feature = "tun"))]
+        if let Some(port) = tun {
+            if let Err(error) = port.send(packet.payload).await {
+                debug!("N3 TUN {} write failed: {error}", port.name());
             }
+            continue;
         }
         let (ran_id, session_id) = key;
         socket.observe(&tx, || ReceivedPacket {
@@ -555,10 +558,11 @@ async fn forward_tun(
         // still getting its program this fails, and the next packet asks
         // again.
         #[cfg(feature = "ebpf")]
-        if let Some(fast_path) = &fast_path {
-            if let Err(error) = shortcut(&routes, fast_path, key, port.index()) {
-                trace!("N3 TUN {} stays in userspace: {error}", port.name());
-            }
+        if let Some(Err(error)) = fast_path
+            .as_ref()
+            .map(|fast_path| shortcut(&routes, fast_path, key, port.index()))
+        {
+            trace!("N3 TUN {} stays in userspace: {error}", port.name());
         }
         let Ok(length) = port.recv(&mut packet).await else {
             return;
