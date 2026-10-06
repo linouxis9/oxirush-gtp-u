@@ -17,8 +17,8 @@ use std::time::Duration;
 use oxirush_gtp_u::tun::{Routing, TunConfig, TunPort};
 use oxirush_gtp_u::upf_sim::{Session, UpfSimulator};
 use oxirush_gtp_u::{
-    EchoKind, Endpoint, RemoteTunnel, ipv4_icmp_echo_reply, ipv4_icmp_echo_request,
-    parse_ipv4_icmp_echo,
+    END_MARKER, EchoKind, Endpoint, Packet, RemoteTunnel, ipv4_icmp_echo_reply,
+    ipv4_icmp_echo_request, parse_ipv4_icmp_echo,
 };
 use tokio::process::Command;
 
@@ -618,6 +618,106 @@ async fn upf_routes_32_tun_sessions_without_crossing_teids() {
     for i in 1..=32u8 {
         assert!(!exists(&format!("oxn{i}")));
     }
+}
+
+/// The TUN `name` of the UE at 198.19.1.`host`, for an endpoint's tunnel.
+fn ue_tun(name: &str, host: u8) -> TunConfig {
+    let routing = Routing::UePolicy {
+        address: Ipv4Addr::new(198, 19, 1, host),
+        table: 29100 + u32::from(host),
+        priority: 15100 + u32::from(host),
+    };
+    TunConfig::new(name, routing)
+}
+
+#[tokio::test]
+#[ignore = "needs root"]
+async fn an_endpoint_carries_a_tunnel_s_tun_and_closes_it_with_the_tunnel() {
+    isolate();
+    let (upf, _observed) = UpfSimulator::bind("127.0.0.8:0".parse().unwrap())
+        .await
+        .unwrap();
+    let (gnb, mut received) = Endpoint::bind("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    let remote = RemoteTunnel::new(upf.local_addr().unwrap(), 0x1001);
+
+    // A TUN is a tunnel's: without the tunnel none is made.
+    let error = gnb.attach_tun(1, 1, ue_tun("oxe1", 1)).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    assert!(!exists("oxe1"));
+    let teid = gnb.install(1, 1, remote, 9).unwrap();
+    upf.set_session(Session::new(
+        remote.teid,
+        teid,
+        gnb.local_addr().unwrap(),
+        9,
+    ));
+    gnb.attach_tun(1, 1, ue_tun("oxe1", 1)).unwrap();
+    // And a tunnel has one TUN.
+    let error = gnb.attach_tun(1, 1, ue_tun("oxe2", 2)).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+    assert!(exists("oxe1") && !exists("oxe2"));
+
+    // Both ways: the test UPF's echo service answers the ping.
+    ping(&["-I", "198.19.1.1", "203.0.113.1"]).await;
+    // The reply went to Linux and not to the receiver, whose first message
+    // is the tunnel's next End Marker.
+    let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let marker = Packet::end_marker(teid).encode().unwrap();
+    peer.send_to(&marker, gnb.local_addr().unwrap())
+        .await
+        .unwrap();
+    let message = tokio::time::timeout(Duration::from_secs(3), received.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(message.packet.message_type, END_MARKER);
+
+    // The tunnel keeps its TUN when it is installed again, here with
+    // another QFI, and its removal closes the TUN.
+    assert_eq!(gnb.install(1, 1, remote, 5).unwrap(), teid);
+    ping(&["-I", "198.19.1.1", "203.0.113.1"]).await;
+    gnb.remove(1, 1);
+    assert!(!exists("oxe1"));
+    assert!(!rules().contains("15101:"), "{}", rules());
+}
+
+#[tokio::test]
+#[ignore = "needs root"]
+async fn an_endpoint_s_tuns_close_with_a_ue_s_tunnels_shutdown_and_the_last_clone() {
+    isolate();
+    let remote = RemoteTunnel::new("127.0.0.8:2152".parse().unwrap(), 0x1001);
+    let (gnb, _received) = Endpoint::bind("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    for (ran_id, session_id, name, host) in
+        [(1, 1, "oxe1", 1), (1, 2, "oxe2", 2), (2, 1, "oxe3", 3)]
+    {
+        gnb.install(ran_id, session_id, remote, 9).unwrap();
+        gnb.attach_tun(ran_id, session_id, ue_tun(name, host))
+            .unwrap();
+    }
+    gnb.remove_ran(1);
+    assert!(!exists("oxe1") && !exists("oxe2") && exists("oxe3"));
+    // Shutting a clone down closes the rest, and no TUN is made afterwards.
+    gnb.clone().shutdown().await.unwrap();
+    assert!(!exists("oxe3"));
+    let error = gnb.attach_tun(2, 1, ue_tun("oxe3", 3)).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+    assert!(!exists("oxe3"));
+
+    let (gnb, _received) = Endpoint::bind("127.0.0.2:0".parse().unwrap())
+        .await
+        .unwrap();
+    gnb.install(1, 1, remote, 9).unwrap();
+    gnb.attach_tun(1, 1, ue_tun("oxe4", 4)).unwrap();
+    let clone = gnb.clone();
+    drop(gnb);
+    assert!(exists("oxe4"));
+    drop(clone);
+    assert!(!exists("oxe4"));
+    assert!(!rules().contains("15104:"), "{}", rules());
 }
 
 #[tokio::test]

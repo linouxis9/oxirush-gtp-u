@@ -35,7 +35,7 @@ Rust 1.87 or later, and for each part:
 | ---- | ------- | ----- |
 | Codec, IPv4 helpers | none | nothing |
 | `Endpoint`, `upf_sim` | `endpoint` (default) | a Tokio runtime |
-| `tun`, `UpfSimulator::attach_tun` | `tun` (default, through `ebpf`) | Linux, `CAP_NET_ADMIN` |
+| `tun`, `attach_tun` of `Endpoint` and `UpfSimulator` | `tun` (default, through `ebpf`) | Linux, `CAP_NET_ADMIN` |
 | `ebpf` | `ebpf` (default) | Linux 6.6, `CAP_BPF` and `CAP_NET_ADMIN` |
 | `Serialize` and `Deserialize` for `RemoteTunnel` | `serde` | |
 
@@ -125,7 +125,8 @@ cargo run --example endpoint
 ### A TUN for a UE
 
 With a TUN, applications use a tunnel through Linux: what a socket bound to
-the UE's address sends is routed into the TUN.
+the UE's address sends is routed into the TUN. `attach_tun` makes the TUN of
+a tunnel.
 
 ```rust,ignore
 #[cfg(target_os = "linux")]
@@ -133,42 +134,25 @@ the UE's address sends is routed into the TUN.
 async fn main() -> std::io::Result<()> {
     use std::net::Ipv4Addr;
 
-    use oxirush_gtp_u::tun::{Routing, TunConfig, TunPort};
+    use oxirush_gtp_u::tun::{Routing, TunConfig};
     use oxirush_gtp_u::upf_sim::{Session, UpfSimulator};
-    use oxirush_gtp_u::{Endpoint, G_PDU, RemoteTunnel};
+    use oxirush_gtp_u::{Endpoint, RemoteTunnel};
 
     let (upf, _observed) = UpfSimulator::bind("127.0.0.8:2152".parse().unwrap()).await?;
-    let (gnb, mut received) = Endpoint::bind("127.0.0.1:2152".parse().unwrap()).await?;
+    let (gnb, _received) = Endpoint::bind("127.0.0.1:2152".parse().unwrap()).await?;
     let teid = gnb.install(1, 5, RemoteTunnel::new(upf.local_addr()?, 0x1001), 9)?;
     upf.set_session(Session::new(0x1001, teid, gnb.local_addr()?, 9));
 
-    // The TUN gets the UE's address, and a rule routes what is sent from
-    // that address into it.
+    // The tunnel gets a TUN with the UE's address, and a rule that routes
+    // what is sent from that address into it. The endpoint carries the
+    // TUN's packets both ways, and closes the TUN with the tunnel.
     let ue = Ipv4Addr::new(10, 45, 0, 2);
     let routing = Routing::UePolicy {
         address: ue,
         table: 100,
         priority: 100,
     };
-    let tun = TunPort::create(TunConfig::new("ue0", routing))?;
-
-    // Uplink: what Linux routes into the TUN goes into the tunnel.
-    let (reader, uplink) = (tun.clone(), gnb.clone());
-    tokio::spawn(async move {
-        let mut packet = vec![0; 65535];
-        while let Ok(length) = reader.recv(&mut packet).await {
-            let _ = uplink.send(1, 5, &packet[..length]).await;
-        }
-    });
-    // Downlink: the IP packets of the tunnel's G-PDUs go to Linux.
-    let writer = tun.clone();
-    tokio::spawn(async move {
-        while let Some(message) = received.recv().await {
-            if message.packet.message_type == G_PDU {
-                let _ = writer.send(&message.packet.payload).await;
-            }
-        }
-    });
+    gnb.attach_tun(1, 5, TunConfig::new("ue0", routing))?;
 
     // A socket bound to the UE's address now goes through the tunnel. The
     // test UPF's echo service answers for any destination.
@@ -196,39 +180,17 @@ In the program above every packet crosses userspace twice, through the
 TUN's reader and the endpoint's socket. With the fast path, eBPF programs
 carry a tunnel's packets in the kernel instead, and userspace keeps
 carrying what they leave. `examples/fast_path.rs` is the program above with
-three additions. It loads the programs and gives them to the endpoint,
-before its tunnels are installed:
+one addition. It loads the programs and gives them to the endpoint, before
+its tunnels are installed:
 
 ```rust,ignore
     let fast_path = FastPath::load()?;
     gnb.set_fast_path(fast_path.clone())?;
 ```
 
-It puts the TUN on the fast path:
-
-```rust,ignore
-    let tun = TunPort::create(TunConfig::new("ue0", routing))?;
-    // Put the TUN on the fast path once, when it is created.
-    fast_path.add_tun(tun.index())?;
-```
-
-And it asks for the tunnel's short-cut whenever userspace carried a packet
-of it:
-
-```rust,ignore
-        while let Ok(length) = reader.recv(&mut packet).await {
-            let _ = uplink.send(1, 5, &packet[..length]).await;
-            // Userspace carried a packet of the tunnel: have the kernel carry
-            // the next ones. While the tunnel's interface is still getting
-            // its program this is `WouldBlock`, and the next packet asks again.
-            if let Err(error) = uplink.shortcut(1, 5, reader.index()) {
-                eprintln!("still in userspace: {error}");
-            }
-        }
-```
-
-It runs like the `tun` example and prints `FastPath::stats`, the packets
-that the programs carried.
+`attach_tun` then also puts the TUN on the fast path and short-cuts its
+tunnel. The example runs like `tun` and prints `FastPath::stats`, the
+packets that the programs carried.
 
 ### The test UPF as a program
 
@@ -293,6 +255,10 @@ peer may send from another address than its F-TEID's.
   TEID that something else assigned.
 - `send` sends an IP packet in a tunnel. `send_to` sends any `Packet` from
   the endpoint's socket, with its sequence number and extension headers.
+- `attach_tun` gives a tunnel a TUN (Linux, `tun` feature) and carries its
+  packets both ways: the tunnel's G-PDUs then go to Linux and no longer to
+  the receiver. The TUN closes with its tunnel, on `remove`, `remove_ran`
+  and `shutdown`, and when the last clone of the endpoint is dropped.
 - `remove` and `remove_ran` remove tunnels; `local_teid` looks one up.
 
 The endpoint does the path management of TS 29.281 §7 by itself. It answers
@@ -330,8 +296,10 @@ cleaned up; call it again to retry.
 
 ### TUN devices
 
-`TunPort::create` makes the TUN and sets up one of three routings over
-rtnetlink:
+`Endpoint::attach_tun` and `UpfSimulator::attach_tun` make a TUN and carry
+its packets. `TunPort::create` makes one for a program that carries them
+itself, with `recv` and `send`. Each takes a `TunConfig` with one of three
+routings, which it sets up over rtnetlink:
 
 - `Routing::UePolicy` gives the TUN a UE's address, and a rule sends what
   comes from that address to a table of its own, whose default route is the
@@ -372,16 +340,21 @@ endpoint's address to the peer's: the loopback interface for a peer on the
 same host. It gets `decap` when a first tunnel through it is installed, on
 a blocking thread of the Tokio runtime, so that the task that installs the
 tunnel does not wait for it (outside a runtime the caller attaches it).
-Until it is there `Endpoint::shortcut` fails with `WouldBlock`.
-`FastPath::add_tun` attaches `uplink` to a TUN in the caller's thread.
+Until it is there the tunnel stays in userspace.
+
+`Endpoint::attach_tun` does the rest for the TUN it makes. A program that
+carries a TUN of its own does it in three calls. `FastPath::add_tun` puts
+the TUN on the fast path, once: it attaches `uplink` in the caller's
+thread. `Endpoint::shortcut` gives the TUN its tunnel, whenever the TUN's
+reader carried a packet: it fails with `WouldBlock` while the N3 interface
+is getting its program, and the next packet asks again. And
+`FastPath::remove_tun` takes the TUN off the fast path, before it is closed.
 
 A short-cut follows its tunnel. `install` on the tunnel updates it;
 `remove` and the endpoint's `shutdown` end it, and so does giving the TUN
 another tunnel or the tunnel another TUN. `FastPath::end_shortcut` leaves
 a TUN's tunnel to userspace until the next `shortcut`, as when its UE moves
-to another endpoint. `FastPath::remove_tun` also takes the TUN off the fast
-path: call it before closing the TUN. When `shortcut` fails the tunnel stays
-in userspace.
+to another endpoint. When `shortcut` fails the tunnel stays in userspace.
 
 The programs leave to userspace, which keeps working underneath: other
 messages than G-PDUs, unknown TEIDs, extension headers other than one PDU
@@ -423,7 +396,7 @@ src/
 ├── ipv4.rs, icmp.rs        inner IPv4 UDP and ICMP Echo packets
 ├── datagram.rs, path.rs    shared UDP receive and path management (endpoint)
 ├── endpoint.rs            gNB endpoint and forwarding (endpoint)
-├── endpoint/routes.rs     tunnel identity and route indexes (endpoint)
+├── endpoint/routes.rs     tunnel identity, route indexes and TUNs (endpoint)
 ├── stats.rs               receive/drop counters (endpoint)
 ├── upf_sim.rs             test UPF and forwarding (endpoint)
 ├── upf_sim/sessions.rs     session generations and handover state (endpoint)

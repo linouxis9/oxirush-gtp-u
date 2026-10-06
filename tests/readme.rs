@@ -19,7 +19,7 @@ fn the_rust_blocks_of_the_readme_are_parts_of_the_examples() {
         .filter_map(|block| block.split_once('\n'))
         .map(|(_, code)| code)
         .collect();
-    assert_eq!(blocks.len(), 6);
+    assert_eq!(blocks.len(), 4);
     for code in blocks {
         assert!(
             examples.iter().any(|example| example.contains(code)),

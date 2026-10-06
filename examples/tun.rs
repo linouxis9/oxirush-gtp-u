@@ -12,42 +12,25 @@
 async fn main() -> std::io::Result<()> {
     use std::net::Ipv4Addr;
 
-    use oxirush_gtp_u::tun::{Routing, TunConfig, TunPort};
+    use oxirush_gtp_u::tun::{Routing, TunConfig};
     use oxirush_gtp_u::upf_sim::{Session, UpfSimulator};
-    use oxirush_gtp_u::{Endpoint, G_PDU, RemoteTunnel};
+    use oxirush_gtp_u::{Endpoint, RemoteTunnel};
 
     let (upf, _observed) = UpfSimulator::bind("127.0.0.8:2152".parse().unwrap()).await?;
-    let (gnb, mut received) = Endpoint::bind("127.0.0.1:2152".parse().unwrap()).await?;
+    let (gnb, _received) = Endpoint::bind("127.0.0.1:2152".parse().unwrap()).await?;
     let teid = gnb.install(1, 5, RemoteTunnel::new(upf.local_addr()?, 0x1001), 9)?;
     upf.set_session(Session::new(0x1001, teid, gnb.local_addr()?, 9));
 
-    // The TUN gets the UE's address, and a rule routes what is sent from
-    // that address into it.
+    // The tunnel gets a TUN with the UE's address, and a rule that routes
+    // what is sent from that address into it. The endpoint carries the
+    // TUN's packets both ways, and closes the TUN with the tunnel.
     let ue = Ipv4Addr::new(10, 45, 0, 2);
     let routing = Routing::UePolicy {
         address: ue,
         table: 100,
         priority: 100,
     };
-    let tun = TunPort::create(TunConfig::new("ue0", routing))?;
-
-    // Uplink: what Linux routes into the TUN goes into the tunnel.
-    let (reader, uplink) = (tun.clone(), gnb.clone());
-    tokio::spawn(async move {
-        let mut packet = vec![0; 65535];
-        while let Ok(length) = reader.recv(&mut packet).await {
-            let _ = uplink.send(1, 5, &packet[..length]).await;
-        }
-    });
-    // Downlink: the IP packets of the tunnel's G-PDUs go to Linux.
-    let writer = tun.clone();
-    tokio::spawn(async move {
-        while let Some(message) = received.recv().await {
-            if message.packet.message_type == G_PDU {
-                let _ = writer.send(&message.packet.payload).await;
-            }
-        }
-    });
+    gnb.attach_tun(1, 5, TunConfig::new("ue0", routing))?;
 
     // A socket bound to the UE's address now goes through the tunnel. The
     // test UPF's echo service answers for any destination.

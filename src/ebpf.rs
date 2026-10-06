@@ -13,9 +13,12 @@
 //!
 //! It needs Linux 6.6 (TCX), `CAP_BPF` and `CAP_NET_ADMIN`.
 //!
+//! [`Endpoint::attach_tun`](crate::Endpoint::attach_tun) puts the TUN it
+//! makes on the endpoint's fast path and short-cuts its tunnel:
+//!
 //! ```no_run
 //! use oxirush_gtp_u::ebpf::FastPath;
-//! use oxirush_gtp_u::tun::{Routing, TunConfig, TunPort};
+//! use oxirush_gtp_u::tun::{Routing, TunConfig};
 //! use oxirush_gtp_u::{Endpoint, RemoteTunnel};
 //!
 //! # #[tokio::main(flavor = "current_thread")]
@@ -30,12 +33,23 @@
 //!     table: 100,
 //!     priority: 100,
 //! };
-//! let tun = TunPort::create(TunConfig::new("ue0", routing))?;
-//! fast_path.add_tun(tun.index())?;
-//! // Once userspace carried a packet of the tunnel from the TUN, and again
-//! // after a `WouldBlock`:
-//! gnb.shortcut(1, 5, tun.index())?;
+//! gnb.attach_tun(1, 5, TunConfig::new("ue0", routing))?;
+//! # Ok(())
+//! # }
+//! ```
 //!
+//! A program that carries a TUN of its own does these steps itself:
+//!
+//! ```no_run
+//! # use oxirush_gtp_u::ebpf::FastPath;
+//! # use oxirush_gtp_u::tun::TunPort;
+//! # use oxirush_gtp_u::Endpoint;
+//! # fn steps(gnb: &Endpoint, fast_path: &FastPath, tun: &TunPort) -> std::io::Result<()> {
+//! // Once, when the TUN is made:
+//! fast_path.add_tun(tun.index())?;
+//! // Whenever userspace carried a packet of the tunnel from the TUN: a
+//! // `WouldBlock` then leaves it to the next packet.
+//! gnb.shortcut(1, 5, tun.index())?;
 //! // Before the TUN is closed:
 //! fast_path.remove_tun(tun.index());
 //! # Ok(())

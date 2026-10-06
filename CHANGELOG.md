@@ -37,11 +37,17 @@ First release.
   routing set up over rtnetlink, and without IPv6 addresses, so Linux sends
   nothing through them unasked. A `TunPort` is `Clone`: clones share the
   device, and the TUN goes with the last one or on `close`.
+- `Endpoint::attach_tun` (Linux, `tun` feature): gives a tunnel a TUN and
+  carries its packets both ways, as `UpfSimulator::attach_tun` does for a
+  session. The tunnel's G-PDUs then go to Linux instead of the receiver.
+  The TUN closes with its tunnel, on the endpoint's `shutdown` and with its
+  last clone.
 - IPv4 UDP and ICMP Echo helpers to exercise tunnels without a TUN.
 - `ebpf::FastPath` (Linux 6.6, `ebpf` feature): three TCX programs carry an
   endpoint's tunnels in the kernel between a TUN and N3
   (`FastPath::load`, `add_tun`, `remove_tun`, `end_shortcut` and `stats`,
-  `Endpoint::set_fast_path`, `Endpoint::shortcut`, `TunPort::index`). The
+  `Endpoint::set_fast_path`, `Endpoint::shortcut`, `TunPort::index`); on an
+  endpoint with a fast path `attach_tun` does it for the TUN it makes. The
   tunnel's route updates and ends its short-cut, as does the endpoint's
   `shutdown`; a tunnel has one short-cut. What the programs leave
   alone still goes through the endpoint's socket and the TUN's reader, and

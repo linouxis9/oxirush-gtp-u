@@ -852,6 +852,65 @@ async fn a_tunnel_given_to_another_tun_leaves_the_first() {
     assert_eq!(fast_path.stats().uplink_packets, 0);
 }
 
+/// On an endpoint with a fast path, `attach_tun` also puts the TUN on it
+/// and short-cuts its tunnel, and the tunnel's removal undoes both.
+#[tokio::test]
+#[ignore = "needs root"]
+async fn an_attached_tun_is_short_cut_until_its_tunnel_is_removed() {
+    isolate();
+    let fast_path = FastPath::load().unwrap();
+    let (gnb, mut received) = Endpoint::bind("127.0.0.1:2152".parse().unwrap())
+        .await
+        .unwrap();
+    gnb.set_fast_path(fast_path.clone()).unwrap();
+    let peer = UdpSocket::bind("127.0.0.9:2152").await.unwrap();
+    let remote = RemoteTunnel::new(peer.local_addr().unwrap(), 0x7001);
+    let teid = gnb.install(1, 1, remote, 9).unwrap();
+    let routing = Routing::UePolicy {
+        address: UE,
+        table: 29100,
+        priority: 15100,
+    };
+    gnb.attach_tun(1, 1, TunConfig::new("oxu1", routing))
+        .unwrap();
+    assert_eq!(programs("oxu1", TcAttachType::Egress), 1);
+
+    // Userspace carries the uplink while the N3 interface, whose first
+    // tunnel was just installed, gets its program; then the kernel does.
+    let server = SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 9), 9);
+    let application = UdpSocket::bind((UE, 4000)).await.unwrap();
+    let mut datagram = vec![0; 2048];
+    let carried = async {
+        while fast_path.stats().uplink_packets == 0 {
+            application.send_to(b"uplink", server).await.unwrap();
+            let (size, from) = peer.recv_from(&mut datagram).await.unwrap();
+            assert_eq!(from, gnb.local_addr().unwrap());
+            let packet = Packet::decode(&datagram[..size]).unwrap();
+            assert_eq!((packet.teid, packet.qfi()), (0x7001, Some(9)));
+            assert_eq!(parse_ipv4_udp(&packet.payload).unwrap().2, b"uplink");
+        }
+    };
+    timeout(SECOND, carried)
+        .await
+        .expect("the kernel did not carry the attached TUN's uplink");
+    let reply = ipv4_udp(server, SocketAddrV4::new(UE, 4000), b"downlink").unwrap();
+    let reply = Packet::downlink(teid, 9, reply).encode().unwrap();
+    peer.send_to(&reply, gnb.local_addr().unwrap())
+        .await
+        .unwrap();
+    let size = timeout(SECOND, application.recv(&mut datagram))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&datagram[..size], b"downlink");
+    assert_eq!(fast_path.stats().downlink_packets, 1);
+    assert!(received.try_recv().is_err(), "a G-PDU reached the receiver");
+
+    gnb.remove(1, 1);
+    assert!(!exists("oxu1"));
+    assert_eq!(format!("{fast_path:?}"), "FastPath { tuns: 0 }");
+}
+
 /// The programs send from and receive on the GTP-U port only.
 #[tokio::test]
 #[ignore = "needs root"]
