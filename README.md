@@ -1,53 +1,110 @@
 # oxirush-gtp-u
 
-[![Crates.io](https://img.shields.io/crates/v/oxirush-gtp-u.svg)](https://crates.io/crates/oxirush-gtp-u)
-[![Documentation](https://docs.rs/oxirush-gtp-u/badge.svg)](https://docs.rs/oxirush-gtp-u)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](https://github.com/linouxis9/oxirush-gtp-u/blob/master/LICENSE)
 
-GTPv1-U, the protocol that tunnels user traffic in 4G and 5G networks, for
-Rust:
+> This crate is not on crates.io yet. Until its first release, depend on the
+> repository: `oxirush-gtp-u = { git = "https://github.com/linouxis9/oxirush-gtp-u" }`.
+
+GTP-U (the GPRS Tunnelling Protocol for the user plane, version 1), the
+protocol that tunnels user traffic in 4G and 5G networks, in Rust:
 
 - a **codec** for the messages of 3GPP TS 29.281, with the PDU Session
   Container of TS 38.415 that carries a 5G QoS flow identifier;
-- **`Endpoint`**, a Tokio UDP socket for the tunnels of a gNB (N3) or an eNB
-  (S1-U), which also sends the replies that a GTP-U node is required to send;
-- **`upf_sim`**, a UPF to test against, as a type and as a program;
-- **`tun`**, Linux TUN devices with the address and routes of a UE or of a
-  UPF session;
+- **`Endpoint`**, a Tokio UDP socket for the tunnels of a 5G base station
+  (the N3 interface) or of a 4G one (S1-U), which also sends the replies
+  that a GTP-U node is required to send;
+- **`upf_sim`**, a UPF (User Plane Function, the other end of N3) to test
+  against, as a type and as a program;
+- **`tun`**, Linux TUN devices with the address and routes of a device or
+  of a UPF session;
 - **`ebpf`**, an eBPF fast path that carries an endpoint's tunnels in the
   kernel, between a TUN and the network.
 
 It is made for simulators and test tools. It has no control plane: tunnels
-are set up by calls, with the TEIDs and addresses that NGAP, S1AP or PFCP
-would negotiate. The test UPF is not a UPF for real traffic. GTP-U has no
-authentication: anyone who reaches a socket can send on its tunnels.
+are set up by calls, with the identifiers and addresses that NGAP, S1AP or
+PFCP would negotiate.
 
-## Requirements
+It is one of the OxiRush crates for mobile core networks, with
+[oxirush-nas](https://github.com/linouxis9/oxirush-nas) (NAS messages),
+[oxirush-security](https://github.com/linouxis9/oxirush-security) (the
+security functions of NAS),
+[oxirush-ngap](https://github.com/linouxis9/oxirush-ngap) (NGAP),
+[oxirush-s1ap](https://github.com/linouxis9/oxirush-s1ap) (S1AP) and
+[oxirush-sctp](https://github.com/linouxis9/oxirush-sctp) (SCTP).
+
+## Installation
 
 ```toml
 [dependencies]
-oxirush-gtp-u = "0.1"
+oxirush-gtp-u = { git = "https://github.com/linouxis9/oxirush-gtp-u" }
 ```
 
-Rust 1.88 or later, and for each part:
+The codec needs nothing. Each other part is a feature:
 
 | Part | Feature | Needs |
 | ---- | ------- | ----- |
-| Codec, IPv4 helpers | none | nothing |
+| Codec, IPv4 helpers | none | no dependency |
 | `Endpoint`, `upf_sim` | `endpoint`, the default | a Tokio runtime |
 | `tun`, `attach_tun` of `Endpoint` and `UpfSimulator` | `tun` | Linux, `CAP_NET_ADMIN` |
 | `ebpf` | `ebpf` | Linux 6.6, `CAP_BPF` and `CAP_NET_ADMIN` |
 | `Serialize` and `Deserialize` for `RemoteTunnel` | `serde` | |
 
-With `default-features = false` the crate is the codec and has no
-dependencies. `ebpf` brings `tun`, and `tun` brings `endpoint`. The `tun`
-and `ebpf` modules exist on Linux only; elsewhere their features build and
-add nothing to `endpoint`.
+```toml
+# The codec alone
+oxirush-gtp-u = { git = "https://github.com/linouxis9/oxirush-gtp-u", default-features = false }
+
+# With TUN devices and the eBPF fast path
+oxirush-gtp-u = { git = "https://github.com/linouxis9/oxirush-gtp-u", features = ["ebpf"] }
+```
+
+`ebpf` brings `tun`, and `tun` brings `endpoint`. The `tun` and `ebpf`
+modules exist on Linux only; elsewhere their features build and add nothing
+to `endpoint`. The minimum supported Rust version is 1.88.
 
 The fast path's programs are committed as an object, `src/ebpf/gtpu.o`:
 building the crate with `ebpf` needs no nightly toolchain and no eBPF
 linker. Their source is beside it and `ebpf/` rebuilds it, in the
-repository and in the published crate ([Fast path](#fast-path) says how).
+repository and in the published crate
+([Fast path](#fast-path) says how).
+
+## Terms
+
+| Term | Meaning |
+|------|---------|
+| UE, gNB, eNB | The device (User Equipment), and the base station of 5G and of 4G |
+| UPF | User Plane Function: the node of the 5G core network that carries the traffic of the devices |
+| N3, S1-U, N6 | The interface between a gNB and a UPF, the one between an eNB and the gateway of a 4G core network, and the one between a UPF and the network that the devices reach |
+| Tunnel | The path of one PDU session of 5G, or of one bearer of 4G (an E-RAB), between two GTP-U nodes |
+| TEID | Tunnel Endpoint Identifier: the 32 bits in a GTP-U header that name the tunnel to the node that receives the message. Each end chooses the one it receives on |
+| G-PDU | The GTP-U message that carries one packet of a device, here an IP packet |
+| QFI | QoS Flow Identifier: the 6 bits that name the QoS flow of a packet in a 5G tunnel |
+| PDU Session Container | The extension header of a G-PDU that carries the QFI on N3 (TS 38.415) |
+| Echo, Error Indication, End Marker | The messages with which GTP-U nodes test a path, refuse a G-PDU of an unknown tunnel and close the old path of a handover |
+| TUN | A network interface of Linux whose packets a program reads and writes |
+| TCX | The attachment of eBPF programs to the ingress and the egress of an interface, since Linux 6.6 |
+
+## What it covers
+
+| What | API | Specification |
+|------|-----|---------------|
+| Messages | `Packet`: every header field, the chain of extension headers, the information elements, and constructors for G-PDU, Echo Request and Response, Error Indication, Supported Extension Headers Notification and End Marker | TS 29.281 §5, §7 and §8 |
+| PDU Session Container | `PduSessionContainer`: the downlink and the uplink PDU Session Information, with their QoS monitoring, sequence number, delay and congestion fields | TS 38.415 §5.5.2 |
+| Tunnels of a gNB or an eNB | `Endpoint`: tunnels by UE and PDU session or E-RAB, and the replies that a node owes its peer | TS 29.281 §4.4 and §7 |
+| A UPF to test against | `upf_sim::UpfSimulator` and the `oxirush-upf-sim` program: sessions, an echo service, an End Marker on a path switch | |
+| Linux as the device or as N6 | `tun::TunPort`, `Endpoint::attach_tun`, `UpfSimulator::attach_tun` | |
+| The tunnels in the kernel | `ebpf::FastPath` | |
+| Inner packets for tests | `ipv4_udp`, `ipv4_icmp_echo_request` and their parsers | |
+
+## What it does not do
+
+| Subject | Limit |
+|---------|-------|
+| Control plane | None: no NGAP, S1AP or PFCP. A call gives a tunnel its TEIDs and addresses. |
+| Authentication | GTP-U has none: anyone who reaches a socket can send on its tunnels. |
+| A UPF for real traffic | The test UPF serves the sessions that calls give it, with an echo service or a TUN. It has no PFCP, QoS or charging. |
+| Other GTP | GTP' and the versions 0 and 2 are refused, as `UnsupportedVersion`. |
+| IPv6 in the helpers, the TUN routing and the fast path | They are IPv4. The codec and the endpoint carry any payload, and an endpoint binds an IPv4 or an IPv6 address. |
+| Portability | `tun` and `ebpf` are Linux only. |
 
 ## Usage
 
@@ -130,7 +187,7 @@ cargo run --example endpoint
 
 With a TUN (the `tun` feature), applications use a tunnel through Linux:
 what a socket bound to the UE's address sends is routed into the TUN.
-`attach_tun` creates the TUN device of a tunnel.
+`attach_tun` creates a TUN device for a tunnel.
 
 ```rust,ignore
 #[cfg(target_os = "linux")]
@@ -450,29 +507,37 @@ equality, and `fuzz/` has a cargo-fuzz target for the same.
 
 ## Documentation
 
-Full API reference: **<https://docs.rs/oxirush-gtp-u>**
+`cargo doc --all-features --open` builds the API reference. It will be on
+docs.rs with the first release.
 
 ## Contributing
 
-Contributions welcome! Please:
+Contributions are welcome:
 
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Sign off your commits (`git commit -s`)
-4. Open a Pull Request
+1. Fork the repository.
+2. Create a branch for your change (`git checkout -b fix-end-marker-teid`).
+3. Sign off your commits (`git commit -s`).
+4. Open a pull request.
 
 A change to `src/ebpf/gtpu.o` is only accepted with the change to
 `src/ebpf/programs.rs`, `src/ebpf/layout.rs` or the build files in `ebpf/`
 that produces it: CI rebuilds the object and compares.
 
+To report a vulnerability, see
+[SECURITY.md](https://github.com/linouxis9/oxirush-gtp-u/blob/master/SECURITY.md)
+and do not open a public issue.
+
 ### Developer Certificate of Origin (DCO)
 
-By contributing to this project, you agree to the [Developer Certificate of Origin (DCO)](https://developercertificate.org/). This means that you have the right to submit your contributions and you agree to license them according to the project's license.
-
-All commits should be signed-off with `git commit -s` to indicate your agreement to the DCO.
+By contributing to this project, you agree to the
+[Developer Certificate of Origin (DCO)](https://developercertificate.org/):
+you have the right to submit your contribution, and you license it under the
+licence of the project. Sign off every commit with `git commit -s` to say so.
 
 ## License
 
-Copyright 2025 - 2026 Valentin D'Emmanuele
+Copyright 2025-2026 Valentin D'Emmanuele
 
-Licensed under the Apache License, Version 2.0. See [LICENSE](https://github.com/linouxis9/oxirush-gtp-u/blob/master/LICENSE) for details.
+Licensed under the Apache License, Version 2.0. See
+[LICENSE](https://github.com/linouxis9/oxirush-gtp-u/blob/master/LICENSE)
+for details.
