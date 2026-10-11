@@ -1,3 +1,6 @@
+# The manifest of the crate that builds src/ebpf/programs.rs for the eBPF
+# target. build.sh copies it to build/Cargo.toml: under that name here, cargo
+# would leave this directory out of the published crate.
 [package]
 name = "oxirush-gtp-u-ebpf"
 version = "0.0.0"
@@ -10,7 +13,7 @@ aya-ebpf = "0.2.1"
 
 [[bin]]
 name = "gtpu"
-path = "../src/ebpf/programs.rs"
+path = "../../src/ebpf/programs.rs"
 test = false
 doc = false
 bench = false

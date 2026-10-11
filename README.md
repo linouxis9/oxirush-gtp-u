@@ -34,16 +34,20 @@ Rust 1.87 or later, and for each part:
 | Part | Feature | Needs |
 | ---- | ------- | ----- |
 | Codec, IPv4 helpers | none | nothing |
-| `Endpoint`, `upf_sim` | `endpoint` (default) | a Tokio runtime |
-| `tun`, `attach_tun` of `Endpoint` and `UpfSimulator` | `tun` (default, through `ebpf`) | Linux, `CAP_NET_ADMIN` |
-| `ebpf` | `ebpf` (default) | Linux 6.6, `CAP_BPF` and `CAP_NET_ADMIN` |
+| `Endpoint`, `upf_sim` | `endpoint`, the default | a Tokio runtime |
+| `tun`, `attach_tun` of `Endpoint` and `UpfSimulator` | `tun` | Linux, `CAP_NET_ADMIN` |
+| `ebpf` | `ebpf` | Linux 6.6, `CAP_BPF` and `CAP_NET_ADMIN` |
 | `Serialize` and `Deserialize` for `RemoteTunnel` | `serde` | |
 
 With `default-features = false` the crate is the codec and has no
-dependencies. The `tun` and `ebpf` modules exist on Linux only; elsewhere
-their features build and add nothing to `endpoint`. The fast path's
-programs are committed as an object: building the crate needs no nightly
-toolchain and no eBPF linker.
+dependencies. `ebpf` brings `tun`, and `tun` brings `endpoint`. The `tun`
+and `ebpf` modules exist on Linux only; elsewhere their features build and
+add nothing to `endpoint`.
+
+The fast path's programs are committed as an object, `src/ebpf/gtpu.o`:
+building the crate with `ebpf` needs no nightly toolchain and no eBPF
+linker. Their source is beside it and `ebpf/` rebuilds it, in the
+repository and in the published crate ([Fast path](#fast-path) says how).
 
 ## Usage
 
@@ -124,9 +128,9 @@ cargo run --example endpoint
 
 ### A TUN for a UE
 
-With a TUN, applications use a tunnel through Linux: what a socket bound to
-the UE's address sends is routed into the TUN. `attach_tun` creates the TUN
-device of a tunnel.
+With a TUN (the `tun` feature), applications use a tunnel through Linux:
+what a socket bound to the UE's address sends is routed into the TUN.
+`attach_tun` creates the TUN device of a tunnel.
 
 ```rust,ignore
 #[cfg(target_os = "linux")]
@@ -170,7 +174,7 @@ It creates an interface and a routing rule, which needs root. A network
 namespace of its own keeps them off the host:
 
 ```sh
-cargo build --example tun
+cargo build --features tun --example tun
 sudo unshare --net sh -c 'ip link set lo up && target/debug/examples/tun'
 ```
 
@@ -189,8 +193,9 @@ its tunnels are installed:
 ```
 
 `attach_tun` then also puts the TUN on the fast path and short-cuts its
-tunnel. The example runs like `tun` and prints `FastPath::stats`, the
-packets that the programs carried.
+tunnel. The example needs the `ebpf` feature
+(`cargo build --features ebpf --example fast_path`), runs like `tun` and
+prints `FastPath::stats`, the packets that the programs carried.
 
 ### The test UPF as a program
 
@@ -203,7 +208,7 @@ TEID, the downlink TEID and the QFI. It serves that one session until
 Ctrl-C or SIGTERM, with the echo service as N6, or as root with a TUN:
 
 ```sh
-cargo build --bin oxirush-upf-sim
+cargo build --features tun --bin oxirush-upf-sim
 sudo ./target/debug/oxirush-upf-sim \
   127.0.0.8:2152 127.0.0.1:2152 1001 2001 9 --tun oxupf0 10.45.0.2
 ```
@@ -384,7 +389,8 @@ The programs' source is `src/ebpf/programs.rs` and their object
 `src/ebpf/gtpu.o`. `ebpf/build.sh` rebuilds the object, with the nightly
 toolchain that `ebpf/rust-toolchain.toml` pins, `rust-src` and
 `bpf-linker`; CI rebuilds it the same way with bpf-linker 0.11.1 and fails
-when it differs from the committed one.
+when it differs from the committed one. The published crate has these files
+too: in a copy of it, `ebpf/build.sh` rebuilds the object that it ships.
 
 ### Source layout
 
@@ -410,7 +416,7 @@ src/
 ├── ebpf/programs.rs       the TCX programs: uplink, encap, decap
 ├── ebpf/gtpu.o            their object, built by ../ebpf (ebpf)
 └── bin/oxirush-upf-sim.rs
-ebpf/                      the crate that builds programs.rs for eBPF
+ebpf/                      what builds programs.rs for eBPF: build.sh and its manifest
 examples/                  the programs of this page
 ```
 

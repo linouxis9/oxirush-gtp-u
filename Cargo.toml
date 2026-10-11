@@ -10,10 +10,10 @@ documentation = "https://docs.rs/oxirush-gtp-u"
 keywords = ["5g", "gtp-u", "upf", "3gpp", "telecom"]
 categories = ["network-programming", "parser-implementations", "development-tools::testing"]
 readme = "README.md"
-exclude = ["/.github", "/ebpf", "/fuzz"]
+exclude = ["/.github", "/fuzz"]
 
 [features]
-default = ["endpoint", "ebpf"]
+default = ["endpoint"]
 # The Tokio N3 endpoint and the test UPF.
 endpoint = ["dep:tokio", "dep:tracing"]
 # Linux TUN devices and their routing, set up over rtnetlink.

@@ -3,7 +3,7 @@
 //! network namespace of its own:
 //!
 //! ```sh
-//! cargo build --example fast_path
+//! cargo build --features ebpf --example fast_path
 //! sudo unshare --net sh -c 'ip link set lo up && target/debug/examples/fast_path'
 //! ```
 

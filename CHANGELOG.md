@@ -55,9 +55,11 @@ First release.
   interface Linux routes the tunnel through; it gets its program when a
   first tunnel through it is installed, off the caller's task. The
   programs' object is committed next to its source
-  (`src/ebpf/programs.rs`); CI rebuilds it and compares.
+  (`src/ebpf/programs.rs`), and `ebpf/` has what rebuilds it, in the
+  repository and in the published crate; CI rebuilds it and compares.
 - Examples: `codec`, `endpoint`, and on Linux as root `tun` and `fast_path`.
   The README shows them, and a test compares the two.
-- Features: `endpoint` and `ebpf` (default), `tun`, `serde`. Without
-  default features the crate has no dependencies. MSRV 1.87, which `ebpf`
-  needs.
+- Features: `endpoint` (the default), `tun`, `ebpf` and `serde`. Without
+  default features the crate has no dependencies. The fast path is not a
+  default feature: a crate that only decodes packets would otherwise build
+  an eBPF loader and the rtnetlink crates. MSRV 1.87, which `ebpf` needs.

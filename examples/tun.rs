@@ -3,7 +3,7 @@
 //! of its own:
 //!
 //! ```sh
-//! cargo build --example tun
+//! cargo build --features tun --example tun
 //! sudo unshare --net sh -c 'ip link set lo up && target/debug/examples/tun'
 //! ```
 

@@ -23,7 +23,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # Each set of features: all, the default (`endpoint`), and none
       - run: cargo test --locked --all-features
+      - run: cargo test --locked
       - run: cargo test --locked --no-default-features
 
   msrv:
@@ -34,6 +36,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.87.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked --all-features
+      - run: cargo test --locked --no-default-features
 
   minimal-versions:
     name: Minimal dependency versions
@@ -86,6 +89,25 @@ jobs:
       # A committed object that its source does not produce fails here.
       - run: git diff --exit-code -- src/ebpf/gtpu.o
 
+  package:
+    name: Package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo package --locked
+      # The published crate has what rebuilds the eBPF object it ships.
+      - name: The eBPF build files are in the package
+        run: |
+          cargo package --locked --list > files.txt
+          for file in build.sh programs.toml programs.lock config.toml rust-toolchain.toml; do
+            grep -qx "ebpf/$file" files.txt
+          done
+          grep -qx src/ebpf/programs.rs files.txt
+          grep -qx src/ebpf/layout.rs files.txt
+          grep -qx src/ebpf/gtpu.o files.txt
+
   wireshark:
     name: Wire format against Wireshark
     runs-on: ubuntu-latest
@@ -122,6 +144,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo clippy --locked --all-targets --no-default-features -- -D warnings
 
   doc:
