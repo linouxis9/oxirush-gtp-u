@@ -2,7 +2,7 @@
 name = "oxirush-gtp-u"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.87"
+rust-version = "1.88"
 description = "GTPv1-U codec (TS 29.281, TS 38.415), async N3 endpoint, test UPF, Linux TUN routing and eBPF fast path"
 license = "Apache-2.0"
 repository = "https://github.com/linouxis9/oxirush-gtp-u"
@@ -24,7 +24,7 @@ tun = [
     "dep:netlink-packet-route",
     "dep:netlink-sys",
 ]
-# The eBPF fast path of the endpoint's tunnels (Linux 6.6, Rust 1.87).
+# The eBPF fast path of the endpoint's tunnels (Linux 6.6).
 ebpf = ["tun", "dep:aya"]
 # Serialize and Deserialize for RemoteTunnel (with endpoint).
 serde = ["dep:serde"]

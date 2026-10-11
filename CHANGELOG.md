@@ -62,4 +62,5 @@ First release.
 - Features: `endpoint` (the default), `tun`, `ebpf` and `serde`. Without
   default features the crate has no dependencies. The fast path is not a
   default feature: a crate that only decodes packets would otherwise build
-  an eBPF loader and the rtnetlink crates. MSRV 1.87, which `ebpf` needs.
+  an eBPF loader and the rtnetlink crates. The minimum supported Rust
+  version is 1.88.

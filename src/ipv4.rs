@@ -140,11 +140,11 @@ fn udp_checksum(source: Ipv4Addr, destination: Ipv4Addr, udp: &[u8]) -> u16 {
 pub(crate) fn checksum(parts: &[&[u8]]) -> u16 {
     let mut sum: u32 = 0;
     for part in parts {
-        let mut words = part.chunks_exact(2);
-        for word in words.by_ref() {
-            sum += u32::from(u16::from_be_bytes([word[0], word[1]]));
+        let (words, last) = part.as_chunks::<2>();
+        for word in words {
+            sum += u32::from(u16::from_be_bytes(*word));
         }
-        if let [last] = words.remainder() {
+        if let [last] = last {
             sum += u32::from(*last) << 8;
         }
         sum = (sum & 0xffff) + (sum >> 16);

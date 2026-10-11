@@ -29,7 +29,7 @@ authentication: anyone who reaches a socket can send on its tunnels.
 oxirush-gtp-u = "0.1"
 ```
 
-Rust 1.87 or later, and for each part:
+Rust 1.88 or later, and for each part:
 
 | Part | Feature | Needs |
 | ---- | ------- | ----- |

@@ -210,10 +210,11 @@ impl UpfSimulator {
             while index < shutdown.attachments.len() {
                 let attachment = &mut shutdown.attachments[index];
                 if let Some(task) = attachment.task.as_mut() {
-                    if let Err(error) = task.await {
-                        if !error.is_cancelled() && result.is_ok() {
-                            result = Err(io::Error::other(error));
-                        }
+                    if let Err(error) = task.await
+                        && !error.is_cancelled()
+                        && result.is_ok()
+                    {
+                        result = Err(io::Error::other(error));
                     }
                     attachment.task.take();
                 }
@@ -464,17 +465,15 @@ async fn receive(
             socket.error_indication(packet.teid, from).await;
             continue;
         };
-        if !write_to_tun(&target, packet.payload).await {
-            if let Some(reply) = echo_service(packet.payload) {
-                if let Err(error) =
-                    send_downlink(&socket, &state, packet.teid, &target.incarnation, reply).await
-                {
-                    debug!(
-                        "UPF echo reply on uplink TEID {} failed: {error}",
-                        packet.teid
-                    );
-                }
-            }
+        if !write_to_tun(&target, packet.payload).await
+            && let Some(reply) = echo_service(packet.payload)
+            && let Err(error) =
+                send_downlink(&socket, &state, packet.teid, &target.incarnation, reply).await
+        {
+            debug!(
+                "UPF echo reply on uplink TEID {} failed: {error}",
+                packet.teid
+            );
         }
         socket.observe(&tx, || UplinkPacket {
             uplink_teid: packet.teid,
