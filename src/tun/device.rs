@@ -32,9 +32,9 @@ impl TunDevice {
             return Err(match error.raw_os_error() {
                 Some(libc::EBUSY) => io::Error::new(
                     io::ErrorKind::AlreadyExists,
-                    format!("network interface {} already exists", name),
+                    format!("network interface {name} already exists"),
                 ),
-                _ => context(error, format_args!("create TUN {}", name)),
+                _ => context(error, format_args!("create TUN {name}")),
             });
         }
         set_nonblocking(&file)?;
