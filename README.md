@@ -10,7 +10,7 @@ Rust:
 - a **codec** for the messages of 3GPP TS 29.281, with the PDU Session
   Container of TS 38.415 that carries a 5G QoS flow identifier;
 - **`Endpoint`**, a Tokio UDP socket for the tunnels of a gNB (N3) or an eNB
-  (S1-U), which also answers what a GTP-U node must answer;
+  (S1-U), which also sends the replies that a GTP-U node is required to send;
 - **`upf_sim`**, a UPF to test against, as a type and as a program;
 - **`tun`**, Linux TUN devices with the address and routes of a UE or of a
   UPF session;
@@ -125,8 +125,8 @@ cargo run --example endpoint
 ### A TUN for a UE
 
 With a TUN, applications use a tunnel through Linux: what a socket bound to
-the UE's address sends is routed into the TUN. `attach_tun` makes the TUN of
-a tunnel.
+the UE's address sends is routed into the TUN. `attach_tun` creates the TUN
+device of a tunnel.
 
 ```rust,ignore
 #[cfg(target_os = "linux")]
