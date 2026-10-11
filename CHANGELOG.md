@@ -12,9 +12,9 @@ First release.
   Its `Error` converts into a `std::io::Error`.
 - PDU Session Container (TS 38.415 V18 §5.5.2): downlink and uplink PDU
   Session Information with their QoS monitoring, sequence number, delay and
-  congestion fields; new IEs of later releases are kept as received. The
-  wire format is checked against Wireshark's dissector and was exchanged
-  with the free5GC and Open5GS UPFs.
+  congestion fields; new IEs of later releases are kept as received. A test
+  compares the wire format with Wireshark's dissector (`tests/wireshark.rs`,
+  which CI runs).
 - Downlink Burst Size and Time To Next Burst are typed and preserved with
   their BSSI/TTNBI flags. Imported TS 29.060 TV IEs retain their values and
   signaling IEs use the required order; Echo Response includes the rejection
@@ -25,7 +25,7 @@ First release.
   Indications with their source address; the TEID alone identifies a
   tunnel. `install_s1u` gives an eNB's S1-U tunnels, without a PDU Session
   Container. `install` returns an `io::Result`: a QFI above 63 is
-  `InvalidInput`, as with `install_with_teid`, and no longer a panic.
+  `InvalidInput`, as with `install_with_teid`.
 - Endpoint and test-UPF binding require a specific local IP address;
   wildcard addresses return `InvalidInput` to preserve reply source addresses.
   TUN attachment and session replacement check the session's identity so a
@@ -64,3 +64,4 @@ First release.
   default feature: a crate that only decodes packets would otherwise build
   an eBPF loader and the rtnetlink crates. The minimum supported Rust
   version is 1.88.
+- A `SECURITY.md` that says how to report a vulnerability.
