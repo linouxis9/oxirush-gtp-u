@@ -356,7 +356,8 @@ fn optional_fields_and_an_extension_header_chain() {
             kind: ExtensionHeader::LONG_PDCP_PDU_NUMBER,
             content: vec![0x01, 0x02, 0x03, 0x00, 0x00, 0x00],
         },
-    ];
+    ]
+    .into();
     check(
         &packet,
         &[
@@ -381,4 +382,50 @@ fn optional_fields_and_an_extension_header_chain() {
             ("gtp.ext_hdr.long_pdcp_sn", "66051"),
         ],
     );
+}
+
+/// Chains of no extension header, one, two, three and four, the last of a
+/// type that this crate keeps as octets and that Wireshark does not know
+/// either: Wireshark finds each header of the chain where the encoder put
+/// it, and the decoder gives the chain back.
+#[test]
+#[ignore = "needs tshark"]
+fn chains_of_every_length_with_an_unknown_header() {
+    let chain = [
+        ExtensionHeader::PduSessionContainer(PduSessionContainer::uplink(9)),
+        ExtensionHeader::UdpPort(2152),
+        ExtensionHeader::Other {
+            kind: ExtensionHeader::LONG_PDCP_PDU_NUMBER_LEGACY,
+            content: vec![0x01, 0x02, 0x03, 0x00, 0x00, 0x00],
+        },
+        ExtensionHeader::Other {
+            kind: 0x21,
+            content: vec![0xaa, 0xbb],
+        },
+    ];
+    let next = ["0x85", "0x40", "0x82", "0x21"];
+    let lengths = ["1", "1", "2", "1"];
+    for length in 0..=chain.len() {
+        let mut packet = Packet::g_pdu(7, vec![0x45]);
+        packet
+            .extension_headers
+            .extend(chain[..length].iter().cloned());
+        let (values, expert) = dissect(
+            &packet,
+            &["gtp.flags", "gtp.ext_hdr.next", "gtp.ext_hdr.length"],
+        );
+        assert_eq!(expert, "", "Wireshark reports a problem with {packet:?}");
+        let (flags, types) = match length {
+            0 => ("0x30", String::new()),
+            _ => ("0x34", format!("{},0x00", next[..length].join(","))),
+        };
+        assert_eq!(values[0], flags, "{packet:?}");
+        assert_eq!(values[1], types, "{packet:?}");
+        assert_eq!(values[2], lengths[..length].join(","), "{packet:?}");
+        let wire = packet.encode().unwrap();
+        let decoded = Packet::decode(&wire).unwrap();
+        assert_eq!(decoded.extension_headers, chain[..length]);
+        assert_eq!(decoded, packet);
+        assert_eq!(decoded.encode().unwrap(), wire);
+    }
 }

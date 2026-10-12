@@ -1,9 +1,9 @@
 use std::net::IpAddr;
 
 use oxirush_gtp_u::{
-    DownlinkPduSessionInformation, ExtensionHeader, InformationElement, Packet,
-    PduSessionContainer, UplinkPduSessionInformation, UplinkTimeStamps, parse_ipv4_icmp_echo,
-    parse_ipv4_udp,
+    DownlinkPduSessionInformation, Error, ExtensionHeader, ExtensionHeaders, InformationElement,
+    Packet, PduSessionContainer, UplinkPduSessionInformation, UplinkTimeStamps,
+    parse_ipv4_icmp_echo, parse_ipv4_udp,
 };
 use proptest::collection::vec;
 use proptest::option::of;
@@ -89,7 +89,7 @@ fn uplink(valid: bool) -> impl Strategy<Value = PduSessionContainer> {
                         content.push(0);
                         length += 1;
                     }
-                    oxirush_gtp_u::UnknownNewIes { flags, content }
+                    Box::new(oxirush_gtp_u::UnknownNewIes { flags, content })
                 });
                 PduSessionContainer::Uplink(information)
             },
@@ -122,21 +122,27 @@ fn extension_header(valid: bool) -> impl Strategy<Value = ExtensionHeader> {
     ]
 }
 
+/// A message with no extension header, one, or a chain of up to five, given
+/// to it one at a time or as a `Vec`.
 fn packet(valid: bool) -> impl Strategy<Value = Packet> {
     (
         any::<u8>(),
         any::<u32>(),
         of(any::<u16>()),
         of(any::<u8>()),
-        vec(extension_header(valid), 0..4),
+        (vec(extension_header(valid), 0..6), any::<bool>()),
         vec(any::<u8>(), 0..64),
     )
         .prop_map(
-            |(message_type, teid, sequence, n_pdu_number, extension_headers, payload)| {
+            |(message_type, teid, sequence, n_pdu_number, (headers, one_at_a_time), payload)| {
                 let mut packet = Packet::new(message_type, teid, payload);
                 packet.sequence = sequence;
                 packet.n_pdu_number = n_pdu_number;
-                packet.extension_headers = extension_headers;
+                if one_at_a_time {
+                    packet.extension_headers.extend(headers);
+                } else {
+                    packet.extension_headers = headers.into();
+                }
                 packet
             },
         )
@@ -218,6 +224,63 @@ proptest! {
         prop_assert_eq!(borrowed.payload.as_ptr(), bytes[bytes.len() - borrowed.payload.len()..].as_ptr());
         prop_assert_eq!(borrowed.into_owned(), packet.clone());
         prop_assert_eq!(Packet::decode(&bytes).unwrap(), packet);
+    }
+
+    /// The list of a message's extension headers is those headers in their
+    /// order, whether it was given them one at a time or as a `Vec`, and a
+    /// decoded message has the list that was encoded.
+    #[test]
+    fn a_list_of_extension_headers_is_its_headers(headers in vec(extension_header(true), 0..9)) {
+        let mut pushed = ExtensionHeaders::new();
+        for header in &headers {
+            pushed.push(header.clone());
+        }
+        let collected: ExtensionHeaders = headers.iter().cloned().collect();
+        let converted = ExtensionHeaders::from(headers.clone());
+        for list in [&pushed, &collected, &converted] {
+            prop_assert_eq!(&list[..], &headers[..]);
+            prop_assert_eq!(list, &pushed);
+            prop_assert_eq!(format!("{list:?}"), format!("{headers:?}"));
+            prop_assert_eq!(list.clone().into_iter().collect::<Vec<_>>(), headers.clone());
+            prop_assert_eq!(Vec::from(list.clone()), headers.clone());
+            let mut packet = Packet::g_pdu(1, vec![0x45]);
+            packet.extension_headers = list.clone();
+            let decoded = Packet::decode(&packet.encode().unwrap()).unwrap();
+            prop_assert_eq!(&decoded.extension_headers[..], &headers[..]);
+            prop_assert_eq!(decoded, packet);
+        }
+    }
+
+    /// A chain of extension headers that is cut short, or that has a header
+    /// of no octets, is an error wherever in the chain that is.
+    #[test]
+    fn a_chain_that_ends_badly_is_an_error(
+        headers in vec(extension_header(true), 1..7),
+        cut in any::<prop::sample::Index>(),
+        emptied in any::<prop::sample::Index>(),
+    ) {
+        let mut packet = Packet::g_pdu(1, vec![]);
+        packet.extension_headers = headers.clone().into();
+        let bytes = packet.encode().unwrap();
+        // The octets of the chain, of which the message keeps a part
+        let chain = 12..bytes.len();
+        let end = chain.start + cut.index(chain.len());
+        let mut short = bytes[..end].to_vec();
+        short[2..4].copy_from_slice(&((end - 8) as u16).to_be_bytes());
+        prop_assert!(Packet::decode(&short).is_err());
+        // The length octet of one header of the chain, set to none
+        let mut start = chain.start;
+        for header in &headers[..emptied.index(headers.len())] {
+            let mut alone = Packet::g_pdu(1, vec![]);
+            alone.extension_headers.push(header.clone());
+            start += alone.encode().unwrap().len() - 12;
+        }
+        let mut empty = bytes.clone();
+        empty[start] = 0;
+        prop_assert_eq!(
+            Packet::decode(&empty),
+            Err(Error::InvalidLength("extension header"))
+        );
     }
 
     #[test]

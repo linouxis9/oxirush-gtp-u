@@ -1,10 +1,11 @@
-//! Encode and decode G-PDUs with a PDU Session Container.
+//! Encode and decode G-PDUs with a PDU Session Container, and with a chain
+//! of extension headers.
 //!
 //! ```sh
 //! cargo run --example codec
 //! ```
 
-use oxirush_gtp_u::{DownlinkPduSessionInformation, Packet, PduSessionContainer};
+use oxirush_gtp_u::{DownlinkPduSessionInformation, ExtensionHeader, Packet, PduSessionContainer};
 
 fn main() -> Result<(), oxirush_gtp_u::Error> {
     // An uplink G-PDU of QoS flow 9, as a gNB sends it on N3.
@@ -26,5 +27,18 @@ fn main() -> Result<(), oxirush_gtp_u::Error> {
     let decoded = Packet::decode_borrowed(&bytes)?;
     assert_eq!(decoded.pdu_session_container(), Some(&container));
     assert_eq!(decoded.payload, b"an IP packet");
+
+    // The extension headers of a message are a list, in their order: here
+    // the container, and one of a type that the crate keeps as octets.
+    let service_class = ExtensionHeader::Other {
+        kind: ExtensionHeader::SERVICE_CLASS_INDICATOR,
+        content: vec![7, 0],
+    };
+    let mut longer = uplink.clone();
+    longer.extension_headers.push(service_class.clone());
+    let decoded = Packet::decode(&longer.encode()?)?;
+    assert_eq!(decoded.extension_headers.len(), 2);
+    assert_eq!(decoded.extension_headers[1], service_class);
+    assert_eq!(decoded.qfi(), Some(9));
     Ok(())
 }

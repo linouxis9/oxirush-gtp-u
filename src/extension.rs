@@ -252,6 +252,15 @@ impl DownlinkPduSessionInformation {
         let mut reader = Reader(content);
         let flags = reader.u8()?;
         let octet = reader.u8()?;
+        // The usual information is a QFI and its RQI: none of the fields
+        // that the flags below announce.
+        if flags & 0x0e == 0 && octet & 0x80 == 0 {
+            return Ok(Self {
+                qfi: octet & 0x3f,
+                rqi: octet & 0x40 != 0,
+                ..Self::default()
+            });
+        }
         let ppi_octet = if octet & 0x80 != 0 {
             Some(reader.u8()?)
         } else {
@@ -345,8 +354,10 @@ pub struct UplinkPduSessionInformation {
     /// (New IE Flag 2), unchecked like the UL one.
     pub dl_congestion_information: Option<u16>,
     /// New IEs of later releases than TS 38.415 V18, as received (present
-    /// when the New IE Flags announce any).
-    pub unknown_new_ies: Option<UnknownNewIes>,
+    /// when the New IE Flags announce any). They are out of the
+    /// information, which without them is short enough to be moved in
+    /// place.
+    pub unknown_new_ies: Option<Box<UnknownNewIes>>,
 }
 
 /// New IEs of UL PDU Session Information that this crate does not decode:
@@ -387,6 +398,11 @@ impl UplinkPduSessionInformation {
         let mut reader = Reader(content);
         let flags = reader.u8()?;
         let octet = reader.u8()?;
+        // The usual information is a QFI: none of the fields that the
+        // flags below announce.
+        if flags & 0x0f == 0 && octet & 0xc0 == 0 {
+            return Ok(Self::new(octet & 0x3f));
+        }
         let time_stamps = if flags & 0x08 != 0 {
             Some(UplinkTimeStamps {
                 dl_sending_repeated: reader.u64()?,
@@ -400,35 +416,48 @@ impl UplinkPduSessionInformation {
         let ul_delay_result = reader.u32_if(flags & 0x02 != 0)?;
         let ul_qfi_sequence_number = reader.u24_if(flags & 0x01 != 0)?;
         let n3_n9_delay_result = reader.u32_if(octet & 0x80 != 0)?;
-        let mut information = Self {
+        let (mut d1_ul_pdcp_delay_result_ind, mut unknown_new_ies) = (None, None);
+        let (mut ul_congestion_information, mut dl_congestion_information) = (None, None);
+        if octet & 0x40 != 0 {
+            let first = reader.u8()?;
+            // The extension octets of the New IE Flags, before the IEs.
+            let after_first = reader.0;
+            let mut last = first;
+            while last & 0x80 != 0 {
+                last = reader.u8()?;
+            }
+            let extension = &after_first[..after_first.len() - reader.0.len()];
+            if first & 0x01 != 0 {
+                d1_ul_pdcp_delay_result_ind = Some(reader.u8()? & 0x01 != 0);
+            }
+            ul_congestion_information = reader.u16_if(first & 0x02 != 0)?;
+            dl_congestion_information = reader.u16_if(first & 0x04 != 0)?;
+            // Only flags of a later release are kept as octets: the flags
+            // of the three IEs above allocate nothing.
+            let unknown = first & !0x07;
+            if unknown != 0 {
+                let mut flags = Vec::with_capacity(1 + extension.len());
+                flags.push(unknown);
+                flags.extend_from_slice(extension);
+                unknown_new_ies = Some(Box::new(UnknownNewIes {
+                    flags,
+                    content: reader.0.to_vec(),
+                }));
+            }
+        }
+        // Otherwise what follows the present fields is padding.
+        Ok(Self {
             qfi: octet & 0x3f,
             time_stamps,
             dl_delay_result,
             ul_delay_result,
             ul_qfi_sequence_number,
             n3_n9_delay_result,
-            ..Self::default()
-        };
-        if octet & 0x40 != 0 {
-            let mut flags = vec![reader.u8()?];
-            while flags.last().is_some_and(|flags| flags & 0x80 != 0) {
-                flags.push(reader.u8()?);
-            }
-            if flags[0] & 0x01 != 0 {
-                information.d1_ul_pdcp_delay_result_ind = Some(reader.u8()? & 0x01 != 0);
-            }
-            information.ul_congestion_information = reader.u16_if(flags[0] & 0x02 != 0)?;
-            information.dl_congestion_information = reader.u16_if(flags[0] & 0x04 != 0)?;
-            flags[0] &= !0x07;
-            if flags[0] != 0 {
-                information.unknown_new_ies = Some(UnknownNewIes {
-                    flags,
-                    content: reader.0.to_vec(),
-                });
-            }
-        }
-        // Otherwise what follows the present fields is padding.
-        Ok(information)
+            d1_ul_pdcp_delay_result_ind,
+            ul_congestion_information,
+            dl_congestion_information,
+            unknown_new_ies,
+        })
     }
 
     fn encode(&self, out: &mut impl EncodeBuffer) -> Result<(), Error> {

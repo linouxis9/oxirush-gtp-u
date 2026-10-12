@@ -115,7 +115,7 @@ page. The asynchronous ones also need `tokio` with its `macros`, `rt` and
 ### Encode and decode
 
 ```rust
-use oxirush_gtp_u::{DownlinkPduSessionInformation, Packet, PduSessionContainer};
+use oxirush_gtp_u::{DownlinkPduSessionInformation, ExtensionHeader, Packet, PduSessionContainer};
 
 fn main() -> Result<(), oxirush_gtp_u::Error> {
     // An uplink G-PDU of QoS flow 9, as a gNB sends it on N3.
@@ -137,6 +137,19 @@ fn main() -> Result<(), oxirush_gtp_u::Error> {
     let decoded = Packet::decode_borrowed(&bytes)?;
     assert_eq!(decoded.pdu_session_container(), Some(&container));
     assert_eq!(decoded.payload, b"an IP packet");
+
+    // The extension headers of a message are a list, in their order: here
+    // the container, and one of a type that the crate keeps as octets.
+    let service_class = ExtensionHeader::Other {
+        kind: ExtensionHeader::SERVICE_CLASS_INDICATOR,
+        content: vec![7, 0],
+    };
+    let mut longer = uplink.clone();
+    longer.extension_headers.push(service_class.clone());
+    let decoded = Packet::decode(&longer.encode()?)?;
+    assert_eq!(decoded.extension_headers.len(), 2);
+    assert_eq!(decoded.extension_headers[1], service_class);
+    assert_eq!(decoded.qfi(), Some(9));
     Ok(())
 }
 ```
@@ -289,6 +302,14 @@ TLV information elements and uplink New IEs that have no type of their own
 are kept as received. A TV information element imported from TS 29.060 is
 kept when its fixed length is known; an unknown TV type is an error. What
 decodes encodes to a message that decodes to the same value.
+
+`Packet::extension_headers` is an `ExtensionHeaders`, the chain in its
+order on the wire: a slice to read and to change, `push` to add a header,
+and `From` a `Vec` and back for the rest. It keeps its first header in the
+list itself. A message without extension header, or with one, such as the
+PDU Session Container of a G-PDU on N3, is decoded and made without an
+allocation; a second header allocates the list, and a header or a PDU type
+that is kept as received allocates its octets.
 
 `Packet<P>` takes any payload that is `AsRef<[u8]>`, `Vec<u8>` by default.
 `decode_borrowed` returns a `Packet<&[u8]>` whose payload stays in the
@@ -526,21 +547,21 @@ one is kept as octets:
 
 | | 64 octets of payload | 1400 octets |
 |---|---|---|
-| Encode into a buffer that is used again | 43 ns | 53 ns |
-| Encode into a new buffer | 54 ns | 92 ns |
-| Decode, the payload left in the datagram: no extension header | 7 ns | 7 ns |
-| The same, with the PDU Session Container | 186 ns | 198 ns |
-| The same, with three extension headers | 248 ns | 245 ns |
-| Decode, the payload copied: no extension header | 22 ns | 53 ns |
-| The same, with the PDU Session Container | 227 ns | 257 ns |
-| The same, with three extension headers | 273 ns | 295 ns |
-| From an endpoint to the test UPF and its echo back, over the loopback interface | 12.5 µs | 13.2 µs |
+| Encode into a buffer that is used again | 41 ns | 56 ns |
+| Encode into a new buffer | 53 ns | 84 ns |
+| Decode, the payload left in the datagram: no extension header | 9 ns | 9 ns |
+| The same, with the PDU Session Container | 23 ns | 23 ns |
+| The same, with three extension headers | 65 ns | 66 ns |
+| Decode, the payload copied: no extension header | 16 ns | 38 ns |
+| The same, with the PDU Session Container | 30 ns | 55 ns |
+| The same, with three extension headers | 74 ns | 116 ns |
+| From an endpoint to the test UPF and its echo back, over the loopback interface | 12.5 µs | 13.3 µs |
 
 Four fifths of the round trip are its four system calls, and the codec is
-under 2% of it. A message with an extension header allocates the list of
-its headers, and most of its decoding on its own is the allocator, which
-frees that list: in the loop of the benchmark glibc takes the long way
-through `free`, which the round trip does not.
+under 2% of it. A message whose payload stays in the datagram is decoded
+without an allocation when it has one extension header at most; with
+three, it allocates its list and the octets of the header that is kept as
+received.
 
 ### 3GPP references
 

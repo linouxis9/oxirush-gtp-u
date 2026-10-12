@@ -2,7 +2,7 @@
 
 use std::net::IpAddr;
 
-use crate::{Error, ExtensionHeader, InformationElement, PduSessionContainer};
+use crate::{Error, ExtensionHeader, ExtensionHeaders, InformationElement, PduSessionContainer};
 
 /// Echo Request (TS 29.281 §7.2.1).
 pub const ECHO_REQUEST: u8 = 1;
@@ -38,7 +38,8 @@ const OPTIONAL_LEN: usize = 4;
 ///
 /// `P` defaults to an owned `Vec<u8>`. Constructors also accept slices and
 /// other byte buffers implementing `AsRef<[u8]>`. Borrowed decoding keeps the
-/// payload in the original datagram; extension metadata remains owned.
+/// payload in the original datagram; the extension headers are owned, in a
+/// list that holds the first of them itself.
 ///
 /// ```
 /// use oxirush_gtp_u::{G_PDU, Packet};
@@ -67,7 +68,7 @@ pub struct Packet<P = Vec<u8>> {
     /// N-PDU Number (PN flag).
     pub n_pdu_number: Option<u8>,
     /// Extension headers, in order (E flag).
-    pub extension_headers: Vec<ExtensionHeader>,
+    pub extension_headers: ExtensionHeaders,
     /// The T-PDU of a G-PDU, or the information elements of a signalling
     /// message (see [`information_elements`](Packet::information_elements)).
     pub payload: P,
@@ -81,7 +82,7 @@ impl<P: AsRef<[u8]>> Packet<P> {
             teid,
             sequence: None,
             n_pdu_number: None,
-            extension_headers: Vec::new(),
+            extension_headers: ExtensionHeaders::new(),
             payload,
         }
     }
@@ -190,67 +191,107 @@ impl Packet {
 
     /// Decode one GTP-U message, the whole payload of a UDP datagram.
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
-        Self::decode_borrowed(bytes).map(Packet::into_owned)
+        decode(bytes, <[u8]>::to_vec)
     }
 
     /// Decode a message while borrowing its payload from the input datagram.
-    /// Extension headers and their metadata remain owned. The payload is copied
-    /// only when [`into_owned`](Packet::into_owned) is called.
+    /// The payload is copied only when [`into_owned`](Packet::into_owned) is
+    /// called.
+    ///
+    /// The extension headers are owned. A message without extension header,
+    /// or with one that is a UDP Port or a PDU Session Container of downlink
+    /// or uplink information without new IEs of a later release, is decoded
+    /// without an allocation. A second header allocates the list, and a
+    /// header or a PDU type that is kept as received allocates its octets.
+    /// A datagram holds 16 382 extension headers at most.
     pub fn decode_borrowed(bytes: &[u8]) -> Result<Packet<&[u8]>, Error> {
-        let Some((header, rest)) = bytes.split_first_chunk::<MANDATORY_LEN>() else {
-            return Err(Error::Truncated("GTP-U header"));
-        };
-        let flags = header[0];
-        // Version 1 and protocol type 1; the spare bit is not evaluated.
-        if flags & 0xf0 != VERSION_1_GTP {
-            return Err(Error::UnsupportedVersion(flags));
-        }
-        let length = usize::from(u16::from_be_bytes([header[2], header[3]]));
-        if rest.len() < length {
-            return Err(Error::Truncated("GTP-U message"));
-        }
-        if rest.len() > length {
-            return Err(Error::InvalidLength("GTP-U message"));
-        }
-        let mut packet = Packet::new(
-            header[1],
-            u32::from_be_bytes([header[4], header[5], header[6], header[7]]),
-            &[][..],
-        );
-        let mut rest = rest;
-        if flags & (E | S | PN) != 0 {
-            let Some((optional, after)) = rest.split_first_chunk::<OPTIONAL_LEN>() else {
-                return Err(Error::Truncated("GTP-U optional header"));
-            };
-            rest = after;
-            if flags & S != 0 {
-                packet.sequence = Some(u16::from_be_bytes([optional[0], optional[1]]));
-            }
-            if flags & PN != 0 {
-                packet.n_pdu_number = Some(optional[2]);
-            }
-            let mut next = if flags & E != 0 { optional[3] } else { 0 };
-            while next != 0 {
-                let Some(&units) = rest.first() else {
-                    return Err(Error::Truncated("extension header"));
-                };
-                let size = usize::from(units) * 4;
-                if size == 0 {
-                    return Err(Error::InvalidLength("extension header"));
-                }
-                let Some((header, after)) = rest.split_at_checked(size) else {
-                    return Err(Error::Truncated("extension header"));
-                };
-                packet
-                    .extension_headers
-                    .push(ExtensionHeader::decode(next, &header[1..size - 1])?);
-                next = header[size - 1];
-                rest = after;
-            }
-        }
-        packet.payload = rest;
-        Ok(packet)
+        decode(bytes, |payload| payload)
     }
+}
+
+/// Decode a message, whose payload `payload` makes of its octets in the
+/// datagram.
+#[inline]
+fn decode<'a, P>(bytes: &'a [u8], payload: impl Fn(&'a [u8]) -> P) -> Result<Packet<P>, Error> {
+    let Some((header, rest)) = bytes.split_first_chunk::<MANDATORY_LEN>() else {
+        return Err(Error::Truncated("GTP-U header"));
+    };
+    let flags = header[0];
+    // Version 1 and protocol type 1; the spare bit is not evaluated.
+    if flags & 0xf0 != VERSION_1_GTP {
+        return Err(Error::UnsupportedVersion(flags));
+    }
+    let length = usize::from(u16::from_be_bytes([header[2], header[3]]));
+    if rest.len() < length {
+        return Err(Error::Truncated("GTP-U message"));
+    }
+    if rest.len() > length {
+        return Err(Error::InvalidLength("GTP-U message"));
+    }
+    let message_type = header[1];
+    let teid = u32::from_be_bytes([header[4], header[5], header[6], header[7]]);
+    let (mut sequence, mut n_pdu_number, mut next) = (None, None, 0);
+    let mut rest = rest;
+    if flags & (E | S | PN) != 0 {
+        let Some((optional, after)) = rest.split_first_chunk::<OPTIONAL_LEN>() else {
+            return Err(Error::Truncated("GTP-U optional header"));
+        };
+        rest = after;
+        if flags & S != 0 {
+            sequence = Some(u16::from_be_bytes([optional[0], optional[1]]));
+        }
+        if flags & PN != 0 {
+            n_pdu_number = Some(optional[2]);
+        }
+        if flags & E != 0 {
+            next = optional[3];
+        }
+    }
+    // A message is made once, where it is returned: its list has the room
+    // of a header, which a move copies whether the header is there or not.
+    let message = |extension_headers, rest| Packet {
+        message_type,
+        teid,
+        sequence,
+        n_pdu_number,
+        extension_headers,
+        payload: payload(rest),
+    };
+    if next == 0 {
+        return Ok(message(ExtensionHeaders::new(), rest));
+    }
+    let (content, following, after) = extension_header(rest)?;
+    let first = ExtensionHeader::decode(next, content)?;
+    if following == 0 {
+        // The usual chain is one header, which goes from its decoder into
+        // the message.
+        return Ok(message(first.into(), after));
+    }
+    let mut extension_headers = ExtensionHeaders::from(first);
+    (next, rest) = (following, after);
+    while next != 0 {
+        let (content, following, after) = extension_header(rest)?;
+        extension_headers.push(ExtensionHeader::decode(next, content)?);
+        (next, rest) = (following, after);
+    }
+    Ok(message(extension_headers, rest))
+}
+
+/// The extension header at the start of `rest`: its content, between the
+/// length and the type of the next header, that type, and what follows.
+#[inline]
+fn extension_header(rest: &[u8]) -> Result<(&[u8], u8, &[u8]), Error> {
+    let Some(&units) = rest.first() else {
+        return Err(Error::Truncated("extension header"));
+    };
+    let size = usize::from(units) * 4;
+    if size == 0 {
+        return Err(Error::InvalidLength("extension header"));
+    }
+    let Some((header, after)) = rest.split_at_checked(size) else {
+        return Err(Error::Truncated("extension header"));
+    };
+    Ok((&header[1..size - 1], header[size - 1], after))
 }
 
 impl Packet<&[u8]> {
@@ -520,7 +561,8 @@ mod tests {
         uplink.dl_congestion_information = Some(1000);
         packet.extension_headers = vec![ExtensionHeader::PduSessionContainer(
             PduSessionContainer::Uplink(uplink.clone()),
-        )];
+        )]
+        .into();
         // New IE Flags 0 to 2, D1 UL PDCP Delay Result Ind, UL and DL
         // Congestion Information, padding.
         round_trip(
@@ -533,26 +575,28 @@ mod tests {
         // A later release's New IE Flag 3 and an extension octet.
         let mut uplink = UplinkPduSessionInformation::new(7);
         uplink.d1_ul_pdcp_delay_result_ind = Some(false);
-        uplink.unknown_new_ies = Some(UnknownNewIes {
+        uplink.unknown_new_ies = Some(Box::new(UnknownNewIes {
             flags: vec![0x88, 0x01],
             // A new IE of three octets, and the padding.
             content: vec![0xaa, 0xbb, 0xcc, 0x00, 0x00],
-        });
+        }));
         packet.extension_headers = vec![ExtensionHeader::PduSessionContainer(
             PduSessionContainer::Uplink(uplink.clone()),
-        )];
+        )]
+        .into();
         round_trip(
             &packet,
             "34 ff 0010 00000001 0000 00 85 03 10 47 89 01 00 aabbcc0000 00",
         );
         for flags in [vec![], vec![0x00], vec![0x09], vec![0x88], vec![0x08, 0x01]] {
-            uplink.unknown_new_ies = Some(UnknownNewIes {
+            uplink.unknown_new_ies = Some(Box::new(UnknownNewIes {
                 flags,
                 content: vec![],
-            });
+            }));
             packet.extension_headers = vec![ExtensionHeader::PduSessionContainer(
                 PduSessionContainer::Uplink(uplink.clone()),
-            )];
+            )]
+            .into();
             assert_eq!(packet.encode(), Err(Error::OutOfRange("New IE Flags")));
         }
     }
@@ -642,7 +686,8 @@ mod tests {
                 kind: 0xe0,
                 content: vec![1, 2, 3, 4, 5, 6],
             },
-        ];
+        ]
+        .into();
         round_trip(
             &packet,
             "37 ff 0019 00000003 0102 33 40
@@ -650,6 +695,47 @@ mod tests {
         );
         assert!(packet.extension_headers[3].comprehension_required());
         assert!(!packet.extension_headers[2].comprehension_required());
+    }
+
+    #[test]
+    fn a_chain_that_ends_badly_is_an_error_wherever_it_does() {
+        // The chain above: four headers, at octets 12, 16, 20 and 24.
+        let wire = hex("37 ff 0019 00000003 0102 33 40
+             01 0868 85  01 0001 20  01 0700 e0  02 010203040506 00  aa");
+        assert_eq!(Packet::decode(&wire).unwrap().extension_headers.len(), 4);
+        // The message ends inside the chain, or where another header is due.
+        for end in 12..32 {
+            let mut short = wire[..end].to_vec();
+            short[2..4].copy_from_slice(&((end - 8) as u16).to_be_bytes());
+            assert_eq!(
+                Packet::decode(&short),
+                Err(Error::Truncated("extension header")),
+                "{end} octets"
+            );
+        }
+        for start in [12, 16, 20, 24] {
+            // A header of no octets would never end the chain.
+            let mut empty = wire.clone();
+            empty[start] = 0;
+            assert_eq!(
+                Packet::decode(&empty),
+                Err(Error::InvalidLength("extension header"))
+            );
+            // A header longer than what is left of the message.
+            let mut beyond = wire.clone();
+            beyond[start] = 0xff;
+            assert_eq!(
+                Packet::decode(&beyond),
+                Err(Error::Truncated("extension header"))
+            );
+        }
+        // The last header names a next one, and the payload is not one.
+        let mut next = wire.clone();
+        next[31] = 0x40;
+        assert_eq!(
+            Packet::decode(&next),
+            Err(Error::Truncated("extension header"))
+        );
     }
 
     #[test]
@@ -730,10 +816,10 @@ mod tests {
             Err(Error::InvalidLength("PDU Session Container"))
         );
         let mut uplink = UplinkPduSessionInformation::new(1);
-        uplink.unknown_new_ies = Some(UnknownNewIes {
+        uplink.unknown_new_ies = Some(Box::new(UnknownNewIes {
             flags: vec![0x08],
             content: vec![],
-        });
+        }));
         assert_eq!(
             unpadded(PduSessionContainer::Uplink(uplink.clone())),
             Err(Error::InvalidLength("PDU Session Container"))
@@ -755,7 +841,8 @@ mod tests {
         packet.extension_headers = vec![ExtensionHeader::Other {
             kind: 0,
             content: vec![0, 0],
-        }];
+        }]
+        .into();
         assert_eq!(
             packet.encode(),
             Err(Error::OutOfRange("extension header type"))
@@ -767,7 +854,8 @@ mod tests {
             packet.extension_headers = vec![ExtensionHeader::Other {
                 kind,
                 content: vec![0, 0],
-            }];
+            }]
+            .into();
             assert_eq!(
                 packet.encode(),
                 Err(Error::OutOfRange("extension header type"))
@@ -776,7 +864,8 @@ mod tests {
         packet.extension_headers = vec![ExtensionHeader::Other {
             kind: 0x20,
             content: vec![0],
-        }];
+        }]
+        .into();
         assert_eq!(
             packet.encode(),
             Err(Error::InvalidLength("extension header"))
@@ -784,7 +873,8 @@ mod tests {
         packet.extension_headers = vec![ExtensionHeader::Other {
             kind: 0x20,
             content: vec![0; 1022],
-        }];
+        }]
+        .into();
         assert_eq!(
             packet.encode(),
             Err(Error::OutOfRange("extension header length"))
@@ -793,7 +883,8 @@ mod tests {
         downlink.ppi = Some(8);
         packet.extension_headers = vec![ExtensionHeader::PduSessionContainer(
             PduSessionContainer::Downlink(downlink),
-        )];
+        )]
+        .into();
         assert_eq!(packet.encode(), Err(Error::OutOfRange("PPI")));
         assert_eq!(
             Packet::g_pdu(1, vec![0; 65536]).encode(),

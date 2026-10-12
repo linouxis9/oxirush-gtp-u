@@ -5,6 +5,7 @@
 
 mod error;
 mod extension;
+mod headers;
 mod icmp;
 mod ie;
 mod ipv4;
@@ -37,6 +38,7 @@ pub use extension::{
     DownlinkPduSessionInformation, ExtensionHeader, PduSessionContainer, UnknownNewIes,
     UplinkPduSessionInformation, UplinkTimeStamps,
 };
+pub use headers::{ExtensionHeaders, ExtensionHeadersIntoIter};
 pub use icmp::{
     EchoKind, IcmpEcho, ipv4_icmp_echo_reply, ipv4_icmp_echo_request, parse_ipv4_icmp_echo,
 };

@@ -10,6 +10,18 @@ First release.
   G-PDUs. Decoding follows the receiver rules of §5.1 and never panics;
   what it produces encodes to a message that decodes to the same value.
   Its `Error` converts into a `std::io::Error`.
+- `ExtensionHeaders`, the list of a message's extension headers
+  (`Packet::extension_headers`): a slice to read and to change, `push`,
+  `extend` and `clear`; it is made from a `Vec`, an array or one header,
+  and gives its headers back as a `Vec`. It keeps its first header in
+  itself. A message without extension header,
+  or with one, such as the PDU Session Container of a G-PDU on N3, is
+  decoded with its payload left in the datagram, and made and encoded into a
+  buffer that is used again, without an allocation
+  (`tests/allocations.rs`). A second header allocates the list; a header
+  and a PDU type that are kept as received, and the new IEs of a later
+  release, allocate their octets. A datagram holds 16 382 extension headers
+  at most, and its list is that long at most.
 - PDU Session Container (TS 38.415 V18 §5.5.2): downlink and uplink PDU
   Session Information with their QoS monitoring, sequence number, delay and
   congestion fields; new IEs of later releases are kept as received. A test
@@ -68,3 +80,36 @@ First release.
 - `benches/`, a package of its own that times a G-PDU through the codec
   and through an endpoint with criterion and profiles them with pprof. The
   published crate does not have it.
+
+### For a program written against this repository before the release
+
+The repository was public before this first release. What changed since its
+revision `ac3a019` for a program that uses the crate:
+
+- The fast path is the `ebpf` feature, which was a default feature and is
+  not any more: `features = ["ebpf"]` asks for it.
+- `Packet::extension_headers` was a `Vec<ExtensionHeader>` and is an
+  `ExtensionHeaders`:
+  - reading it is written as before: `iter`, `len`, `is_empty`, `first`,
+    an index, `for header in &packet.extension_headers`, and `==` with a
+    `Vec`, a slice or an array of headers on its right;
+  - so are `push`, `extend`, `clear`, `iter_mut` and an assignment to an
+    index;
+  - `packet.extension_headers = vec![a, b]` becomes `= vec![a, b].into()`
+    or `= ExtensionHeaders::from([a, b])`, and `Vec::new()` becomes
+    `ExtensionHeaders::new()`;
+  - what a `Vec` has and a slice has not (`pop`, `insert`, `remove`,
+    `retain`, `truncate`, `drain`) goes through a `Vec`:
+    `Vec::from(list)`, then `.into()` back;
+  - `for header in packet.extension_headers` still gives the headers by
+    value, from an `ExtensionHeadersIntoIter` where it was a
+    `std::vec::IntoIter<ExtensionHeader>`;
+  - a function that took the field as `&Vec<ExtensionHeader>` takes
+    `&[ExtensionHeader]`, or `&ExtensionHeaders`.
+- `UplinkPduSessionInformation::unknown_new_ies` was an
+  `Option<UnknownNewIes>` and is an `Option<Box<UnknownNewIes>>`:
+  `Some(UnknownNewIes { .. })` becomes `Some(Box::new(UnknownNewIes { .. }))`,
+  and reading its `flags` and `content` is written as before. An
+  `ExtensionHeader` is 88 octets where it was 128.
+- A `Packet` is 64 octets longer in memory, 128 with a `Vec<u8>` payload:
+  the header that its list keeps.
