@@ -518,22 +518,29 @@ go tool pprof -top target/criterion/endpoint/round-trip/1400/profile/profile.pb
 The profile is one that Go's `pprof` reads. With `PROFILE=flamegraph` in
 the environment it is `flamegraph.svg`, in the same directory.
 
-On one core of an AMD Ryzen 7 5700G, with Rust 1.98.1 and glibc 2.43, an
-uplink G-PDU with its PDU Session Container:
+On one core of an AMD Ryzen 7 5700G, with Rust 1.98.1 and glibc 2.43, the
+lowest of four runs. The G-PDU that is encoded is an uplink one with its
+PDU Session Container; those that are decoded have no extension header, as
+on S1-U, that container, as on N3, or three extension headers, of which
+one is kept as octets:
 
 | | 64 octets of payload | 1400 octets |
 |---|---|---|
-| Encode into a buffer that is used again | 47 ns | 59 ns |
-| Encode into a new buffer | 59 ns | 93 ns |
-| Decode, the payload left in the datagram | 190 ns | 189 ns |
-| Decode, the payload copied | 188 ns | 237 ns |
-| From an endpoint to the test UPF and its echo back, over the loopback interface | 13.3 µs | 13.6 µs |
+| Encode into a buffer that is used again | 43 ns | 53 ns |
+| Encode into a new buffer | 54 ns | 92 ns |
+| Decode, the payload left in the datagram: no extension header | 7 ns | 7 ns |
+| The same, with the PDU Session Container | 186 ns | 198 ns |
+| The same, with three extension headers | 248 ns | 245 ns |
+| Decode, the payload copied: no extension header | 22 ns | 53 ns |
+| The same, with the PDU Session Container | 227 ns | 257 ns |
+| The same, with three extension headers | 273 ns | 295 ns |
+| From an endpoint to the test UPF and its echo back, over the loopback interface | 12.5 µs | 13.2 µs |
 
 Four fifths of the round trip are its four system calls, and the codec is
-under 2% of it. Most of a decode on its own is the allocator, which frees
-the list of extension headers, the one allocation of a message whose
-payload stays in the datagram: in the loop of the benchmark glibc takes
-the long way through `free`, which the round trip does not.
+under 2% of it. A message with an extension header allocates the list of
+its headers, and most of its decoding on its own is the allocator, which
+frees that list: in the loop of the benchmark glibc takes the long way
+through `free`, which the round trip does not.
 
 ### 3GPP references
 

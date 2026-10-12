@@ -9,7 +9,9 @@
 //! ```
 //!
 //! A benchmark is `group/case/octets`, the octets being those of the inner
-//! packet: a small one (64) and one that fills an Ethernet frame (1400).
+//! packet: a small one (64) and one that fills an Ethernet frame (1400). The
+//! case of a decoding is the chain of extension headers of the message, as
+//! in `decode-borrowed/container/64`.
 //! With `--profile-time`, criterion runs the benchmark for that many
 //! seconds under pprof, which samples the program a thousand times a second
 //! and writes `profile.pb`, a profile that `go tool pprof` reads. With
@@ -18,7 +20,7 @@
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use oxirush_gtp_u::upf_sim::{Session, UpfSimulator};
-use oxirush_gtp_u::{Endpoint, Packet, RemoteTunnel, ipv4_udp};
+use oxirush_gtp_u::{Endpoint, ExtensionHeader, Packet, RemoteTunnel, ipv4_udp};
 use oxirush_gtp_u_benches::payload;
 use pprof::criterion::{Output, PProfProfiler};
 use std::hint::black_box;
@@ -50,23 +52,48 @@ fn encode(criterion: &mut Criterion) {
     group.finish();
 }
 
-/// The same G-PDU from its octets.
-fn decode(criterion: &mut Criterion) {
-    let mut group = criterion.benchmark_group("decode");
+/// The datagrams of a G-PDU with the chains of extension headers that a
+/// receiver meets: none, as on S1-U; the PDU Session Container alone, as on
+/// N3; and three, of which one is of a type that the crate keeps as octets.
+fn chains(octets: usize) -> [(&'static str, Vec<u8>); 3] {
+    let mut three = Packet::uplink(TEID, QFI, payload(octets));
+    three.extension_headers.push(ExtensionHeader::UdpPort(2152));
+    three.extension_headers.push(ExtensionHeader::Other {
+        kind: ExtensionHeader::SERVICE_CLASS_INDICATOR,
+        content: vec![7, 0],
+    });
+    [
+        ("no-header", Packet::g_pdu(TEID, payload(octets))),
+        ("container", Packet::uplink(TEID, QFI, payload(octets))),
+        ("three-headers", three),
+    ]
+    .map(|(chain, packet)| (chain, packet.encode().expect("the message encodes")))
+}
+
+/// A G-PDU from its octets, the payload left in the datagram.
+fn decode_borrowed(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("decode-borrowed");
     for octets in SIZES {
-        let datagram = Packet::uplink(TEID, QFI, payload(octets))
-            .encode()
-            .expect("the message encodes");
         group.throughput(Throughput::Bytes(octets as u64));
-        // The payload copied into the message
-        group.bench_function(BenchmarkId::new("owned", octets), |bencher| {
-            bencher.iter(|| Packet::decode(black_box(&datagram)))
-        });
-        // The payload left in the datagram
-        group.bench_function(BenchmarkId::new("borrowed", octets), |bencher| {
-            bencher
-                .iter(|| Packet::decode_borrowed(black_box(&datagram)).map(|packet| packet.qfi()))
-        });
+        for (chain, datagram) in chains(octets) {
+            group.bench_function(BenchmarkId::new(chain, octets), |bencher| {
+                bencher.iter(|| Packet::decode_borrowed(black_box(&datagram)))
+            });
+        }
+    }
+    group.finish();
+}
+
+/// The same, the payload copied into the message.
+fn decode_owned(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("decode-owned");
+    for octets in SIZES {
+        group.throughput(Throughput::Bytes(octets as u64));
+        for (chain, datagram) in chains(octets) {
+            group.bench_function(BenchmarkId::new(chain, octets), |bencher| {
+                bencher.iter(|| Packet::decode(black_box(&datagram)))
+            });
+        }
     }
     group.finish();
 }
@@ -131,6 +158,6 @@ fn configuration() -> Criterion {
 criterion_group! {
     name = benches;
     config = configuration();
-    targets = encode, decode, endpoint
+    targets = encode, decode_borrowed, decode_owned, endpoint
 }
 criterion_main!(benches);
