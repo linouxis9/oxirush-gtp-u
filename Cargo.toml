@@ -57,6 +57,10 @@ name = "endpoint"
 required-features = ["endpoint"]
 
 [[example]]
+name = "path"
+required-features = ["endpoint"]
+
+[[example]]
 name = "tun"
 required-features = ["tun"]
 

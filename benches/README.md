@@ -1,0 +1,44 @@
+# Benchmarks of oxirush-gtp-u
+
+A package of its own, which the published crate does not have. It times a
+G-PDU through the codec and through an endpoint with
+[criterion](https://crates.io/crates/criterion), and profiles them with
+[pprof](https://crates.io/crates/pprof).
+
+```bash
+cargo bench --bench packets                 # every benchmark
+cargo bench --bench packets -- decode       # those whose name has it
+
+# Ten seconds of one benchmark under the profiler, then where the time went
+cargo bench --bench packets -- --profile-time 10 endpoint/round-trip/1400
+go tool pprof -top target/criterion/endpoint/round-trip/1400/profile/profile.pb
+```
+
+The profile is one that Go's `pprof` reads. With `PROFILE=flamegraph` in
+the environment it is `flamegraph.svg`, in the same directory.
+
+## Figures
+
+On one core of an AMD Ryzen 7 5700G, with Rust 1.98.1 and glibc 2.43, the
+lowest of four runs. The G-PDU that is encoded is an uplink one with its
+PDU Session Container; those that are decoded have no extension header, as
+on S1-U, that container, as on N3, or three extension headers, of which
+one is kept as octets:
+
+| | 64 octets of payload | 1400 octets |
+|---|---|---|
+| Encode into a buffer that is used again | 41 ns | 56 ns |
+| Encode into a new buffer | 53 ns | 84 ns |
+| Decode, the payload left in the datagram: no extension header | 9 ns | 9 ns |
+| The same, with the PDU Session Container | 23 ns | 23 ns |
+| The same, with three extension headers | 65 ns | 66 ns |
+| Decode, the payload copied: no extension header | 16 ns | 38 ns |
+| The same, with the PDU Session Container | 30 ns | 55 ns |
+| The same, with three extension headers | 74 ns | 116 ns |
+| From an endpoint to the test UPF and its echo back, over the loopback interface | 12.5 µs | 13.3 µs |
+
+Four fifths of the round trip are its four system calls, and the codec is
+under 2% of it. A message whose payload stays in the datagram is decoded
+without an allocation when it has one extension header at most; with
+three, it allocates its list and the octets of the header that is kept as
+received.

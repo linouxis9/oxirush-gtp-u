@@ -69,8 +69,10 @@ First release.
   programs' object is committed next to its source
   (`src/ebpf/programs.rs`), and `ebpf/` has what rebuilds it, in the
   repository and in the published crate; CI rebuilds it and compares.
-- Examples: `codec`, `endpoint`, and on Linux as root `tun` and `fast_path`.
-  The README shows them, and a test compares the two.
+- Examples: `codec`, `extension_headers`, `endpoint`, `path` (echo and
+  Error Indication), and on Linux as root `tun` and `fast_path`. The README
+  shows them: a test compares the two, and what those that need no root
+  print with the text that the README shows under them.
 - Features: `endpoint` (the default), `tun`, `ebpf` and `serde`. Without
   default features the crate has no dependencies. The fast path is not a
   default feature: a crate that only decodes packets would otherwise build
