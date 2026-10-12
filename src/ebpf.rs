@@ -55,6 +55,80 @@
 //! # Ok(())
 //! # }
 //! ```
+//! # The programs
+//!
+//! [`FastPath::load`] loads three TCX programs:
+//!
+//! - `uplink`, at the egress of a TUN, hands the IPv4 packets of a short-cut
+//!   tunnel to the stage. The stage is a veth pair without checksum offload,
+//!   so that Linux splits the large segments of the UE's TCP stack and
+//!   completes their checksums before the encapsulation. It has the largest
+//!   MTU: whatever a TUN lets through crosses it.
+//! - `encap`, at the far end of the stage, writes the IPv4, UDP and GTP-U
+//!   headers, with the PDU Session Container of an N3 tunnel, and sends the
+//!   G-PDU out of the N3 interface. The G-PDU is the one the codec encodes.
+//! - `decap`, at the ingress of the N3 interface, delivers the G-PDUs of
+//!   short-cut tunnels to their TUN.
+//!
+//! The N3 interface of a tunnel is the one Linux routes it through, from the
+//! endpoint's address to the peer's: the loopback interface for a peer on the
+//! same host. It gets `decap` when a first tunnel through it is installed, on
+//! a blocking thread of the Tokio runtime, so that the task that installs the
+//! tunnel does not wait for it (outside a runtime the caller attaches it).
+//! Until it is there the tunnel stays in userspace.
+//!
+//! `Endpoint::attach_tun` does the rest for the TUN it makes. A program that
+//! carries a TUN of its own does it in three calls. [`FastPath::add_tun`] puts
+//! the TUN on the fast path, once: it attaches `uplink` in the caller's
+//! thread. `Endpoint::shortcut` gives the TUN its tunnel, whenever the TUN's
+//! reader carried a packet: it fails with `WouldBlock` while the N3 interface
+//! is getting its program, and the next packet asks again. And
+//! [`FastPath::remove_tun`] takes the TUN off the fast path, before it is
+//! closed.
+//!
+//! # Short-cuts
+//!
+//! A short-cut follows its tunnel. `install` on the tunnel updates it;
+//! `remove` and the endpoint's `shutdown` end it, and so does giving the TUN
+//! another tunnel or the tunnel another TUN. [`FastPath::end_shortcut`] leaves
+//! a TUN's tunnel to userspace until the next `shortcut`, as when its UE moves
+//! to another endpoint. When `shortcut` fails the tunnel stays in userspace.
+//!
+//! The programs leave to userspace, which keeps working underneath: other
+//! messages than G-PDUs, unknown TEIDs, extension headers other than one PDU
+//! Session Container, fragments, inner packets that are not IPv4, G-PDUs
+//! longer than the N3 MTU (the socket fragments them), and ICMP Echo Replies,
+//! which a caller that pings through the endpoint expects on its receiver.
+//! What they leave also goes on to the interface's other TCX programs and tc
+//! filters (`TC_ACT_UNSPEC`), so several fast paths or other tools can share
+//! an N3 interface. [`FastPath::stats`] counts the packets carried, returned
+//! as too long and dropped.
+//!
+//! # What it needs and leaves
+//!
+//! The endpoint must be bound to an IPv4 address and port 2152, and a
+//! tunnel's peer must be IPv4 on port 2152 too. Everything happens in the
+//! network namespace `load` was called in. `load` fails without TCX or the
+//! capabilities and then leaves nothing behind. The programs' links go with
+//! the process, whatever ends it. The stage, `oxs` with eight hexadecimal
+//! digits, outlives a killed process; the next `load` in that namespace
+//! removes it, as an `oxs` veth that is up and whose far end has no program
+//! left.
+//!
+//! `load` and `add_tun` also spread what the stage's far end and the TUN
+//! receive over the CPUs the process may use (RPS), when `/sys` shows the
+//! process's network namespace. After `unshare --net` alone it shows the former
+//! one, and nothing is steered.
+//!
+//! # The object
+//!
+//! The programs' source is `src/ebpf/programs.rs` and their object
+//! `src/ebpf/gtpu.o`: building the crate needs no nightly toolchain and no
+//! eBPF linker. `ebpf/build.sh` rebuilds the object, with the nightly
+//! toolchain that `ebpf/rust-toolchain.toml` pins, `rust-src` and
+//! `bpf-linker`; CI rebuilds it the same way with bpf-linker 0.11.1 and fails
+//! when it differs from the committed one. The published crate has these files
+//! too: in a copy of it, `ebpf/build.sh` rebuilds the object that it ships.
 
 use std::collections::HashMap;
 use std::collections::hash_map::RandomState;

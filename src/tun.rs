@@ -5,6 +5,30 @@
 //! cleanup failures so they can be retried. [`TunPort::close`] and dropping
 //! the last clone of the port perform best-effort cleanup. It needs
 //! `CAP_NET_ADMIN`.
+//! `Endpoint::attach_tun` and `UpfSimulator::attach_tun` make a TUN and carry
+//! its packets. [`TunPort::create`] makes one for a program that carries them
+//! itself, with [`recv`](TunPort::recv) and [`send`](TunPort::send). Each
+//! takes a [`TunConfig`] with one of three routings, which it sets up over
+//! rtnetlink:
+//!
+//! - [`Routing::UePolicy`] gives the TUN a UE's address, and a rule sends what
+//!   comes from that address to a table of its own, whose default route is the
+//!   TUN.
+//! - [`Routing::UeVrf`] gives the TUN a UE's address and puts it in a new VRF,
+//!   whose table has the TUN as its default route.
+//! - [`Routing::Upf`] routes one UE address to the TUN in the main table, so
+//!   that Linux is the UPF's N6. To reach another network, enable IPv4
+//!   forwarding and add the routes or NAT that network needs.
+//!
+//! The routing is IPv4 and the TUN has no IPv6 address, so Linux sends nothing
+//! through it unasked. `recv` and `send` exchange raw IP packets with Linux.
+//! A [`TunPort`] is `Clone`, for a task that reads it and one that writes.
+//!
+//! Dropping the last clone removes the TUN and its routing, as does `close`
+//! at once; `try_close` reports what could not be removed and keeps it for
+//! another call. Removal happens in the network namespace of the creation. A
+//! process that ends without running destructors, as on SIGKILL, leaves the
+//! rule or the VRF behind; the TUN goes with the process.
 
 use crate::netlink::Netlink;
 use std::fmt;

@@ -98,6 +98,50 @@ pub struct ReceivedPacket {
 /// # Ok(())
 /// # }
 /// ```
+///
+/// # Tunnels
+///
+/// [`bind`](Self::bind) opens the socket and returns the receiver of the
+/// tunnels' messages: G-PDUs, End Markers and the peer's Error Indications,
+/// each with its tunnel and source address. The TEID alone identifies a
+/// tunnel, so a peer may send from another address than its F-TEID's.
+///
+/// - [`install`](Self::install) sets up the tunnel of a RAN UE and PDU session
+///   toward a remote TEID and returns the local TEID to give the peer; on an
+///   existing tunnel it updates the remote end and the QFI. A QFI above 63 is
+///   `InvalidInput`. [`install_s1u`](Self::install_s1u) does so for an eNB's
+///   E-RAB, whose G-PDUs carry no PDU Session Container, and cannot fail.
+///   [`install_with_teid`](Self::install_with_teid) takes a local TEID that
+///   something else assigned.
+/// - [`send`](Self::send) sends an IP packet in a tunnel.
+///   [`send_to`](Self::send_to) sends any `Packet` from the endpoint's socket,
+///   with its sequence number and extension headers.
+/// - `attach_tun` gives a tunnel a TUN (Linux, `tun` feature) and carries its
+///   packets both ways: the tunnel's G-PDUs then go to Linux and no longer to
+///   the receiver. The TUN closes with its tunnel, on `remove`, `remove_ran`
+///   and `shutdown`, and when the last clone of the endpoint is dropped.
+/// - [`remove`](Self::remove) and [`remove_ran`](Self::remove_ran) remove
+///   tunnels; [`local_teid`](Self::local_teid) looks one up.
+///
+/// # Path management
+///
+/// The endpoint does the path management of TS 29.281 §7 by itself. It answers
+/// Echo Requests, sends an Error Indication for a G-PDU on an unknown TEID and
+/// a Supported Extension Headers Notification for an extension header it must
+/// understand and does not. The last two go to port 2152, as the specification
+/// requires. A slow receiver never delays these replies: past 256 queued
+/// messages new ones are dropped and counted, and a dropped receiver changes
+/// nothing else.
+///
+/// Bind a specific address: a wildcard is refused with `InvalidInput`, so that
+/// replies leave from the address the request reached. Bind port 2152 to
+/// receive the peer's Error Indications, which TS 29.281 §4.4.2.4 sends there
+/// whatever port the G-PDUs came from.
+///
+/// [`stats`](Self::stats) has the receive and drop counters and
+/// [`is_running`](Self::is_running) the state of the background task.
+/// [`shutdown`](Self::shutdown) stops it for all clones and waits for it; the
+/// port stays bound until the last clone is dropped.
 #[derive(Clone)]
 pub struct Endpoint {
     shared: Arc<Shared>,

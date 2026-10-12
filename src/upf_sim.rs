@@ -1,5 +1,25 @@
 //! A test UPF: an N3 peer whose sessions are provisioned directly, without
 //! PFCP. Its N6 is a built-in echo service, or a Linux TUN per session.
+//! [`UpfSimulator`] is an N3 peer whose sessions are set with
+//! [`set_session`](UpfSimulator::set_session). Uplink packets go to the echo
+//! service, which reflects IPv4 UDP and answers ICMP Echo Requests, or to the
+//! TUN that `attach_tun` gives the session.
+//! [`send_downlink`](UpfSimulator::send_downlink) sends a packet to the UE.
+//! The receiver of [`bind`](UpfSimulator::bind) observes the uplink G-PDUs.
+//!
+//! [`switch_downlink`](UpfSimulator::switch_downlink) moves a session's
+//! downlink to another gNB address and TEID and sends an End Marker on the old
+//! path. When that send fails or is cancelled the new path stays, the marker
+//! stays pending ([`pending_end_marker`](UpfSimulator::pending_end_marker))
+//! and the next call sends it first.
+//!
+//! [`shutdown`](UpfSimulator::shutdown) also closes the attached TUNs and
+//! returns what could not be cleaned up; call it again to retry.
+//!
+//! The `oxirush-upf-sim` program serves one session until Ctrl-C or SIGTERM.
+//! Its arguments are the UPF's N3 address, the gNB's N3 address, the uplink
+//! TEID, the downlink TEID and the QFI, then `--tun <name> <UE address>` for a
+//! TUN as N6 in the place of the echo service.
 
 use std::fmt;
 use std::io;
