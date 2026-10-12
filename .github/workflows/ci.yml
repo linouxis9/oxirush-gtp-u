@@ -100,13 +100,15 @@ jobs:
       # The published crate has what rebuilds the eBPF object it ships.
       - name: The eBPF build files are in the package
         run: |
-          cargo package --locked --list > files.txt
+          # Outside the checkout: a new file in it would make the tree dirty.
+          files="$RUNNER_TEMP/files.txt"
+          cargo package --locked --list > "$files"
           for file in build.sh programs.toml programs.lock config.toml rust-toolchain.toml; do
-            grep -qx "ebpf/$file" files.txt
+            grep -qx "ebpf/$file" "$files"
           done
-          grep -qx src/ebpf/programs.rs files.txt
-          grep -qx src/ebpf/layout.rs files.txt
-          grep -qx src/ebpf/gtpu.o files.txt
+          grep -qx src/ebpf/programs.rs "$files"
+          grep -qx src/ebpf/layout.rs "$files"
+          grep -qx src/ebpf/gtpu.o "$files"
 
   wireshark:
     name: Wire format against Wireshark
