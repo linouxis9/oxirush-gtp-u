@@ -475,6 +475,7 @@ src/
 └── bin/oxirush-upf-sim.rs
 ebpf/                      what builds programs.rs for eBPF: build.sh and its manifest
 examples/                  the programs of this page
+benches/                   the benchmarks, a package of their own
 ```
 
 ### Tests
@@ -496,6 +497,43 @@ cargo test --test wireshark -- --ignored
 
 Property tests check the codec for panics and for decode, encode, decode
 equality, and `fuzz/` has a cargo-fuzz target for the same.
+
+### Benchmarks
+
+`benches/` is a package of its own, which the published crate does not
+have. It times a G-PDU through the codec and through an endpoint with
+[criterion](https://crates.io/crates/criterion), and profiles them with
+[pprof](https://crates.io/crates/pprof):
+
+```bash
+cd benches
+cargo bench --bench packets                 # every benchmark
+cargo bench --bench packets -- decode       # those whose name has it
+
+# Ten seconds of one benchmark under the profiler, then where the time went
+cargo bench --bench packets -- --profile-time 10 endpoint/round-trip/1400
+go tool pprof -top target/criterion/endpoint/round-trip/1400/profile/profile.pb
+```
+
+The profile is one that Go's `pprof` reads. With `PROFILE=flamegraph` in
+the environment it is `flamegraph.svg`, in the same directory.
+
+On one core of an AMD Ryzen 7 5700G, with Rust 1.98.1 and glibc 2.43, an
+uplink G-PDU with its PDU Session Container:
+
+| | 64 octets of payload | 1400 octets |
+|---|---|---|
+| Encode into a buffer that is used again | 47 ns | 59 ns |
+| Encode into a new buffer | 59 ns | 93 ns |
+| Decode, the payload left in the datagram | 190 ns | 189 ns |
+| Decode, the payload copied | 188 ns | 237 ns |
+| From an endpoint to the test UPF and its echo back, over the loopback interface | 13.3 µs | 13.6 µs |
+
+Four fifths of the round trip are its four system calls, and the codec is
+under 2% of it. Most of a decode on its own is the allocator, which frees
+the list of extension headers, the one allocation of a message whose
+payload stays in the datagram: in the loop of the benchmark glibc takes
+the long way through `free`, which the round trip does not.
 
 ### 3GPP references
 

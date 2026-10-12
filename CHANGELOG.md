@@ -65,3 +65,6 @@ First release.
   an eBPF loader and the rtnetlink crates. The minimum supported Rust
   version is 1.88.
 - A `SECURITY.md` that says how to report a vulnerability.
+- `benches/`, a package of its own that times a G-PDU through the codec
+  and through an endpoint with criterion and profiles them with pprof. The
+  published crate does not have it.
