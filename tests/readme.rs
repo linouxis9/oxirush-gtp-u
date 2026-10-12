@@ -188,7 +188,8 @@ pub fn printed(block: fn()) -> String {
 #[test]
 fn the_blocks_are_those_of_the_pages() {
     let generated = generated(&examples());
-    if generated == BLOCKS {
+    // A checkout may have changed the line endings.
+    if generated == BLOCKS.replace('\r', "") {
         return;
     }
     if std::env::var("README_BLOCKS").as_deref() == Ok("write") {
@@ -208,6 +209,11 @@ fn each_block_prints_what_its_page_shows() {
 
     let mut differences = String::new();
     for (example, block) in examples.iter().zip(blocks::BLOCKS) {
+        // macOS has no loopback address but 127.0.0.1, and a program that
+        // binds port 2152 binds another one.
+        if cfg!(target_os = "macos") && example.code.contains(":2152") {
+            continue;
+        }
         let printed = blocks::printed(*block);
         if printed != example.output {
             let (page, line, shown) = (example.page, example.line, &example.output);
