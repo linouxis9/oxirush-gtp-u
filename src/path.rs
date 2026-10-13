@@ -208,11 +208,6 @@ pub(crate) fn canonical(address: SocketAddr) -> SocketAddr {
     }
 }
 
-/// Whether two addresses are the same host, IPv4-mapped or not.
-pub(crate) fn same_ip(a: IpAddr, b: IpAddr) -> bool {
-    a.to_canonical() == b.to_canonical()
-}
-
 /// Whether a receive error concerns an earlier datagram, as ICMP errors
 /// reported on unconnected sockets by some systems, rather than the socket.
 pub(crate) fn transient(error: &std::io::Error) -> bool {

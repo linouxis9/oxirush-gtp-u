@@ -42,3 +42,16 @@ under 2% of it. A message whose payload stays in the datagram is decoded
 without an allocation when it has one extension header at most; with
 three, it allocates its list and the octets of the header that is kept as
 received.
+
+An endpoint with many tunnels, on the same core, the machine busy with
+other work (a load of 6 to 8). The first row is an Error Indication that
+names none of its tunnels, then an Echo Request, until the Echo Response;
+the second is the tunnel of one more UE and its removal with `remove_ran`:
+
+| | 1 000 tunnels | 100 000 tunnels |
+|---|---|---|
+| `tunnels/unmatched-error-indication` | 15.9 µs | 16.4 µs |
+| `tunnels/install-remove-ran` | 0.31 µs | 0.45 µs |
+
+Neither walks through the tunnels: an endpoint finds the tunnel that an
+Error Indication names, and those of a UE, in an index.

@@ -144,6 +144,63 @@ fn endpoint(criterion: &mut Criterion) {
     group.finish();
 }
 
+/// What an endpoint with many tunnels does for a datagram that anyone can
+/// send it, and for a UE that leaves. The number in the name is that of its
+/// tunnels: the time must not grow with it.
+///
+/// - `unmatched-error-indication`: an Error Indication that names no tunnel
+///   of the endpoint, then an Echo Request, until the Echo Response.
+/// - `install-remove-ran`: the tunnel of one more UE, and its removal.
+fn tunnels(criterion: &mut Criterion) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+        .expect("a runtime");
+    let mut group = criterion.benchmark_group("tunnels");
+    for tunnels in [1_000u32, 100_000] {
+        let (gnb, peer) = runtime.block_on(async {
+            let (gnb, _received) = Endpoint::bind("127.0.0.1:0".parse().unwrap())
+                .await
+                .expect("the endpoint binds");
+            let peer = tokio::net::UdpSocket::bind("127.0.0.1:0")
+                .await
+                .expect("the peer binds");
+            (gnb, peer)
+        });
+        let upf = "127.0.0.2:2152".parse().unwrap();
+        for ran_id in 0..tunnels {
+            let remote = RemoteTunnel::new(upf, 0x1000_0000 + ran_id);
+            gnb.install(ran_id, 5, remote, QFI).expect("the tunnel");
+        }
+        let to = gnb.local_addr().unwrap();
+        let indication = Packet::error_indication(0x0bad_f00d, upf.ip())
+            .encode()
+            .expect("the message encodes");
+        let request = Packet::echo_request(1).encode().expect("it encodes");
+        group.bench_function(
+            BenchmarkId::new("unmatched-error-indication", tunnels),
+            |bencher| {
+                let mut response = [0; 64];
+                bencher.iter(|| {
+                    runtime.block_on(async {
+                        peer.send_to(&indication, to).await.expect("sent");
+                        peer.send_to(&request, to).await.expect("sent");
+                        peer.recv(&mut response).await.expect("the response")
+                    })
+                })
+            },
+        );
+        group.bench_function(BenchmarkId::new("install-remove-ran", tunnels), |bencher| {
+            let remote = RemoteTunnel::new(upf, 1);
+            bencher.iter(|| {
+                gnb.install(u32::MAX, 5, remote, QFI).expect("the tunnel");
+                gnb.remove_ran(black_box(u32::MAX))
+            })
+        });
+    }
+    group.finish();
+}
+
 fn configuration() -> Criterion {
     let output = match std::env::var("PROFILE").as_deref() {
         Ok("flamegraph") => Output::Flamegraph(None),
@@ -158,6 +215,6 @@ fn configuration() -> Criterion {
 criterion_group! {
     name = benches;
     config = configuration();
-    targets = encode, decode_borrowed, decode_owned, endpoint
+    targets = encode, decode_borrowed, decode_owned, endpoint, tunnels
 }
 criterion_main!(benches);

@@ -38,6 +38,12 @@ First release.
   tunnel. `install_s1u` gives an eNB's S1-U tunnels, without a PDU Session
   Container. `install` returns an `io::Result`: a QFI above 63 is
   `InvalidInput`, as with `install_with_teid`.
+- An endpoint finds the tunnel that an Error Indication names, and the
+  tunnels of a UE for `remove_ran`, in an index: neither walks through the
+  tunnels, so an Error Indication, which anyone who reaches the socket can
+  send, costs with 100 000 tunnels what it costs with 1 000. Of several
+  tunnels to one TEID of a peer, the Error Indication is delivered for the
+  first by RAN UE and session.
 - Endpoint and test-UPF binding require a specific local IP address;
   wildcard addresses return `InvalidInput` to preserve reply source addresses.
   TUN attachment and session replacement check the session's identity so a
