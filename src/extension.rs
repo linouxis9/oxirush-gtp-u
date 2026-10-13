@@ -1,7 +1,8 @@
 //! GTP-U extension headers (TS 29.281 §5.2) and the PDU Session Container
 //! content (TS 38.415 §5.5.2).
 
-use crate::Error;
+use crate::error::{header_length, truncated};
+use crate::{Error, Part};
 
 // The same serializer counts validated bytes before writing them. This avoids
 // maintaining separate length and field-validation implementations.
@@ -105,7 +106,11 @@ impl ExtensionHeader {
         match kind {
             Self::UDP_PORT => match *content {
                 [high, low] => Ok(ExtensionHeader::UdpPort(u16::from_be_bytes([high, low]))),
-                _ => Err(Error::InvalidLength("UDP Port extension header")),
+                _ => Err(Error::InvalidLength {
+                    what: Part::UdpPort,
+                    length: content.len() + 2,
+                    expected: 4,
+                }),
             },
             Self::PDU_SESSION_CONTAINER => {
                 PduSessionContainer::decode(content).map(ExtensionHeader::PduSessionContainer)
@@ -132,10 +137,13 @@ impl ExtensionHeader {
             ExtensionHeader::PduSessionContainer(container) => container.encode(out)?,
             ExtensionHeader::Other { kind, content } => {
                 if matches!(*kind, 0 | Self::UDP_PORT | Self::PDU_SESSION_CONTAINER) {
-                    return Err(Error::OutOfRange("extension header type"));
+                    return Err(Error::InvalidType {
+                        what: Part::ExtensionHeader,
+                        kind: *kind,
+                    });
                 }
                 if (content.len() + 2) % 4 != 0 {
-                    return Err(Error::InvalidLength("extension header"));
+                    return Err(header_length(Part::ExtensionHeader, content.len()));
                 }
                 out.extend_from_slice(content);
             }
@@ -145,8 +153,13 @@ impl ExtensionHeader {
             out.push(0);
         }
         out.push(next);
-        let length = u8::try_from((out.len() - start) / 4)
-            .map_err(|_| Error::OutOfRange("extension header length"))?;
+        // The length octet counts units of 4 octets.
+        let octets = out.len() - start;
+        let length = u8::try_from(octets / 4).map_err(|_| Error::OutOfRange {
+            what: Part::ExtensionHeader,
+            value: octets as u64,
+            max: 4 * u64::from(u8::MAX),
+        })?;
         out.set(start, length);
         Ok(())
     }
@@ -187,7 +200,7 @@ impl PduSessionContainer {
 
     fn decode(content: &[u8]) -> Result<Self, Error> {
         let Some(first) = content.first() else {
-            return Err(Error::Truncated("PDU Session Container"));
+            return Err(truncated(Part::PduSessionContainer, 2, content));
         };
         match first >> 4 {
             0 => DownlinkPduSessionInformation::decode(content).map(PduSessionContainer::Downlink),
@@ -201,15 +214,18 @@ impl PduSessionContainer {
             PduSessionContainer::Downlink(information) => information.encode(out),
             PduSessionContainer::Uplink(information) => information.encode(out),
             PduSessionContainer::Other(content) => match content.first() {
-                Some(_) if (content.len() + 2) % 4 != 0 => {
-                    Err(Error::InvalidLength("PDU Session Container"))
-                }
-                Some(first) if first >> 4 > 1 => {
+                Some(first) if (content.len() + 2).is_multiple_of(4) => {
+                    if first >> 4 <= 1 {
+                        return Err(Error::InvalidType {
+                            what: Part::PduSessionContainer,
+                            kind: first >> 4,
+                        });
+                    }
                     out.extend_from_slice(content);
                     Ok(())
                 }
-                Some(_) => Err(Error::OutOfRange("PDU Session Container PDU type")),
-                None => Err(Error::InvalidLength("PDU Session Container")),
+                // No content is a container of 2 octets, where the least is 4.
+                _ => Err(header_length(Part::PduSessionContainer, content.len())),
             },
         }
     }
@@ -286,13 +302,11 @@ impl DownlinkPduSessionInformation {
 
     fn encode(&self, out: &mut impl EncodeBuffer) -> Result<(), Error> {
         check_qfi(self.qfi)?;
-        if self.ppi.is_some_and(|ppi| ppi > 7) {
-            return Err(Error::OutOfRange("PPI"));
-        }
-        check_u24(self.dl_qfi_sequence_number, "DL QFI Sequence Number")?;
-        check_u24(self.burst_size, "Burst Size")?;
+        check(Part::Ppi, self.ppi.map(u32::from), 7)?;
+        check(Part::DlQfiSequenceNumber, self.dl_qfi_sequence_number, U24)?;
+        check(Part::BurstSize, self.burst_size, U24)?;
         if self.ppi.is_none() && (self.burst_size.is_some() || self.time_to_next_burst.is_some()) {
-            return Err(Error::OutOfRange("burst information without PPI"));
+            return Err(Error::Missing(Part::Ppi));
         }
         out.push(
             flag(self.dl_sending_time_stamp.is_some(), 0x08)
@@ -463,7 +477,7 @@ impl UplinkPduSessionInformation {
     fn encode(&self, out: &mut impl EncodeBuffer) -> Result<(), Error> {
         let start = out.len();
         check_qfi(self.qfi)?;
-        check_u24(self.ul_qfi_sequence_number, "UL QFI Sequence Number")?;
+        check(Part::UlQfiSequenceNumber, self.ul_qfi_sequence_number, U24)?;
         let known_new_ies = flag(self.d1_ul_pdcp_delay_result_ind.is_some(), 0x01)
             | flag(self.ul_congestion_information.is_some(), 0x02)
             | flag(self.dl_congestion_information.is_some(), 0x04);
@@ -478,7 +492,7 @@ impl UplinkPduSessionInformation {
                 .is_none_or(|first| *first == 0 || first & 0x07 != 0)
                 || !chained
             {
-                return Err(Error::OutOfRange("New IE Flags"));
+                return Err(Error::Malformed(Part::NewIeFlags));
             }
         }
         let new_ie_flag = known_new_ies != 0 || self.unknown_new_ies.is_some();
@@ -532,7 +546,7 @@ impl UplinkPduSessionInformation {
                 out.extend_from_slice(&unknown.content);
                 // Padding added to it would decode as part of it.
                 if !(out.len() - start + 2).is_multiple_of(4) {
-                    return Err(Error::InvalidLength("PDU Session Container"));
+                    return Err(header_length(Part::PduSessionContainer, out.len() - start));
                 }
             }
         }
@@ -544,18 +558,23 @@ fn flag(set: bool, bit: u8) -> u8 {
     if set { bit } else { 0 }
 }
 
+/// The largest value of a field of 24 bits.
+const U24: u32 = 0xff_ffff;
+
 fn check_qfi(qfi: u8) -> Result<(), Error> {
-    if qfi > 63 {
-        return Err(Error::OutOfRange("QFI"));
-    }
-    Ok(())
+    check(Part::Qfi, Some(u32::from(qfi)), 63)
 }
 
-fn check_u24(value: Option<u32>, what: &'static str) -> Result<(), Error> {
-    if value.is_some_and(|value| value > 0xff_ffff) {
-        return Err(Error::OutOfRange(what));
+/// Whether `value`, if the field is present, is one that its bits carry.
+fn check(what: Part, value: Option<u32>, max: u32) -> Result<(), Error> {
+    match value {
+        Some(value) if value > max => Err(Error::OutOfRange {
+            what,
+            value: u64::from(value),
+            max: u64::from(max),
+        }),
+        _ => Ok(()),
     }
-    Ok(())
 }
 
 /// Big-endian fields of a PDU Session Container.
@@ -566,7 +585,7 @@ impl Reader<'_> {
         let (field, rest) = self
             .0
             .split_first_chunk::<N>()
-            .ok_or(Error::Truncated("PDU Session Container"))?;
+            .ok_or_else(|| truncated(Part::PduSessionContainer, N, self.0))?;
         self.0 = rest;
         Ok(*field)
     }

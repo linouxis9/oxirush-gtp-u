@@ -91,8 +91,9 @@
 //! [`Packet::decode_borrowed`] returns a `Packet<&[u8]>` whose payload stays
 //! in the datagram, and `into_owned` copies it. `encoded_len` gives the wire
 //! length without encoding. `encode_into` appends to a `Vec<u8>` and leaves it
-//! as it was on an error. The codec's [`Error`] converts into a
-//! `std::io::Error`, for `?` next to an endpoint's calls.
+//! as it was on an error. The codec's [`Error`] names the [`Part`] of the
+//! message that is wrong and has the numbers that disagree. It converts into
+//! a `std::io::Error`, for `?` next to an endpoint's calls.
 //!
 //! [`ipv4_udp`] and [`ipv4_icmp_echo_request`] build inner packets, and
 //! [`parse_ipv4_udp`] and [`parse_ipv4_icmp_echo`] read them, to exercise a
@@ -209,7 +210,7 @@ pub mod upf_sim;
 
 #[cfg(feature = "endpoint")]
 pub use endpoint::{Endpoint, ReceivedPacket, RemoteTunnel};
-pub use error::Error;
+pub use error::{Error, Expected, Part};
 pub use extension::{
     DownlinkPduSessionInformation, ExtensionHeader, PduSessionContainer, UnknownNewIes,
     UplinkPduSessionInformation, UplinkTimeStamps,

@@ -3,7 +3,8 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-use crate::Error;
+use crate::error::truncated;
+use crate::{Error, Part};
 
 /// A GTP-U information element (TS 29.281 §8).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -85,45 +86,49 @@ impl InformationElement {
         while let Some((&kind, rest)) = bytes.split_first() {
             let (element, rest) = match kind {
                 Self::RECOVERY => {
-                    let (&counter, rest) =
-                        rest.split_first().ok_or(Error::Truncated("Recovery"))?;
+                    let (&counter, rest) = rest
+                        .split_first()
+                        .ok_or_else(|| truncated(Part::Recovery, 1, rest))?;
                     (InformationElement::Recovery(counter), rest)
                 }
                 Self::TEID_DATA_I => {
                     let (teid, rest) = rest
                         .split_first_chunk::<4>()
-                        .ok_or(Error::Truncated("TEID Data I"))?;
+                        .ok_or_else(|| truncated(Part::TeidDataI, 4, rest))?;
                     (
                         InformationElement::TeidDataI(u32::from_be_bytes(*teid)),
                         rest,
                     )
                 }
                 Self::EXTENSION_HEADER_TYPE_LIST => {
-                    let (&length, rest) = rest
-                        .split_first()
-                        .ok_or(Error::Truncated("Extension Header Type List"))?;
+                    let list = Part::ExtensionHeaderTypeList;
+                    let (&length, rest) =
+                        rest.split_first().ok_or_else(|| truncated(list, 1, rest))?;
+                    let length = usize::from(length);
                     let (types, rest) = rest
-                        .split_at_checked(usize::from(length))
-                        .ok_or(Error::Truncated("Extension Header Type List"))?;
+                        .split_at_checked(length)
+                        .ok_or_else(|| truncated(list, length, rest))?;
                     (
                         InformationElement::ExtensionHeaderTypeList(types.to_vec()),
                         rest,
                     )
                 }
                 128.. => {
+                    let element = Part::InformationElement;
                     let (length, rest) = rest
                         .split_first_chunk::<2>()
-                        .ok_or(Error::Truncated("information element"))?;
+                        .ok_or_else(|| truncated(element, 2, rest))?;
+                    let length = usize::from(u16::from_be_bytes(*length));
                     let (value, rest) = rest
-                        .split_at_checked(usize::from(u16::from_be_bytes(*length)))
-                        .ok_or(Error::Truncated("information element"))?;
+                        .split_at_checked(length)
+                        .ok_or_else(|| truncated(element, length, rest))?;
                     (Self::decode_tlv(kind, value)?, rest)
                 }
                 _ => {
                     let length = tv_length(kind).ok_or(Error::UnknownInformationElement(kind))?;
                     let (value, rest) = rest
                         .split_at_checked(length)
-                        .ok_or(Error::Truncated("TV information element"))?;
+                        .ok_or_else(|| truncated(Part::InformationElement, length, rest))?;
                     (
                         InformationElement::OtherTv {
                             kind,
@@ -147,13 +152,21 @@ impl InformationElement {
                 } else if let Ok(octets) = <[u8; 16]>::try_from(value) {
                     Ipv6Addr::from(octets).into()
                 } else {
-                    return Err(Error::InvalidLength("GTP-U Peer Address"));
+                    // An IPv4 address or an IPv6 one.
+                    return Err(Error::InvalidLength {
+                        what: Part::GtpUPeerAddress,
+                        length: value.len(),
+                        expected: if value.len() < 10 { 4 } else { 16 },
+                    });
                 },
             ),
             Self::PRIVATE_EXTENSION => {
-                let (identifier, value) = value
-                    .split_first_chunk::<2>()
-                    .ok_or(Error::InvalidLength("Private Extension"))?;
+                let (identifier, value) =
+                    value.split_first_chunk::<2>().ok_or(Error::InvalidLength {
+                        what: Part::PrivateExtension,
+                        length: value.len(),
+                        expected: 2,
+                    })?;
                 InformationElement::PrivateExtension {
                     identifier: u16::from_be_bytes(*identifier),
                     value: value.to_vec(),
@@ -182,8 +195,11 @@ impl InformationElement {
             InformationElement::Recovery(counter) => out.push(*counter),
             InformationElement::TeidDataI(teid) => out.extend_from_slice(&teid.to_be_bytes()),
             InformationElement::ExtensionHeaderTypeList(types) => {
-                let length = u8::try_from(types.len())
-                    .map_err(|_| Error::OutOfRange("Extension Header Type List length"))?;
+                let length = u8::try_from(types.len()).map_err(|_| Error::OutOfRange {
+                    what: Part::ExtensionHeaderTypeList,
+                    value: types.len() as u64,
+                    max: u64::from(u8::MAX),
+                })?;
                 out.push(length);
                 out.extend_from_slice(types);
             }
@@ -199,9 +215,16 @@ impl InformationElement {
             InformationElement::OtherTv { kind, value } => {
                 let length = tv_length(*kind)
                     .filter(|_| !matches!(*kind, Self::RECOVERY | Self::TEID_DATA_I))
-                    .ok_or(Error::OutOfRange("TV information element type"))?;
+                    .ok_or(Error::InvalidType {
+                        what: Part::InformationElement,
+                        kind: *kind,
+                    })?;
                 if value.len() != length {
-                    return Err(Error::InvalidLength("TV information element"));
+                    return Err(Error::InvalidLength {
+                        what: Part::InformationElement,
+                        length: value.len(),
+                        expected: length,
+                    });
                 }
                 out.extend_from_slice(value);
             }
@@ -214,7 +237,10 @@ impl InformationElement {
                             | Self::PRIVATE_EXTENSION
                     )
                 {
-                    return Err(Error::OutOfRange("TLV information element type"));
+                    return Err(Error::InvalidType {
+                        what: Part::InformationElement,
+                        kind: *kind,
+                    });
                 }
                 push_tlv(out, &[value])?;
             }
@@ -242,8 +268,11 @@ fn tv_length(kind: u8) -> Option<usize> {
 /// Append the two-octet length and the value made of `parts`.
 fn push_tlv(out: &mut Vec<u8>, parts: &[&[u8]]) -> Result<(), Error> {
     let length = parts.iter().map(|part| part.len()).sum::<usize>();
-    let length =
-        u16::try_from(length).map_err(|_| Error::OutOfRange("information element length"))?;
+    let length = u16::try_from(length).map_err(|_| Error::OutOfRange {
+        what: Part::InformationElement,
+        value: length as u64,
+        max: u64::from(u16::MAX),
+    })?;
     out.extend_from_slice(&length.to_be_bytes());
     for part in parts {
         out.extend_from_slice(part);
@@ -304,16 +333,24 @@ mod tests {
             for cut in 1..wire.len() {
                 assert_eq!(
                     InformationElement::decode_all(&wire[..cut]),
-                    Err(Error::Truncated("TV information element"))
+                    Err(Error::Truncated {
+                        what: Part::InformationElement,
+                        needed: length,
+                        available: cut - 1
+                    })
                 );
             }
-            for length in [length - 1, length + 1] {
+            for wrong in [length - 1, length + 1] {
                 assert_eq!(
                     InformationElement::encode_all(&[InformationElement::OtherTv {
                         kind,
-                        value: vec![0xaa; length]
+                        value: vec![0xaa; wrong]
                     }]),
-                    Err(Error::InvalidLength("TV information element")),
+                    Err(Error::InvalidLength {
+                        what: Part::InformationElement,
+                        length: wrong,
+                        expected: length
+                    }),
                 );
             }
         }
@@ -323,7 +360,10 @@ mod tests {
                     kind,
                     value: vec![]
                 }]),
-                Err(Error::OutOfRange("TV information element type")),
+                Err(Error::InvalidType {
+                    what: Part::InformationElement,
+                    kind
+                }),
             );
         }
     }

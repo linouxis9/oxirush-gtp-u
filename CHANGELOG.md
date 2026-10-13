@@ -9,7 +9,10 @@ First release.
   Indication, Supported Extension Headers Notification, End Marker and
   G-PDUs. Decoding follows the receiver rules of §5.1 and never panics;
   what it produces encodes to a message that decodes to the same value.
-  Its `Error` converts into a `std::io::Error`.
+  Its `Error` names the part of the message that is wrong (`Part`) and has
+  the numbers that disagree, as in "truncated GTP-U message: the Length
+  field says 9 octets after the header, the datagram has 1". It converts
+  into a `std::io::Error`.
 - `ExtensionHeaders`, the list of a message's extension headers
   (`Packet::extension_headers`): a slice to read and to change, `push`,
   `extend` and `clear`; it is made from a `Vec`, an array or one header,
@@ -121,3 +124,30 @@ revision `ac3a019` for a program that uses the crate:
   `ExtensionHeader` is 88 octets where it was 128.
 - A `Packet` is 64 octets longer in memory, 128 with a `Vec<u8>` payload:
   the header that its list keeps.
+- The variants of `Error` named their part with a text, which a program
+  could only compare. They name it with a `Part` and have their numbers:
+  - `Truncated("extension header")` is `Truncated { what:
+    Part::ExtensionHeader, needed, available }`, and likewise for the other
+    parts. A UDP datagram whose length says more than its packet has is
+    `Truncated` too, where it was `InvalidLength("UDP")`.
+  - `InvalidLength("GTP-U message")` is `InvalidLength { what:
+    Part::Message, length, expected }`. The lengths of an extension header
+    count its length and next type octets.
+  - `OutOfRange("QFI")` is `OutOfRange { what: Part::Qfi, value, max }`;
+    `OutOfRange("GTP-U length")` has `Part::Length`, and
+    `OutOfRange("extension header length")` `Part::ExtensionHeader`, with
+    its octets.
+  - A value kept as octets under a type that is not its own was
+    `OutOfRange("extension header type")`, `("TV information element
+    type")`, `("TLV information element type")` or `("PDU Session Container
+    PDU type")`: it is `InvalidType { what, kind }`.
+  - `OutOfRange("burst information without PPI")` is
+    `Missing(Part::Ppi)`, and `OutOfRange("New IE Flags")` is
+    `Malformed(Part::NewIeFlags)`.
+  - `UnexpectedPacket("not UDP")` is `UnexpectedPacket(Expected::Udp)`,
+    and likewise `Ipv4`, `Icmp`, `Unfragmented`, `IcmpEcho` and
+    `IcmpEchoRequest`.
+  - `InvalidChecksum("UDP")` is `InvalidChecksum { what:
+    Part::UdpDatagram, received, computed }`, and likewise
+    `Part::Ipv4Header` and `Part::IcmpMessage`.
+  - What `Display` prints has these numbers after the text that it printed.

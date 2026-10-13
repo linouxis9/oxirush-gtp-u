@@ -2,7 +2,7 @@ use std::net::IpAddr;
 
 use oxirush_gtp_u::{
     DownlinkPduSessionInformation, Error, ExtensionHeader, ExtensionHeaders, InformationElement,
-    Packet, PduSessionContainer, UplinkPduSessionInformation, UplinkTimeStamps,
+    Packet, Part, PduSessionContainer, UplinkPduSessionInformation, UplinkTimeStamps,
     parse_ipv4_icmp_echo, parse_ipv4_udp,
 };
 use proptest::collection::vec;
@@ -279,7 +279,11 @@ proptest! {
         empty[start] = 0;
         prop_assert_eq!(
             Packet::decode(&empty),
-            Err(Error::InvalidLength("extension header"))
+            Err(Error::InvalidLength {
+                what: Part::ExtensionHeader,
+                length: 0,
+                expected: 4
+            })
         );
     }
 

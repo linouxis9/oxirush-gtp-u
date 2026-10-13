@@ -7,7 +7,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
 use oxirush_gtp_u::{
-    DownlinkPduSessionInformation, Error, ExtensionHeader, Packet, PduSessionContainer,
+    DownlinkPduSessionInformation, Error, ExtensionHeader, Packet, Part, PduSessionContainer,
     UnknownNewIes, UplinkPduSessionInformation, UplinkTimeStamps,
 };
 
@@ -192,15 +192,35 @@ fn the_longest_chain_of_a_datagram_is_a_bounded_list() {
 
     // One more header does not fit the length of a message.
     message.extension_headers.push(ExtensionHeader::UdpPort(0));
-    assert_eq!(message.encode(), Err(Error::OutOfRange("GTP-U length")));
+    assert_eq!(
+        message.encode(),
+        Err(Error::OutOfRange {
+            what: Part::Length,
+            value: 65536,
+            max: 65535
+        })
+    );
 
     // The last header of the chain says that it has no octets, or more than
     // the datagram has, or that another follows.
     let last = datagram.len() - 4;
+    let truncated = |needed, available| Error::Truncated {
+        what: Part::ExtensionHeader,
+        needed,
+        available,
+    };
     for (index, octet, error) in [
-        (last, 0, Error::InvalidLength("extension header")),
-        (last, 2, Error::Truncated("extension header")),
-        (last + 3, 0x40, Error::Truncated("extension header")),
+        (
+            last,
+            0,
+            Error::InvalidLength {
+                what: Part::ExtensionHeader,
+                length: 0,
+                expected: 4,
+            },
+        ),
+        (last, 2, truncated(8, 4)),
+        (last + 3, 0x40, truncated(4, 0)),
     ] {
         let mut cut = datagram.clone();
         cut[index] = octet;

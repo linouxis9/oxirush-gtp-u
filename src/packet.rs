@@ -2,7 +2,10 @@
 
 use std::net::IpAddr;
 
-use crate::{Error, ExtensionHeader, ExtensionHeaders, InformationElement, PduSessionContainer};
+use crate::error::truncated;
+use crate::{
+    Error, ExtensionHeader, ExtensionHeaders, InformationElement, Part, PduSessionContainer,
+};
 
 /// Echo Request (TS 29.281 §7.2.1).
 pub const ECHO_REQUEST: u8 = 1;
@@ -214,7 +217,7 @@ impl Packet {
 #[inline]
 fn decode<'a, P>(bytes: &'a [u8], payload: impl Fn(&'a [u8]) -> P) -> Result<Packet<P>, Error> {
     let Some((header, rest)) = bytes.split_first_chunk::<MANDATORY_LEN>() else {
-        return Err(Error::Truncated("GTP-U header"));
+        return Err(truncated(Part::Header, MANDATORY_LEN, bytes));
     };
     let flags = header[0];
     // Version 1 and protocol type 1; the spare bit is not evaluated.
@@ -223,10 +226,14 @@ fn decode<'a, P>(bytes: &'a [u8], payload: impl Fn(&'a [u8]) -> P) -> Result<Pac
     }
     let length = usize::from(u16::from_be_bytes([header[2], header[3]]));
     if rest.len() < length {
-        return Err(Error::Truncated("GTP-U message"));
+        return Err(truncated(Part::Message, length, rest));
     }
     if rest.len() > length {
-        return Err(Error::InvalidLength("GTP-U message"));
+        return Err(Error::InvalidLength {
+            what: Part::Message,
+            length,
+            expected: rest.len(),
+        });
     }
     let message_type = header[1];
     let teid = u32::from_be_bytes([header[4], header[5], header[6], header[7]]);
@@ -234,7 +241,7 @@ fn decode<'a, P>(bytes: &'a [u8], payload: impl Fn(&'a [u8]) -> P) -> Result<Pac
     let mut rest = rest;
     if flags & (E | S | PN) != 0 {
         let Some((optional, after)) = rest.split_first_chunk::<OPTIONAL_LEN>() else {
-            return Err(Error::Truncated("GTP-U optional header"));
+            return Err(truncated(Part::OptionalHeader, OPTIONAL_LEN, rest));
         };
         rest = after;
         if flags & S != 0 {
@@ -282,14 +289,18 @@ fn decode<'a, P>(bytes: &'a [u8], payload: impl Fn(&'a [u8]) -> P) -> Result<Pac
 #[inline]
 fn extension_header(rest: &[u8]) -> Result<(&[u8], u8, &[u8]), Error> {
     let Some(&units) = rest.first() else {
-        return Err(Error::Truncated("extension header"));
+        return Err(truncated(Part::ExtensionHeader, 4, rest));
     };
     let size = usize::from(units) * 4;
     if size == 0 {
-        return Err(Error::InvalidLength("extension header"));
+        return Err(Error::InvalidLength {
+            what: Part::ExtensionHeader,
+            length: 0,
+            expected: 4,
+        });
     }
     let Some((header, after)) = rest.split_at_checked(size) else {
-        return Err(Error::Truncated("extension header"));
+        return Err(truncated(Part::ExtensionHeader, size, rest));
     };
     Ok((&header[1..size - 1], header[size - 1], after))
 }
@@ -332,18 +343,22 @@ impl<P: AsRef<[u8]>> Packet<P> {
         let optional = self.sequence.is_some()
             || self.n_pdu_number.is_some()
             || !self.extension_headers.is_empty();
+        // What the Length field counts. A sum that a `usize` cannot hold is
+        // reported as the largest one.
         let mut length = payload_length;
         if optional {
-            length = length
-                .checked_add(OPTIONAL_LEN)
-                .ok_or(Error::OutOfRange("GTP-U length"))?;
+            length = length.saturating_add(OPTIONAL_LEN);
         }
         for header in &self.extension_headers {
-            length = length
-                .checked_add(header.encoded_len()?)
-                .ok_or(Error::OutOfRange("GTP-U length"))?;
+            length = length.saturating_add(header.encoded_len()?);
         }
-        u16::try_from(length).map_err(|_| Error::OutOfRange("GTP-U length"))?;
+        if length > usize::from(u16::MAX) {
+            return Err(Error::OutOfRange {
+                what: Part::Length,
+                value: length as u64,
+                max: u64::from(u16::MAX),
+            });
+        }
         Ok(MANDATORY_LEN + length)
     }
 
@@ -409,6 +424,13 @@ mod tests {
             .map(|pair| pair[0] << 4 | pair[1])
             .collect()
     }
+
+    /// An extension header whose length octet says that it has none.
+    const NO_OCTETS: Error = Error::InvalidLength {
+        what: Part::ExtensionHeader,
+        length: 0,
+        expected: 4,
+    };
 
     fn round_trip(packet: &Packet, wire: &str) {
         let wire = hex(wire);
@@ -597,7 +619,7 @@ mod tests {
                 PduSessionContainer::Uplink(uplink.clone()),
             )]
             .into();
-            assert_eq!(packet.encode(), Err(Error::OutOfRange("New IE Flags")));
+            assert_eq!(packet.encode(), Err(Error::Malformed(Part::NewIeFlags)));
         }
     }
 
@@ -633,10 +655,7 @@ mod tests {
                     PduSessionContainer::Downlink(information),
                 ));
             if flags & 1 == 0 && flags & 48 != 0 {
-                assert_eq!(
-                    packet.encode(),
-                    Err(Error::OutOfRange("burst information without PPI"))
-                );
+                assert_eq!(packet.encode(), Err(Error::Missing(Part::Ppi)));
             } else {
                 let wire = packet.encode().unwrap();
                 let decoded = Packet::decode(&wire).unwrap();
@@ -648,13 +667,18 @@ mod tests {
 
     #[test]
     fn downlink_burst_information_rejects_invalid_fields() {
-        // BSSize ends after the QFI Sequence Number, beyond the container.
-        for content in ["04 85 02 000001", "00 85 03 010203"] {
+        // BSSize ends after the QFI Sequence Number, beyond the container,
+        // and so does TTNB after BSSize.
+        for (content, needed) in [("04 85 02 000001", 3), ("00 85 03 010203", 2)] {
             assert_eq!(
                 Packet::decode(&hex(&format!(
                     "34 ff 000c 00000001 0000 00 85 02 {content} 00"
                 ))),
-                Err(Error::Truncated("PDU Session Container")),
+                Err(Error::Truncated {
+                    what: Part::PduSessionContainer,
+                    needed,
+                    available: 0
+                }),
             );
         }
         let mut information = DownlinkPduSessionInformation::new(1);
@@ -666,7 +690,14 @@ mod tests {
             .push(ExtensionHeader::PduSessionContainer(
                 PduSessionContainer::Downlink(information),
             ));
-        assert_eq!(packet.encode(), Err(Error::OutOfRange("Burst Size")));
+        assert_eq!(
+            packet.encode(),
+            Err(Error::OutOfRange {
+                what: Part::BurstSize,
+                value: 0x100_0000,
+                max: 0xff_ffff
+            })
+        );
     }
 
     #[test]
@@ -707,9 +738,17 @@ mod tests {
         for end in 12..32 {
             let mut short = wire[..end].to_vec();
             short[2..4].copy_from_slice(&((end - 8) as u16).to_be_bytes());
+            // The header that is cut starts at a multiple of 4. The last
+            // one says that it is 8 octets long, once its first octet is
+            // there; one that is not there at all needs 4 at least.
+            let (start, needed) = if end > 24 { (24, 8) } else { (end / 4 * 4, 4) };
             assert_eq!(
                 Packet::decode(&short),
-                Err(Error::Truncated("extension header")),
+                Err(Error::Truncated {
+                    what: Part::ExtensionHeader,
+                    needed,
+                    available: end - start
+                }),
                 "{end} octets"
             );
         }
@@ -717,16 +756,17 @@ mod tests {
             // A header of no octets would never end the chain.
             let mut empty = wire.clone();
             empty[start] = 0;
-            assert_eq!(
-                Packet::decode(&empty),
-                Err(Error::InvalidLength("extension header"))
-            );
+            assert_eq!(Packet::decode(&empty), Err(NO_OCTETS));
             // A header longer than what is left of the message.
             let mut beyond = wire.clone();
             beyond[start] = 0xff;
             assert_eq!(
                 Packet::decode(&beyond),
-                Err(Error::Truncated("extension header"))
+                Err(Error::Truncated {
+                    what: Part::ExtensionHeader,
+                    needed: 4 * 0xff,
+                    available: wire.len() - start
+                })
             );
         }
         // The last header names a next one, and the payload is not one.
@@ -734,7 +774,11 @@ mod tests {
         next[31] = 0x40;
         assert_eq!(
             Packet::decode(&next),
-            Err(Error::Truncated("extension header"))
+            Err(Error::Truncated {
+                what: Part::ExtensionHeader,
+                needed: 4 * 0xaa,
+                available: 1
+            })
         );
     }
 
@@ -766,7 +810,11 @@ mod tests {
         longer.push(0);
         assert_eq!(
             Packet::decode(&longer),
-            Err(Error::InvalidLength("GTP-U message"))
+            Err(Error::InvalidLength {
+                what: Part::Message,
+                length: 9,
+                expected: 10
+            })
         );
         for first in [0x50, 0x20, 0x10] {
             assert_eq!(
@@ -776,32 +824,48 @@ mod tests {
         }
         let mut zero_length = wire.clone();
         zero_length[12] = 0;
-        assert_eq!(
-            Packet::decode(&zero_length),
-            Err(Error::InvalidLength("extension header"))
-        );
+        assert_eq!(Packet::decode(&zero_length), Err(NO_OCTETS));
         let mut beyond = wire;
         beyond[12] = 3;
         assert_eq!(
             Packet::decode(&beyond),
-            Err(Error::Truncated("extension header"))
+            Err(Error::Truncated {
+                what: Part::ExtensionHeader,
+                needed: 12,
+                available: 5
+            })
         );
         // A UDP Port extension header longer than its port.
         assert_eq!(
             Packet::decode(&hex("34 ff 000c 00000001 0000 00 40 02 0868 00000000 00")),
-            Err(Error::InvalidLength("UDP Port extension header"))
+            Err(Error::InvalidLength {
+                what: Part::UdpPort,
+                length: 8,
+                expected: 4
+            })
         );
         // PPP announces a PPI octet the container does not have.
         assert_eq!(
             Packet::decode(&hex("34 ff 0008 00000001 0000 00 85 01 00 80 00")),
-            Err(Error::Truncated("PDU Session Container"))
+            Err(Error::Truncated {
+                what: Part::PduSessionContainer,
+                needed: 1,
+                available: 0
+            })
         );
     }
 
     #[test]
     fn rejects_values_it_cannot_encode() {
         let mut packet = Packet::downlink(1, 64, vec![]);
-        assert_eq!(packet.encode(), Err(Error::OutOfRange("QFI")));
+        assert_eq!(
+            packet.encode(),
+            Err(Error::OutOfRange {
+                what: Part::Qfi,
+                value: 64,
+                max: 63
+            })
+        );
         // Content kept as received must include its padding, or it would not
         // decode back to the same value.
         let unpadded = |container| {
@@ -811,9 +875,27 @@ mod tests {
                 .push(ExtensionHeader::PduSessionContainer(container));
             packet.encode()
         };
+        // The lengths are those of the extension header, with its length and
+        // next type octets.
+        let container = |length, expected| Error::InvalidLength {
+            what: Part::PduSessionContainer,
+            length,
+            expected,
+        };
         assert_eq!(
             unpadded(PduSessionContainer::Other(vec![0x20])),
-            Err(Error::InvalidLength("PDU Session Container"))
+            Err(container(3, 4))
+        );
+        assert_eq!(
+            unpadded(PduSessionContainer::Other(vec![])),
+            Err(container(2, 4))
+        );
+        assert_eq!(
+            unpadded(PduSessionContainer::Other(vec![0x10, 0])),
+            Err(Error::InvalidType {
+                what: Part::PduSessionContainer,
+                kind: 1
+            })
         );
         let mut uplink = UplinkPduSessionInformation::new(1);
         uplink.unknown_new_ies = Some(Box::new(UnknownNewIes {
@@ -822,14 +904,14 @@ mod tests {
         }));
         assert_eq!(
             unpadded(PduSessionContainer::Uplink(uplink.clone())),
-            Err(Error::InvalidLength("PDU Session Container"))
+            Err(container(5, 8))
         );
         uplink.unknown_new_ies.as_mut().unwrap().content = vec![0; 3];
         assert!(unpadded(PduSessionContainer::Uplink(uplink.clone())).is_ok());
         uplink.ul_congestion_information = Some(1);
         assert_eq!(
             unpadded(PduSessionContainer::Uplink(uplink)),
-            Err(Error::InvalidLength("PDU Session Container"))
+            Err(container(10, 12))
         );
         let mut downlink = DownlinkPduSessionInformation::new(1);
         downlink.dl_mbs_qfi_sequence_number = Some(1);
@@ -843,10 +925,11 @@ mod tests {
             content: vec![0, 0],
         }]
         .into();
-        assert_eq!(
-            packet.encode(),
-            Err(Error::OutOfRange("extension header type"))
-        );
+        let kept = |kind| Error::InvalidType {
+            what: Part::ExtensionHeader,
+            kind,
+        };
+        assert_eq!(packet.encode(), Err(kept(0)));
         for kind in [
             ExtensionHeader::UDP_PORT,
             ExtensionHeader::PDU_SESSION_CONTAINER,
@@ -856,10 +939,7 @@ mod tests {
                 content: vec![0, 0],
             }]
             .into();
-            assert_eq!(
-                packet.encode(),
-                Err(Error::OutOfRange("extension header type"))
-            );
+            assert_eq!(packet.encode(), Err(kept(kind)));
         }
         packet.extension_headers = vec![ExtensionHeader::Other {
             kind: 0x20,
@@ -868,7 +948,11 @@ mod tests {
         .into();
         assert_eq!(
             packet.encode(),
-            Err(Error::InvalidLength("extension header"))
+            Err(Error::InvalidLength {
+                what: Part::ExtensionHeader,
+                length: 3,
+                expected: 4
+            })
         );
         packet.extension_headers = vec![ExtensionHeader::Other {
             kind: 0x20,
@@ -877,7 +961,11 @@ mod tests {
         .into();
         assert_eq!(
             packet.encode(),
-            Err(Error::OutOfRange("extension header length"))
+            Err(Error::OutOfRange {
+                what: Part::ExtensionHeader,
+                value: 1024,
+                max: 1020
+            })
         );
         let mut downlink = DownlinkPduSessionInformation::new(1);
         downlink.ppi = Some(8);
@@ -885,10 +973,21 @@ mod tests {
             PduSessionContainer::Downlink(downlink),
         )]
         .into();
-        assert_eq!(packet.encode(), Err(Error::OutOfRange("PPI")));
+        assert_eq!(
+            packet.encode(),
+            Err(Error::OutOfRange {
+                what: Part::Ppi,
+                value: 8,
+                max: 7
+            })
+        );
         assert_eq!(
             Packet::g_pdu(1, vec![0; 65536]).encode(),
-            Err(Error::OutOfRange("GTP-U length"))
+            Err(Error::OutOfRange {
+                what: Part::Length,
+                value: 65536,
+                max: 65535
+            })
         );
         assert!(Packet::g_pdu(1, vec![0; 65535]).encode().is_ok());
     }
@@ -936,13 +1035,26 @@ mod tests {
             };
             assert_eq!(
                 InformationElement::encode_all(&[other]),
-                Err(Error::OutOfRange("TLV information element type"))
+                Err(Error::InvalidType {
+                    what: Part::InformationElement,
+                    kind
+                })
             );
         }
-        assert_eq!(
-            InformationElement::decode_all(&hex("85 0003 010203")),
-            Err(Error::InvalidLength("GTP-U Peer Address"))
-        );
+        for (wire, length, expected) in [
+            ("85 0003 010203", 3, 4),
+            ("85 0005 0102030405", 5, 4),
+            ("85 000f 0102030405060708090a0b0c0d0e0f", 15, 16),
+        ] {
+            assert_eq!(
+                InformationElement::decode_all(&hex(wire)),
+                Err(Error::InvalidLength {
+                    what: Part::GtpUPeerAddress,
+                    length,
+                    expected
+                })
+            );
+        }
         let echo = Packet::echo_response(1);
         assert_eq!(
             echo.information_elements().unwrap(),

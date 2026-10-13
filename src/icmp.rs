@@ -3,8 +3,9 @@
 
 use std::net::Ipv4Addr;
 
-use crate::Error;
-use crate::ipv4::{checksum, header, parse};
+use crate::error::truncated;
+use crate::ipv4::{checksum, header, parse, total_length};
+use crate::{Error, Expected, Part};
 
 const ICMP: u8 = 1;
 const ECHO_REQUEST: u8 = 8;
@@ -45,8 +46,7 @@ fn build(
     sequence: u16,
     payload: &[u8],
 ) -> Result<Vec<u8>, Error> {
-    let total = 20 + 8 + payload.len();
-    let total_length = u16::try_from(total).map_err(|_| Error::OutOfRange("IPv4 total length"))?;
+    let total_length = total_length(20 + 8 + payload.len())?;
     let mut bytes = header(source, destination, ICMP, total_length);
     let icmp_type = match kind {
         EchoKind::Request => ECHO_REQUEST,
@@ -83,7 +83,7 @@ pub fn ipv4_icmp_echo_request(
 pub fn ipv4_icmp_echo_reply(request: &[u8]) -> Result<Vec<u8>, Error> {
     let echo = parse_ipv4_icmp_echo(request)?;
     if echo.kind != EchoKind::Request {
-        return Err(Error::UnexpectedPacket("not an ICMP Echo Request"));
+        return Err(Error::UnexpectedPacket(Expected::IcmpEchoRequest));
     }
     build(
         echo.destination,
@@ -101,15 +101,19 @@ pub fn parse_ipv4_icmp_echo(bytes: &[u8]) -> Result<IcmpEcho<'_>, Error> {
     let packet = parse(bytes, ICMP)?;
     let icmp = packet.payload;
     let Some(icmp_header) = icmp.first_chunk::<8>() else {
-        return Err(Error::Truncated("ICMP header"));
+        return Err(truncated(Part::IcmpHeader, 8, icmp));
     };
     if checksum(&[icmp]) != 0 {
-        return Err(Error::InvalidChecksum("ICMP"));
+        return Err(Error::InvalidChecksum {
+            what: Part::IcmpMessage,
+            received: u16::from_be_bytes([icmp_header[2], icmp_header[3]]),
+            computed: checksum(&[&icmp[..2], &icmp[4..]]),
+        });
     }
     let kind = match (icmp_header[0], icmp_header[1]) {
         (ECHO_REQUEST, 0) => EchoKind::Request,
         (ECHO_REPLY, 0) => EchoKind::Reply,
-        _ => return Err(Error::UnexpectedPacket("not an ICMP Echo message")),
+        _ => return Err(Error::UnexpectedPacket(Expected::IcmpEcho)),
     };
     Ok(IcmpEcho {
         source: packet.source,
@@ -148,7 +152,18 @@ mod tests {
         assert_eq!(parsed.payload, b"ping");
         assert_eq!(
             ipv4_icmp_echo_reply(&reply),
-            Err(Error::UnexpectedPacket("not an ICMP Echo Request"))
+            Err(Error::UnexpectedPacket(Expected::IcmpEchoRequest))
+        );
+        assert_eq!(
+            parse_ipv4_icmp_echo(
+                &crate::ipv4_udp(
+                    "10.60.0.2:1".parse().unwrap(),
+                    "192.0.2.1:2".parse().unwrap(),
+                    b"x"
+                )
+                .unwrap()
+            ),
+            Err(Error::UnexpectedPacket(Expected::Icmp))
         );
     }
 
@@ -158,9 +173,38 @@ mod tests {
             ipv4_icmp_echo_request(Ipv4Addr::LOCALHOST, Ipv4Addr::new(192, 0, 2, 1), 1, 1, b"x")
                 .unwrap();
         packet[28] ^= 1;
+        // The checksum that these octets give is that of a request made
+        // with them.
+        let made =
+            ipv4_icmp_echo_request(Ipv4Addr::LOCALHOST, Ipv4Addr::new(192, 0, 2, 1), 1, 1, b"y")
+                .unwrap();
+        assert_eq!(packet[24..], made[24..]);
+        let field = |packet: &[u8]| u16::from_be_bytes([packet[22], packet[23]]);
         assert_eq!(
             parse_ipv4_icmp_echo(&packet),
-            Err(Error::InvalidChecksum("ICMP"))
+            Err(Error::InvalidChecksum {
+                what: Part::IcmpMessage,
+                received: field(&packet),
+                computed: field(&made)
+            })
+        );
+        // Another type than the two of an echo, with its checksum.
+        let mut unreachable = made.clone();
+        unreachable[20] = 3;
+        unreachable[22..24].copy_from_slice(&[0, 0]);
+        let sum = checksum(&[&unreachable[20..]]);
+        unreachable[22..24].copy_from_slice(&sum.to_be_bytes());
+        assert_eq!(
+            parse_ipv4_icmp_echo(&unreachable),
+            Err(Error::UnexpectedPacket(Expected::IcmpEcho))
+        );
+        assert_eq!(
+            parse_ipv4_icmp_echo(&made[..27]),
+            Err(Error::Truncated {
+                what: Part::Ipv4Packet,
+                needed: 29,
+                available: 27
+            })
         );
     }
 }
