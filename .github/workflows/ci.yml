@@ -62,8 +62,10 @@ jobs:
       - run: cargo test --all-features
 
   tun:
-    name: TUN routing (root, network namespaces)
-    runs-on: ubuntu-latest
+    name: TUN and eBPF fast path (root, network namespaces)
+    # Passwordless sudo, and a kernel with TCX (Linux 6.6): the verifier
+    # judges the programs here, which no other job loads.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -72,6 +74,7 @@ jobs:
       - name: Load the vrf module
         id: vrf
         run: |
+          uname -r
           sudo apt-get update
           sudo apt-get install -y "linux-modules-extra-$(uname -r)" || true
           if sudo modprobe vrf; then
@@ -80,11 +83,15 @@ jobs:
             echo "::warning::no vrf kernel module: the VRF test is skipped"
             echo "skip=--skip ue_vrf" >> "$GITHUB_OUTPUT"
           fi
-      - run: cargo test --locked --features tun --test tun_linux -- --ignored ${{ steps.vrf.outputs.skip }}
+      - run: cargo test --locked --features tun --test tun_linux --test tun_cleanup -- --ignored ${{ steps.vrf.outputs.skip }}
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: sudo
       # The fast path loads eBPF programs; three of its tests use a VRF.
       - run: cargo test --locked --features ebpf --test ebpf_linux -- --ignored ${{ steps.vrf.outputs.skip && '--skip carried_in_the_kernel --skip handover --skip installing_a_tunnel' }}
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: sudo
+      # What the fast path hears of the links, in a network namespace.
+      - run: cargo test --locked --features ebpf --lib -- --ignored
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: sudo
 
