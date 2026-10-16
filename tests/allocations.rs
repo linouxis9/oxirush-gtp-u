@@ -7,8 +7,9 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
 use oxirush_gtp_u::{
-    DownlinkPduSessionInformation, Error, ExtensionHeader, ExtensionHeaderType, Packet, Part,
-    PduSessionContainer, UnknownNewIes, UplinkPduSessionInformation, UplinkTimeStamps,
+    DownlinkPduSessionInformation, Error, ExtensionHeader, ExtensionHeaderType, ExtensionHeaders,
+    Packet, Part, PduSessionContainer, UnknownNewIes, UplinkPduSessionInformation,
+    UplinkTimeStamps,
 };
 
 thread_local! {
@@ -170,45 +171,60 @@ fn a_chain_of_extension_headers_allocates_its_list_and_the_octets_it_keeps() {
     assert_eq!(decoded.unwrap().into_owned(), message);
 }
 
-/// A datagram holds 16 382 extension headers at most, of four octets each:
-/// the decoder makes a list of that many, which grows as a `Vec` does, and
-/// a chain that ends badly gives the list back.
+/// A message has 16 extension headers at most. A message that is nothing
+/// but headers has 16 382 of them: it is refused at its seventeenth, and
+/// has cost its receiver a list of 16, which grows as a `Vec` does.
 #[test]
-fn the_longest_chain_of_a_datagram_is_a_bounded_list() {
-    const HEADERS: usize = (65535 - 4) / 4;
-    let mut message = Packet::g_pdu(1, vec![]);
-    for port in 0..HEADERS {
+fn a_chain_longer_than_a_message_can_have_is_refused_where_it_exceeds_it() {
+    const MAX: usize = ExtensionHeaders::MAX;
+    assert_eq!(MAX, 16);
+    let chain = |headers: usize| {
+        let mut message = Packet::g_pdu(1, vec![]);
+        for port in 0..headers {
+            message
+                .extension_headers
+                .push(ExtensionHeader::UdpPort(port as u16));
+        }
         message
-            .extension_headers
-            .push(ExtensionHeader::UdpPort(port as u16));
-    }
+    };
+    let message = chain(MAX);
     let datagram = message.encode().unwrap();
-    assert_eq!(datagram.len(), 8 + 4 + 4 * HEADERS);
+    assert_eq!(datagram.len(), 8 + 4 + 4 * MAX);
     let (decoded, count) = allocations(|| Packet::decode_borrowed(&datagram));
     let decoded = decoded.unwrap();
-    assert_eq!(decoded.extension_headers.len(), HEADERS);
-    assert!(count <= 16, "{count} allocations");
+    assert_eq!(decoded.extension_headers.len(), MAX);
+    // The list, at 4, 8 and 16 headers.
+    assert_eq!(count, 3);
     assert_eq!(decoded.into_owned(), message);
 
-    // One more header does not fit the length of a message.
-    message.extension_headers.push(ExtensionHeader::UdpPort(0));
-    assert_eq!(
-        message.encode(),
-        Err(Error::OutOfRange {
-            what: Part::Length,
-            value: 65536,
-            max: 65535
-        })
-    );
+    // One more header is one too many, to encode and to decode.
+    let too_many = Error::TooManyExtensionHeaders { max: MAX };
+    assert_eq!(chain(MAX + 1).encode(), Err(too_many.clone()));
+    assert_eq!(chain(MAX + 1).encoded_len(), Err(too_many.clone()));
+    let mut one_more = datagram.clone();
+    *one_more.last_mut().unwrap() = 0x40;
+    one_more.extend_from_slice(&[1, 0, 16, 0]);
+    let length = (one_more.len() - 8) as u16;
+    one_more[2..4].copy_from_slice(&length.to_be_bytes());
+    assert_eq!(Packet::decode(&one_more), Err(too_many.clone()));
 
-    // The last header of the chain says that it has no octets, or more than
+    // The longest message, all of it UDP Port headers that each announce
+    // another.
+    const HEADERS: usize = (65535 - 4) / 4;
+    let mut hostile = vec![0x34, 0xff, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0x40];
+    for _ in 0..HEADERS {
+        hostile.extend_from_slice(&[1, 0, 0, 0x40]);
+    }
+    let length = (hostile.len() - 8) as u16;
+    hostile[2..4].copy_from_slice(&length.to_be_bytes());
+    assert_eq!(hostile.len(), 65540);
+    let (decoded, count) = allocations(|| Packet::decode_borrowed(&hostile).map(|_| ()));
+    assert_eq!(decoded, Err(too_many.clone()));
+    assert_eq!(count, 3);
+
+    // The last header of a chain says that it has no octets, or more than
     // the datagram has, or that another follows.
     let last = datagram.len() - 4;
-    let truncated = |needed, available| Error::Truncated {
-        what: Part::ExtensionHeader,
-        needed,
-        available,
-    };
     for (index, octet, error) in [
         (
             last,
@@ -219,13 +235,22 @@ fn the_longest_chain_of_a_datagram_is_a_bounded_list() {
                 expected: 4,
             },
         ),
-        (last, 2, truncated(8, 4)),
-        (last + 3, 0x40, truncated(4, 0)),
+        (
+            last,
+            2,
+            Error::Truncated {
+                what: Part::ExtensionHeader,
+                needed: 8,
+                available: 4,
+            },
+        ),
+        // A seventeenth is refused before it is looked for.
+        (last + 3, 0x40, too_many.clone()),
     ] {
         let mut cut = datagram.clone();
         cut[index] = octet;
         let (decoded, count) = allocations(|| Packet::decode_borrowed(&cut).map(|_| ()));
         assert_eq!(decoded, Err(error));
-        assert!(count <= 16, "{count} allocations");
+        assert!(count <= 3, "{count} allocations");
     }
 }

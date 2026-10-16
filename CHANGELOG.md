@@ -31,8 +31,11 @@ First release.
   buffer that is used again, without an allocation
   (`tests/allocations.rs`). A second header allocates the list; a header
   and a PDU type that are kept as received, and the new IEs of a later
-  release, allocate their octets. A datagram holds 16 382 extension headers
-  at most, and its list is that long at most.
+  release, allocate their octets. A message is decoded and encoded with 16
+  extension headers at most (`ExtensionHeaders::MAX`): the specification
+  sets no limit and its types make eight at most, and a datagram that is
+  nothing but headers, of which it holds more than 16 000, is refused at
+  its seventeenth, as `Error::TooManyExtensionHeaders`.
 - PDU Session Container (TS 38.415 V18 §5.5.2): downlink and uplink PDU
   Session Information with their QoS monitoring, sequence number, delay and
   congestion fields; new IEs of later releases are kept as received. A test

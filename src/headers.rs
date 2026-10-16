@@ -9,7 +9,8 @@ use crate::ExtensionHeader;
 /// (TS 29.281 §5.2).
 ///
 /// It is read and changed as the slice `[ExtensionHeader]` that it
-/// dereferences to, and grows with [`push`](Self::push), as a `Vec` does. The
+/// dereferences to, and grows with [`push`](Self::push), as a `Vec` does: a
+/// list can be longer than the [`MAX`](Self::MAX) headers of a message. The
 /// first header is kept in the list itself: a message without extension
 /// header, or with one, such as the PDU Session Container of a G-PDU on N3,
 /// is decoded and made without an allocation for its list. A second header
@@ -68,6 +69,20 @@ enum List {
 const FIRST_CAPACITY: usize = 4;
 
 impl ExtensionHeaders {
+    /// The most extension headers that a message is decoded or encoded
+    /// with: a longer chain is [`Error::TooManyExtensionHeaders`].
+    ///
+    /// The specification sets no limit. TS 29.281 V19.2.0 has eleven types,
+    /// which make eight headers at most in one message: two headers have a
+    /// second type from an earlier release, and a message has the PDCP PDU
+    /// Number or the long one. Twice that leaves room for the types of later
+    /// releases, and a datagram that is nothing but headers, of which it
+    /// holds more than 16 000, costs its receiver the first of them and no
+    /// more.
+    ///
+    /// [`Error::TooManyExtensionHeaders`]: crate::Error::TooManyExtensionHeaders
+    pub const MAX: usize = 16;
+
     /// An empty list.
     #[inline]
     pub const fn new() -> Self {

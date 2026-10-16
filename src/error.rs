@@ -75,6 +75,12 @@ pub enum Error {
     /// `what` is not as its format says: the New IE Flags of
     /// [`UnknownNewIes`](crate::UnknownNewIes).
     Malformed(Part),
+    /// A chain of more extension headers than a message is decoded or
+    /// encoded with ([`ExtensionHeaders::MAX`](crate::ExtensionHeaders::MAX)).
+    TooManyExtensionHeaders {
+        /// That limit.
+        max: usize,
+    },
     /// A TV information element of unknown type. Its length is not
     /// encoded, so the rest of the message cannot be parsed.
     UnknownInformationElement(InformationElementType),
@@ -265,6 +271,9 @@ impl fmt::Display for Error {
             }
             Error::Missing(what) => write!(f, "{what} missing"),
             Error::Malformed(what) => write!(f, "malformed {what}"),
+            Error::TooManyExtensionHeaders { max } => {
+                write!(f, "more than {max} extension headers")
+            }
             Error::UnknownInformationElement(kind) => {
                 write!(f, "unknown TV information element type {}", kind.0)
             }
@@ -371,6 +380,10 @@ mod tests {
             ),
             (Error::Missing(Part::Ppi), "PPI missing"),
             (Error::Malformed(Part::NewIeFlags), "malformed New IE Flags"),
+            (
+                Error::TooManyExtensionHeaders { max: 16 },
+                "more than 16 extension headers",
+            ),
             (
                 Error::UnknownInformationElement(InformationElementType(6)),
                 "unknown TV information element type 6",

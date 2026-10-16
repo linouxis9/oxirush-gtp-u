@@ -231,7 +231,8 @@ impl Packet {
     /// or uplink information without new IEs of a later release, is decoded
     /// without an allocation. A second header allocates the list, and a
     /// header or a PDU type that is kept as received allocates its octets.
-    /// A datagram holds 16 382 extension headers at most.
+    /// A chain of more than [`ExtensionHeaders::MAX`] headers is refused
+    /// where it exceeds it.
     pub fn decode_borrowed(bytes: &[u8]) -> Result<Packet<&[u8]>, Error> {
         decode(bytes, |payload| payload)
     }
@@ -302,6 +303,9 @@ fn decode<'a, P>(bytes: &'a [u8], payload: impl Fn(&'a [u8]) -> P) -> Result<Pac
     let mut extension_headers = ExtensionHeaders::from(first);
     (next, rest) = (following, after);
     while next != 0 {
+        if extension_headers.len() == ExtensionHeaders::MAX {
+            return Err(TOO_MANY);
+        }
         let (content, following, after) = extension_header(rest)?;
         extension_headers.push(ExtensionHeader::decode(next, content)?);
         (next, rest) = (following, after);
@@ -365,6 +369,9 @@ impl<P: AsRef<[u8]>> Packet<P> {
     }
 
     fn encoded_len_for_payload(&self, payload_length: usize) -> Result<usize, Error> {
+        if self.extension_headers.len() > ExtensionHeaders::MAX {
+            return Err(TOO_MANY);
+        }
         let optional = self.sequence.is_some()
             || self.n_pdu_number.is_some()
             || !self.extension_headers.is_empty();
@@ -421,6 +428,10 @@ impl<P: AsRef<[u8]>> Packet<P> {
         Ok(())
     }
 }
+
+const TOO_MANY: Error = Error::TooManyExtensionHeaders {
+    max: ExtensionHeaders::MAX,
+};
 
 /// The type of an extension header, as the octet that names it to the
 /// header before it.
