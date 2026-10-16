@@ -181,6 +181,12 @@ fn main() -> Result<(), oxirush_gtp_u::Error> {
         println!("{}, comprehension required: {required}", header.kind());
     }
     println!("{:?}", decoded.extension_headers[1]);
+
+    // Sent on with another TEID and QoS flow
+    let mut forwarded = decoded;
+    forwarded.teid = 0x9abc_def0;
+    forwarded.set_qfi(5);
+    println!("{:02x?}", &forwarded.encode()?[4..16]);
     Ok(())
 }
 ```
@@ -189,6 +195,7 @@ fn main() -> Result<(), oxirush_gtp_u::Error> {
 PDU Session Container, comprehension required: true
 0x21, comprehension required: false
 Other { kind: ExtensionHeaderType(0x21), content: 2 octets 0700 }
+[9a, bc, de, f0, 00, 00, 00, 85, 01, 10, 05, 21]
 ```
 
 Every extension header of TS 29.281 V19.2.0 has a variant; one of another

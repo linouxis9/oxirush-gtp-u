@@ -22,5 +22,11 @@ fn main() -> Result<(), oxirush_gtp_u::Error> {
         println!("{}, comprehension required: {required}", header.kind());
     }
     println!("{:?}", decoded.extension_headers[1]);
+
+    // Sent on with another TEID and QoS flow
+    let mut forwarded = decoded;
+    forwarded.teid = 0x9abc_def0;
+    forwarded.set_qfi(5);
+    println!("{:02x?}", &forwarded.encode()?[4..16]);
     Ok(())
 }

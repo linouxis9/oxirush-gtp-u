@@ -395,6 +395,21 @@ impl PduSessionContainer {
         }
     }
 
+    /// Give downlink or uplink information QoS flow `qfi` and return the
+    /// former one: `None`, and nothing changes, for another PDU type. The
+    /// encoder refuses a QFI above 63.
+    pub fn set_qfi(&mut self, qfi: u8) -> Option<u8> {
+        match self {
+            PduSessionContainer::Downlink(information) => {
+                Some(std::mem::replace(&mut information.qfi, qfi))
+            }
+            PduSessionContainer::Uplink(information) => {
+                Some(std::mem::replace(&mut information.qfi, qfi))
+            }
+            PduSessionContainer::Other(_) => None,
+        }
+    }
+
     /// The container of a G-PDU as it usually is: downlink information
     /// with a QFI and its RQI, or uplink information with a QFI, and none
     /// of the fields that a flag announces.

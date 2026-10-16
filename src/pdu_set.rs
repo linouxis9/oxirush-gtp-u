@@ -112,6 +112,18 @@ impl PduSetInformationContainer {
         }
     }
 
+    /// Give downlink information QoS flow `qfi` and return the former one:
+    /// `None`, and nothing changes, for another PDU type. The encoder
+    /// refuses a QFI above 63.
+    pub fn set_qfi(&mut self, qfi: u8) -> Option<u8> {
+        match self {
+            PduSetInformationContainer::Downlink(information) => {
+                Some(std::mem::replace(&mut information.qfi, qfi))
+            }
+            PduSetInformationContainer::Other(_) => None,
+        }
+    }
+
     pub(crate) fn decode(content: &[u8]) -> Result<Self, Error> {
         match content.first() {
             Some(first) if first >> 4 == 0 => {

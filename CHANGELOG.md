@@ -44,6 +44,10 @@ First release.
   Container with the downlink PDU Set Information of TS 38.415 §6.5.2. A
   header of another type is kept as its octets. `examples/handover.rs` has
   the headers of a handover.
+- What has a getter has a setter: `Packet::pdu_session_container_mut`,
+  `Packet::set_qfi`, `PduSessionContainer::set_qfi`,
+  `PduSetInformationContainer::set_qfi` and
+  `Packet::set_information_elements`.
 - PDU Session Container (TS 38.415 V19.1.0 §5.5.2): downlink and uplink
   PDU Session Information with their QoS monitoring, sequence number, delay
   and congestion fields, and the uplink UL and DL Available Bitrate; new IEs

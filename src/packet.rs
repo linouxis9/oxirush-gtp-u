@@ -142,10 +142,28 @@ impl<P: AsRef<[u8]>> Packet<P> {
             })
     }
 
+    /// The PDU Session Container, if the message has one, to change it.
+    pub fn pdu_session_container_mut(&mut self) -> Option<&mut PduSessionContainer> {
+        self.extension_headers
+            .iter_mut()
+            .find_map(|header| match header {
+                ExtensionHeader::PduSessionContainer(container) => Some(container),
+                _ => None,
+            })
+    }
+
     /// The QoS Flow Identifier of the PDU Session Container, if any.
     pub fn qfi(&self) -> Option<u8> {
         self.pdu_session_container()
             .and_then(PduSessionContainer::qfi)
+    }
+
+    /// Give the PDU Session Container QoS flow `qfi` and return the former
+    /// one, as [`PduSessionContainer::set_qfi`] does: `None`, and nothing
+    /// changes, if the message has no container with a QFI. The encoder
+    /// refuses a QFI above 63.
+    pub fn set_qfi(&mut self, qfi: u8) -> Option<u8> {
+        self.pdu_session_container_mut()?.set_qfi(qfi)
     }
 }
 
@@ -215,6 +233,17 @@ impl Packet {
         let mut packet = Self::new(message_type, 0, payload);
         packet.sequence = Some(sequence);
         packet
+    }
+
+    /// Make `elements` the payload, as the content of a signalling message,
+    /// which [`information_elements`](Packet::information_elements) reads.
+    /// On an error the payload stays as it was.
+    pub fn set_information_elements(
+        &mut self,
+        elements: &[InformationElement],
+    ) -> Result<(), Error> {
+        self.payload = InformationElement::encode_all(elements)?;
+        Ok(())
     }
 
     /// Decode one GTP-U message, the whole payload of a UDP datagram.
@@ -459,6 +488,65 @@ mod tests {
             .chunks(2)
             .map(|pair| pair[0] << 4 | pair[1])
             .collect()
+    }
+
+    /// An uplink G-PDU that go-gtp v0.8.12 made, whose TEID and QFI a
+    /// program changes before it sends it again.
+    #[test]
+    fn what_has_a_getter_has_a_setter() {
+        let wire = hex(
+            "34ff0029 11223344 00000085 01100900 45000021 00004000 40116e9c \
+             0a2d0002 c0000201 0fa00007 000de02a 68656c6c 6f",
+        );
+        let mut packet = Packet::decode(&wire).unwrap();
+        packet.teid = 0x5566_7788;
+        assert_eq!(packet.set_qfi(5), Some(9));
+        assert_eq!(packet.qfi(), Some(5));
+        let mut changed = wire.clone();
+        changed[4..8].copy_from_slice(&[0x55, 0x66, 0x77, 0x88]);
+        changed[14] = 5;
+        assert_eq!(packet.encode().unwrap(), changed);
+        // The container itself, as its getter gives it.
+        if let Some(PduSessionContainer::Uplink(information)) = packet.pdu_session_container_mut() {
+            information.qfi = 7;
+            information.ul_qfi_sequence_number = Some(3);
+        }
+        assert_eq!(packet.qfi(), Some(7));
+        assert_eq!(
+            packet.pdu_session_container().unwrap(),
+            &PduSessionContainer::Uplink({
+                let mut information = UplinkPduSessionInformation::new(7);
+                information.ul_qfi_sequence_number = Some(3);
+                information
+            })
+        );
+        // A message without a container, and a container of another type,
+        // have no QFI to change.
+        let mut plain = Packet::g_pdu(1, vec![0x45]);
+        assert_eq!(plain.set_qfi(5), None);
+        assert_eq!(plain, Packet::g_pdu(1, vec![0x45]));
+        let mut other = PduSessionContainer::Other(vec![0x20, 0]);
+        assert_eq!(other.set_qfi(5), None);
+        let mut downlink = PduSessionContainer::downlink(1);
+        assert_eq!(downlink.set_qfi(2), Some(1));
+        assert_eq!(downlink.qfi(), Some(2));
+        let mut pdu_set = PduSetInformationContainer::Downlink(DownlinkPduSetInformation::new(3));
+        assert_eq!(pdu_set.set_qfi(4), Some(3));
+        assert_eq!(pdu_set.qfi(), Some(4));
+        // A signalling message's elements, as `information_elements` reads them.
+        let mut indication = Packet::new(MessageType::ERROR_INDICATION, 0, Vec::new());
+        let elements = [
+            InformationElement::TeidDataI(0x1001),
+            InformationElement::GtpUPeerAddress(Ipv4Addr::new(192, 0, 2, 1).into()),
+        ];
+        indication.set_information_elements(&elements).unwrap();
+        assert_eq!(indication.information_elements().unwrap(), elements);
+        let refused = [InformationElement::OtherTv {
+            kind: InformationElementType::RECOVERY,
+            value: vec![0],
+        }];
+        assert!(indication.set_information_elements(&refused).is_err());
+        assert_eq!(indication.information_elements().unwrap(), elements);
     }
 
     /// An extension header whose length octet says that it has none.
