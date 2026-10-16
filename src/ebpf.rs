@@ -70,6 +70,12 @@
 //! - `encap`, at the far end of the stage, writes the IPv4, UDP and GTP-U
 //!   headers, with the PDU Session Container of an N3 tunnel, and sends the
 //!   G-PDU out of the N3 interface. The G-PDU is the one the codec encodes.
+//!   Its IPv4 header has DSCP 0, a TTL of 64, Don't Fragment and an
+//!   identification of 0, and its UDP header port 2152 at both ends, as
+//!   what the endpoint's socket sends but for the identification; its mark
+//!   is 0 as theirs, whatever the inner packet's. Its UDP checksum is 0,
+//!   where the socket's has one: IPv4 allows it, and TS 29.281 §4.4.2.0
+//!   asks for a checksum over IPv6 only.
 //! - `decap`, at the ingress of the N3 interface, delivers the G-PDUs of
 //!   short-cut tunnels to their TUN. It checks their IPv4 header as Linux
 //!   does before it delivers a datagram, its checksum and its total length,

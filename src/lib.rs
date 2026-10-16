@@ -140,6 +140,7 @@
 //! | A UPF for real traffic | The test UPF serves the sessions that calls give it, with an echo service or a TUN. It has no PFCP, QoS or charging. |
 //! | Other GTP | GTP' and the versions 0 and 2 are refused, as `UnsupportedVersion`. |
 //! | IPv6 in the helpers, the TUN routing and the fast path | They are IPv4. The codec and the endpoint carry any payload, and an endpoint binds an IPv4 or an IPv6 address. |
+//! | Transport QoS and load balancing | Every G-PDU, through the socket or the fast path, has DSCP 0 and source port 2152. TS 29.281 §4.4.1 asks for the DSCP of the QoS flow's 5QI, which a call does not give, and §4.4.2.0 for source ports that vary, which one socket cannot have. |
 //! | Portability | `tun` and `ebpf` are Linux only, and `ebpf` adds nothing on 32-bit x86, which aya does not build for. |
 //!
 //! # Terms
