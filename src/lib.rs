@@ -176,6 +176,7 @@
 //! ├── ie.rs, error.rs         information elements and codec errors
 //! ├── ipv4.rs, icmp.rs        inner IPv4 UDP and ICMP Echo packets
 //! ├── datagram.rs, path.rs    shared UDP receive and path management (endpoint)
+//! ├── limit.rs               the limits of replies and log lines (endpoint)
 //! ├── endpoint.rs            gNB endpoint and forwarding (endpoint)
 //! ├── endpoint/routes.rs     tunnel identity, route indexes and TUNs (endpoint)
 //! ├── stats.rs               receive/drop counters (endpoint)
@@ -216,6 +217,8 @@ mod datagram;
 pub mod ebpf;
 #[cfg(feature = "endpoint")]
 mod endpoint;
+#[cfg(feature = "endpoint")]
+mod limit;
 #[cfg(all(target_os = "linux", feature = "tun"))]
 #[allow(unsafe_code)]
 mod netlink;

@@ -4,18 +4,29 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use tokio::net::UdpSocket;
-use tracing::{debug, warn};
+use tracing::debug;
 
+use crate::datagram::DatagramSocket;
+use crate::limit::limited;
 use crate::{Cause, ExtensionHeader, InformationElement, MessageType, PORT, Packet};
 
 #[derive(Debug)]
 enum PathAction {
     Forward,
     Discard(&'static str),
+    /// An Echo Response, which a peer's path management depends on: it is
+    /// not limited, and is no longer than the request.
     Reply {
         packet: Packet,
         to: SocketAddr,
         discard_reason: Option<&'static str>,
+    },
+    /// A Supported Extension Headers Notification, within the limit of the
+    /// replies that a peer causes without a tunnel.
+    Notify {
+        packet: Packet,
+        to: SocketAddr,
+        discard_reason: &'static str,
     },
 }
 
@@ -24,14 +35,22 @@ enum PathAction {
 /// G-PDU with a Supported Extension Headers Notification (TS 29.281
 /// §5.2.1). Returns whether `packet` needs nothing else.
 pub(crate) async fn answer<P: AsRef<[u8]>>(
-    socket: &UdpSocket,
+    socket: &DatagramSocket,
     packet: &Packet<P>,
     from: SocketAddr,
 ) -> bool {
+    let discarded = |reason| {
+        limited!(
+            WARN,
+            socket.notices(),
+            discarded,
+            "GTP-U: dropped a message from {from}: {reason}"
+        );
+    };
     match classify(packet, from) {
         PathAction::Forward => false,
         PathAction::Discard(reason) => {
-            warn!("GTP-U: dropped a message from {from}: {reason}");
+            discarded(reason);
             true
         }
         PathAction::Reply {
@@ -40,9 +59,18 @@ pub(crate) async fn answer<P: AsRef<[u8]>>(
             discard_reason,
         } => {
             if let Some(reason) = discard_reason {
-                warn!("GTP-U: dropped a message from {from}: {reason}");
+                discarded(reason);
             }
-            send(socket, &packet, to).await;
+            send(socket.udp(), &packet, to).await;
+            true
+        }
+        PathAction::Notify {
+            packet,
+            to,
+            discard_reason,
+        } => {
+            discarded(discard_reason);
+            socket.send_limited(&packet, to).await;
             true
         }
     }
@@ -62,10 +90,10 @@ fn classify<P: AsRef<[u8]>>(packet: &Packet<P>, from: SocketAddr) -> PathAction 
             // one of them is delivered with it.
             let notification =
                 Packet::supported_extension_headers_notification(&ExtensionHeader::TYPES);
-            return PathAction::Reply {
+            return PathAction::Notify {
                 packet: notification,
                 to: user_plane_port(from),
-                discard_reason: Some(reason),
+                discard_reason: reason,
             };
         }
         return PathAction::Discard(reason);
@@ -108,9 +136,9 @@ fn classify<P: AsRef<[u8]>>(packet: &Packet<P>, from: SocketAddr) -> PathAction 
 /// A complete Echo Request with an inconsistent GTP length still receives
 /// an error response (TS 29.281 section 9.1, TS 29.060 section 11.1.2).
 /// Truncated headers and unsupported versions are silently discarded.
-pub(crate) async fn answer_length_error(socket: &UdpSocket, bytes: &[u8], from: SocketAddr) {
+pub(crate) async fn answer_length_error(socket: &DatagramSocket, bytes: &[u8], from: SocketAddr) {
     if let Some(response) = length_error_response(bytes) {
-        send(socket, &response, from).await;
+        send(socket.udp(), &response, from).await;
     }
 }
 
@@ -146,25 +174,30 @@ fn echo_error_response(sequence: u16) -> Packet {
     response
 }
 
-/// Answer a G-PDU with TEID `teid`, which has no tunnel here, with an
-/// Error Indication (TS 29.281 §7.3.1). It goes to port 2152 of the
-/// sender (§4.4.2.4), so it carries the G-PDU's UDP source port.
-pub(crate) async fn error_indication(socket: &UdpSocket, teid: u32, from: SocketAddr) {
+/// The Error Indication that answers a G-PDU with TEID `teid` from `from`,
+/// which has no tunnel here (TS 29.281 §7.3.1), and where it goes: port
+/// 2152 of the sender (§4.4.2.4), so it carries the G-PDU's UDP source
+/// port. None for TEID 0, which gets none.
+pub(crate) fn error_indication(
+    socket: &UdpSocket,
+    teid: u32,
+    from: SocketAddr,
+) -> Option<(Packet, SocketAddr)> {
     if teid == 0 {
-        return;
+        return None;
     }
     let Ok(local) = socket
         .local_addr()
         .map(|address| address.ip().to_canonical())
     else {
         debug!("GTP-U: no local address toward {from} for an Error Indication");
-        return;
+        return None;
     };
     let mut indication = Packet::error_indication(teid, local);
     indication
         .extension_headers
         .push(ExtensionHeader::UdpPort(from.port()));
-    send(socket, &indication, user_plane_port(from)).await;
+    Some((indication, user_plane_port(from)))
 }
 
 /// Port 2152 of `address`, where Error Indication and Supported Extension
@@ -175,7 +208,7 @@ fn user_plane_port(mut address: SocketAddr) -> SocketAddr {
     address
 }
 
-async fn send(socket: &UdpSocket, packet: &Packet, to: SocketAddr) {
+pub(crate) async fn send(socket: &UdpSocket, packet: &Packet, to: SocketAddr) {
     let Ok(bytes) = packet.encode() else {
         return;
     };
@@ -254,17 +287,12 @@ mod tests {
             content: vec![0, 0],
         });
         match classify(&packet, from) {
-            PathAction::Reply {
-                packet,
-                to,
-                discard_reason,
-            } => {
+            PathAction::Notify { packet, to, .. } => {
                 assert_eq!(to, user_plane_port(from));
                 assert_eq!(
                     packet.message_type,
                     MessageType::SUPPORTED_EXTENSION_HEADERS_NOTIFICATION
                 );
-                assert!(discard_reason.is_some());
             }
             other => panic!("unexpected action: {other:?}"),
         }

@@ -155,7 +155,10 @@ Error Indication for RAN UE 1 session 5: [TeidDataI(0x00001001), GtpUPeerAddress
 ```
 
 An endpoint also sends an Error Indication for a G-PDU on a TEID that it
-does not have.
+does not have, 100 a second at most after a burst of 100: whoever reaches
+the socket can send such G-PDUs. `stats()` counts the replies that were not
+sent, the G-PDUs on unknown TEIDs and the Error Indications that name no
+tunnel.
 
 ## Read and write extension headers
 

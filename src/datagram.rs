@@ -6,8 +6,8 @@ use std::sync::atomic::Ordering;
 
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc::{Sender, error::TrySendError};
-use tracing::debug;
 
+use crate::limit::{Notices, limited};
 use crate::path;
 use crate::stats::Counters;
 use crate::{Packet, ReceiveStats};
@@ -18,6 +18,8 @@ pub(crate) struct DatagramSocket {
     socket: UdpSocket,
     ipv6: bool,
     counters: Counters,
+    /// The limits of what a peer can make this socket send and log.
+    notices: Notices,
 }
 
 impl DatagramSocket {
@@ -34,7 +36,20 @@ impl DatagramSocket {
             socket,
             ipv6,
             counters: Counters::default(),
+            notices: Notices::new(),
         })
+    }
+
+    pub(crate) fn udp(&self) -> &UdpSocket {
+        &self.socket
+    }
+
+    pub(crate) fn notices(&self) -> &Notices {
+        &self.notices
+    }
+
+    pub(crate) fn counters(&self) -> &Counters {
+        &self.counters
     }
 
     pub(crate) fn local_addr(&self) -> io::Result<SocketAddr> {
@@ -68,12 +83,17 @@ impl DatagramSocket {
                 self.counters
                     .malformed_datagrams
                     .fetch_add(1, Ordering::Relaxed);
-                debug!("GTP-U dropped a malformed message from {from}: {error}");
-                path::answer_length_error(&self.socket, &buffer[..size], from).await;
+                limited!(
+                    DEBUG,
+                    &self.notices,
+                    malformed,
+                    "GTP-U dropped a malformed message from {from}: {error}"
+                );
+                path::answer_length_error(self, &buffer[..size], from).await;
                 return Ok(None);
             }
         };
-        if path::answer(&self.socket, &packet, from).await {
+        if path::answer(self, &packet, from).await {
             self.counters.path_messages.fetch_add(1, Ordering::Relaxed);
             return Ok(None);
         }
@@ -105,8 +125,29 @@ impl DatagramSocket {
         self.socket.try_send_to(bytes, to)
     }
 
-    pub(crate) async fn error_indication(&self, teid: u32, from: SocketAddr) {
-        path::error_indication(&self.socket, teid, self.destination(from)).await;
+    /// A G-PDU on `teid` from `from`, which has no tunnel here: count it,
+    /// and answer it with an Error Indication within the limit of replies.
+    pub(crate) async fn unknown_teid(&self, teid: u32, from: SocketAddr) {
+        self.counters
+            .unknown_teid_g_pdus
+            .fetch_add(1, Ordering::Relaxed);
+        if let Some((indication, to)) =
+            path::error_indication(&self.socket, teid, self.destination(from))
+        {
+            self.send_limited(&indication, to).await;
+        }
+    }
+
+    /// Send a reply that a peer causes without a tunnel, unless it is past
+    /// the limit of such replies, where it is counted.
+    pub(crate) async fn send_limited(&self, packet: &Packet, to: SocketAddr) {
+        if self.notices.replies.allow(self.notices.now()) {
+            path::send(&self.socket, packet, to).await;
+        } else {
+            self.counters
+                .suppressed_replies
+                .fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     /// Reserve first so a dropped observation does not copy its borrowed payload.

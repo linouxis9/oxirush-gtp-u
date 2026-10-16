@@ -73,6 +73,16 @@ First release.
   send, costs with 100 000 tunnels what it costs with 1 000. Of several
   tunnels to one TEID of a peer, the Error Indication is delivered for the
   first by RAN UE and session.
+- What a peer without a tunnel can make an endpoint or the test UPF send
+  and log has a limit. Error Indications and Supported Extension Headers
+  Notifications go out at 100 a second after a burst of 100, so that the
+  peer of a removed tunnel still gets one for its next G-PDUs, as TS 29.281
+  §7.3.1 has it, and a flood does not make the socket a reflector. A line
+  that a peer causes is logged once a second at most for each kind, with
+  the number not logged. Echo Responses are not limited. `ReceiveStats`
+  counts the G-PDUs on unknown TEIDs, the Error Indications that name no
+  tunnel, the messages that the endpoint or the test UPF does not take, and
+  the replies not sent.
 - Endpoint and test-UPF binding require a specific local IP address;
   wildcard addresses return `InvalidInput` to preserve reply source addresses.
   TUN attachment and session replacement check the session's identity so a
@@ -227,6 +237,12 @@ revision `ac3a019` for a program that uses the crate:
   returned nothing and panicked for a QFI above 63: `set_session(..)?`.
   `Session::new` no longer panics for one: the session is refused where it
   is given.
+- An `Endpoint` and the test UPF answered every G-PDU on a TEID without a
+  tunnel with an Error Indication, and every message with an unknown header
+  that must be understood with a notification, and logged a line for each
+  at DEBUG or WARN. Past 100 replies a second they send none and count them
+  in `ReceiveStats::suppressed_replies`, and they log a line once a second
+  for each kind.
 - `Packet` is `Debug` for a payload that is `AsRef<[u8]>`, where it was for
   one that is `Debug`. What `Debug` prints changed for `Packet`,
   `ExtensionHeader`, `PduSessionContainer`, `UnknownNewIes`,

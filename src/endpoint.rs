@@ -8,10 +8,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::sync::mpsc;
 use tokio::task::{AbortHandle, JoinHandle};
-use tracing::{debug, trace};
+#[cfg(all(target_os = "linux", feature = "tun"))]
+use tracing::debug;
+use tracing::trace;
 
 use crate::ReceiveStats;
 use crate::datagram::DatagramSocket;
+use crate::limit::limited;
 #[cfg(all(target_os = "linux", feature = "tun"))]
 use crate::tun::{TunConfig, TunPort};
 use crate::types::Teid;
@@ -144,6 +147,19 @@ pub struct ReceivedPacket {
 /// requires. A slow receiver never delays these replies: past 256 queued
 /// messages new ones are dropped and counted, and a dropped receiver changes
 /// nothing else.
+///
+/// A peer needs no tunnel to cause the last two replies, so the socket sends
+/// 100 of them a second at most, after a burst of 100; past that a reply is
+/// not sent and is counted in
+/// [`suppressed_replies`](ReceiveStats::suppressed_replies). The peer of a
+/// removed tunnel still gets an Error Indication for its next G-PDUs, which
+/// is what TS 29.281 §7.3.1 has it for: the clause expects such a defence
+/// against denial of service, for which it gives the Error Indication its
+/// UDP Port header. Echo Responses are not limited: a peer's path
+/// management depends on them, and each is no longer than its request. A
+/// line that a peer causes, such as for a G-PDU on an unknown TEID, is
+/// logged once a second at most for each kind, with the number of those
+/// that were not.
 ///
 /// Bind a specific address: a wildcard is refused with `InvalidInput`, so that
 /// replies leave from the address the request reached. Bind port 2152 to
@@ -549,31 +565,59 @@ async fn receive(
             packet.teid,
             packet.payload.len()
         );
+        let (notices, counters) = (socket.notices(), socket.counters());
         let key = match packet.message_type {
             MessageType::G_PDU | MessageType::END_MARKER => {
                 let found = routes.session(packet.teid);
                 match found {
                     Some(key) => key,
                     None if packet.message_type == MessageType::G_PDU => {
-                        debug!(
+                        limited!(
+                            DEBUG,
+                            notices,
+                            unknown_teid,
                             "N3 G-PDU for unknown TEID {:#010x} from {from}",
                             packet.teid
                         );
-                        socket.error_indication(packet.teid, from).await;
+                        socket.unknown_teid(packet.teid, from).await;
                         continue;
                     }
-                    None => continue,
+                    None => {
+                        counters.ignored_messages.fetch_add(1, Ordering::Relaxed);
+                        limited!(
+                            DEBUG,
+                            notices,
+                            ignored,
+                            "N3 End Marker for unknown TEID {:#010x} from {from}",
+                            packet.teid
+                        );
+                        continue;
+                    }
                 }
             }
             MessageType::ERROR_INDICATION => match routes.error_indication_session(&packet) {
                 Some(key) => key,
                 None => {
-                    debug!("N3 Error Indication from {from} matches no tunnel");
+                    counters
+                        .unmatched_error_indications
+                        .fetch_add(1, Ordering::Relaxed);
+                    limited!(
+                        DEBUG,
+                        notices,
+                        error_indication,
+                        "N3 Error Indication from {from} matches no tunnel"
+                    );
                     continue;
                 }
             },
             message_type => {
-                debug!("N3 ignored message type {message_type} from {from}");
+                counters.ignored_messages.fetch_add(1, Ordering::Relaxed);
+                limited!(
+                    DEBUG,
+                    notices,
+                    ignored,
+                    "N3 ignored message type {message_type} from {from}"
+                );
                 continue;
             }
         };
@@ -588,7 +632,13 @@ async fn receive(
         #[cfg(all(target_os = "linux", feature = "tun"))]
         if let Some(port) = tun {
             if let Err(error) = port.send(packet.payload).await {
-                debug!("N3 TUN {} write failed: {error}", port.name());
+                limited!(
+                    DEBUG,
+                    socket.notices(),
+                    tun,
+                    "N3 TUN {} write failed: {error}",
+                    port.name()
+                );
             }
             continue;
         }

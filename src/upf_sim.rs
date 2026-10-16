@@ -25,12 +25,14 @@ use std::fmt;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
 use tokio::task::{AbortHandle, JoinHandle};
-use tracing::{debug, warn};
+use tracing::warn;
 
 use crate::datagram::DatagramSocket;
+use crate::limit::limited;
 #[cfg(all(target_os = "linux", feature = "tun"))]
 use crate::tun::{TunConfig, TunPort};
 use crate::types::Teid;
@@ -107,10 +109,11 @@ impl fmt::Debug for UplinkPacket {
 /// A test UPF on one N3 socket.
 ///
 /// A task answers Echo Requests, sends an Error Indication for a G-PDU on
-/// an unknown uplink TEID, and passes a session's uplink T-PDUs to N6: its
-/// TUN if it has one, else the echo service, which reflects IPv4 UDP and
-/// ICMP Echo Request packets. The TEID alone identifies a session, whatever
-/// address the gNB sends from. Clones share the socket and sessions; the
+/// an unknown uplink TEID, within the limit of an
+/// [`Endpoint`](crate::Endpoint), and passes a session's uplink T-PDUs to
+/// N6: its TUN if it has one, else the echo service, which reflects IPv4
+/// UDP and ICMP Echo Request packets. The TEID alone identifies a session,
+/// whatever address the gNB sends from. Clones share the socket and sessions; the
 /// task stops and the TUNs close when the last clone is dropped. Must be
 /// used within a Tokio runtime.
 ///
@@ -488,34 +491,51 @@ async fn receive(
                 return Err(error);
             }
         };
+        let (notices, counters) = (socket.notices(), socket.counters());
         match packet.message_type {
             MessageType::G_PDU => {}
             MessageType::ERROR_INDICATION => {
-                debug!(
+                counters.ignored_messages.fetch_add(1, Ordering::Relaxed);
+                limited!(
+                    DEBUG,
+                    notices,
+                    error_indication,
                     "UPF got an Error Indication from {from}: {:?}",
                     packet.information_elements()
                 );
                 continue;
             }
             message_type => {
-                debug!("UPF ignored message type {message_type} from {from}");
+                counters.ignored_messages.fetch_add(1, Ordering::Relaxed);
+                limited!(
+                    DEBUG,
+                    notices,
+                    ignored,
+                    "UPF ignored message type {message_type} from {from}"
+                );
                 continue;
             }
         }
         let Some(target) = state.uplink_target(packet.teid) else {
-            debug!(
+            limited!(
+                DEBUG,
+                notices,
+                unknown_teid,
                 "UPF G-PDU for unknown TEID {:#010x} from {from}",
                 packet.teid
             );
-            socket.error_indication(packet.teid, from).await;
+            socket.unknown_teid(packet.teid, from).await;
             continue;
         };
-        if !write_to_tun(&target, packet.payload).await
+        if !write_to_tun(&socket, &target, packet.payload).await
             && let Some(reply) = echo_service(packet.payload)
             && let Err(error) =
                 send_downlink(&socket, &state, packet.teid, &target.incarnation, reply).await
         {
-            debug!(
+            limited!(
+                DEBUG,
+                notices,
+                echo,
                 "UPF echo reply on uplink TEID {:#010x} failed: {error}",
                 packet.teid
             );
@@ -530,7 +550,7 @@ async fn receive(
 
 /// Write an uplink T-PDU to its session's TUN; false if it has none.
 #[cfg(all(target_os = "linux", feature = "tun"))]
-async fn write_to_tun(target: &UplinkTarget, packet: &[u8]) -> bool {
+async fn write_to_tun(socket: &DatagramSocket, target: &UplinkTarget, packet: &[u8]) -> bool {
     let Some(port) = &target.port else {
         return false;
     };
@@ -538,13 +558,19 @@ async fn write_to_tun(target: &UplinkTarget, packet: &[u8]) -> bool {
     if !packet.is_empty()
         && let Err(error) = port.send(packet).await
     {
-        warn!("UPF TUN {} write failed: {error}", port.name());
+        limited!(
+            WARN,
+            socket.notices(),
+            tun,
+            "UPF TUN {} write failed: {error}",
+            port.name()
+        );
     }
     true
 }
 
 #[cfg(not(all(target_os = "linux", feature = "tun")))]
-async fn write_to_tun(_target: &UplinkTarget, _packet: &[u8]) -> bool {
+async fn write_to_tun(_socket: &DatagramSocket, _target: &UplinkTarget, _packet: &[u8]) -> bool {
     false
 }
 

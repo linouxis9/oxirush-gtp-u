@@ -14,6 +14,18 @@ pub struct ReceiveStats {
     pub queue_full_drops: u64,
     /// Messages discarded because the application's receiver was closed.
     pub receiver_closed_drops: u64,
+    /// G-PDUs on a TEID that has no tunnel or session, each answered with
+    /// an Error Indication within the limit of replies, but for TEID 0.
+    pub unknown_teid_g_pdus: u64,
+    /// Error Indications that name no tunnel of an endpoint.
+    pub unmatched_error_indications: u64,
+    /// Messages that the endpoint or the test UPF does not take: End
+    /// Markers on a TEID without a tunnel, the test UPF's Error Indications
+    /// and End Markers, and messages of other types.
+    pub ignored_messages: u64,
+    /// Error Indications and Supported Extension Headers Notifications not
+    /// sent: past 100 a second, after a burst of 100.
+    pub suppressed_replies: u64,
 }
 
 #[derive(Default)]
@@ -23,6 +35,10 @@ pub(crate) struct Counters {
     pub(crate) path_messages: AtomicU64,
     pub(crate) queue_full_drops: AtomicU64,
     pub(crate) receiver_closed_drops: AtomicU64,
+    pub(crate) unknown_teid_g_pdus: AtomicU64,
+    pub(crate) unmatched_error_indications: AtomicU64,
+    pub(crate) ignored_messages: AtomicU64,
+    pub(crate) suppressed_replies: AtomicU64,
 }
 
 impl Counters {
@@ -33,6 +49,10 @@ impl Counters {
             path_messages: self.path_messages.load(Ordering::Relaxed),
             queue_full_drops: self.queue_full_drops.load(Ordering::Relaxed),
             receiver_closed_drops: self.receiver_closed_drops.load(Ordering::Relaxed),
+            unknown_teid_g_pdus: self.unknown_teid_g_pdus.load(Ordering::Relaxed),
+            unmatched_error_indications: self.unmatched_error_indications.load(Ordering::Relaxed),
+            ignored_messages: self.ignored_messages.load(Ordering::Relaxed),
+            suppressed_replies: self.suppressed_replies.load(Ordering::Relaxed),
         }
     }
 }
