@@ -411,7 +411,11 @@ impl<P: AsRef<[u8]>> Packet<P> {
             length = length.saturating_add(OPTIONAL_LEN);
         }
         for header in &self.extension_headers {
-            length = length.saturating_add(header.encoded_len()?);
+            let header = match header.usual() {
+                Some(_) => 4,
+                None => header.encoded_len()?,
+            };
+            length = length.saturating_add(header);
         }
         if length > usize::from(u16::MAX) {
             return Err(Error::OutOfRange {
@@ -449,7 +453,11 @@ impl<P: AsRef<[u8]>> Packet<P> {
         }
         for (index, header) in self.extension_headers.iter().enumerate() {
             let next = self.extension_headers.get(index + 1).map_or(0, kind);
-            header.encode(next, out)?;
+            match header.usual() {
+                // Its length, its content and the type of the next header.
+                Some([first, second]) => out.extend_from_slice(&[1, first, second, next]),
+                None => header.encode(next, out)?,
+            }
         }
         out.extend_from_slice(payload);
         let length = (length - MANDATORY_LEN) as u16;
