@@ -1,6 +1,8 @@
 //! The indexes of the endpoint's tunnel registry, and the tunnels' TUNs.
 
+use std::collections::hash_map::RandomState;
 use std::collections::{BTreeSet, HashMap};
+use std::hash::BuildHasher;
 use std::io;
 use std::net::IpAddr;
 use std::sync::Mutex;
@@ -79,19 +81,45 @@ struct Routes {
     by_remote: BTreeSet<(RemoteKey, SessionKey)>,
     /// The tunnels in the order of their RAN UE, to remove those of one.
     by_ran: BTreeSet<SessionKey>,
-    last_teid: u32,
+    teids: Teids,
     /// The TUNs of the tunnels that have one.
     tuns: HashMap<SessionKey, TunAttachment>,
 }
 
+/// Where local TEIDs come from. The TEID alone identifies a tunnel, so one
+/// that a peer could guess from another, as 1, 2, 3 are, lets whoever
+/// reaches the socket send on the tunnels of others: each TEID is a keyed
+/// hash (SipHash) of a count, under a key of the endpoint's own, chosen at
+/// random.
+#[derive(Default)]
+struct Teids {
+    key: RandomState,
+    drawn: u64,
+}
+
+impl Teids {
+    fn next(&mut self) -> u32 {
+        self.drawn += 1;
+        // The low half of the hash.
+        self.key.hash_one(self.drawn) as u32
+    }
+}
+
+/// The first of `candidates` that a local TEID can be: not 0 and not
+/// `live`.
+fn first_free(mut candidates: impl FnMut() -> u32, live: impl Fn(u32) -> bool) -> u32 {
+    loop {
+        let teid = candidates();
+        if teid != 0 && !live(teid) {
+            return teid;
+        }
+    }
+}
+
 impl Routes {
     fn allocate_teid(&mut self) -> u32 {
-        loop {
-            self.last_teid = self.last_teid.wrapping_add(1);
-            if self.last_teid != 0 && !self.by_teid.contains_key(&self.last_teid) {
-                return self.last_teid;
-            }
-        }
+        let by_teid = &self.by_teid;
+        first_free(|| self.teids.next(), |teid| by_teid.contains_key(&teid))
     }
 
     fn remove(&mut self, key: SessionKey) -> Option<Route> {
@@ -309,14 +337,43 @@ mod tests {
 
     #[test]
     fn teid_allocation_skips_zero_and_live_teids() {
-        let mut routes = Routes {
-            last_teid: u32::MAX - 2,
-            ..Routes::default()
+        let mut candidates = [0, 7, 9, 0, 9, 11].into_iter();
+        let live = |teid| teid == 7;
+        assert_eq!(first_free(|| candidates.next().unwrap(), live), 9);
+        assert_eq!(first_free(|| candidates.next().unwrap(), live), 9);
+        assert_eq!(first_free(|| candidates.next().unwrap(), live), 11);
+        // The next TEIDs of a table, of which the first two are in use.
+        let mut routes = Routes::default();
+        let mut copy = Teids {
+            key: routes.teids.key.clone(),
+            drawn: 0,
         };
-        routes.by_teid.insert(u32::MAX, (1, 1));
-        routes.by_teid.insert(1, (1, 2));
-        assert_eq!(routes.allocate_teid(), u32::MAX - 1);
-        assert_eq!(routes.allocate_teid(), 2);
+        let next: Vec<u32> = (0..3).map(|_| copy.next()).collect();
+        routes.by_teid.insert(next[0], (1, 1));
+        routes.by_teid.insert(next[1], (1, 2));
+        assert_eq!(routes.allocate_teid(), next[2]);
+    }
+
+    /// Whoever knows a TEID of an endpoint cannot tell another from it.
+    #[test]
+    fn local_teids_cannot_be_told_from_one_another() {
+        let teids = |table: &RouteTable| -> Vec<u32> {
+            (0..100)
+                .map(|session| table.install((1, session), remote("192.0.2.1:2152", 44), None))
+                .collect()
+        };
+        let (first, second) = (teids(&RouteTable::default()), teids(&RouteTable::default()));
+        assert_ne!(first[..3], [1, 2, 3]);
+        // Neither one after the other, nor what another endpoint gives.
+        let next = first
+            .windows(2)
+            .filter(|pair| pair[1] == pair[0].wrapping_add(1));
+        assert_eq!(next.count(), 0, "{first:x?}");
+        assert_ne!(first, second);
+        let mut unique = first.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), 100);
     }
 
     #[test]

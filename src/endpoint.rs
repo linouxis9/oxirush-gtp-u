@@ -123,7 +123,8 @@ pub struct ReceivedPacket {
 ///
 /// - [`install`](Self::install) sets up the tunnel of a RAN UE and PDU session
 ///   toward a remote TEID and returns the local TEID to give the peer; on an
-///   existing tunnel it updates the remote end and the QFI. A QFI above 63 is
+///   existing tunnel it updates the remote end and the QFI. Local TEIDs are
+///   drawn at random: one cannot be told from another. A QFI above 63 is
 ///   `InvalidInput`. [`install_s1u`](Self::install_s1u) does so for an eNB's
 ///   E-RAB, whose G-PDUs carry no PDU Session Container, and cannot fail.
 ///   [`install_with_teid`](Self::install_with_teid) takes a local TEID that

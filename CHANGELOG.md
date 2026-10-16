@@ -73,6 +73,9 @@ First release.
   send, costs with 100 000 tunnels what it costs with 1 000. Of several
   tunnels to one TEID of a peer, the Error Indication is delivered for the
   first by RAN UE and session.
+- The local TEIDs of an endpoint are drawn at random, a keyed hash of a
+  count: whoever knows one of them cannot tell another, where they were 1,
+  2, 3 and on, and the TEID alone identifies a tunnel.
 - What a peer without a tunnel can make an endpoint or the test UPF send
   and log has a limit. Error Indications and Supported Extension Headers
   Notifications go out at 100 a second after a burst of 100, so that the
@@ -237,6 +240,9 @@ revision `ac3a019` for a program that uses the crate:
   returned nothing and panicked for a QFI above 63: `set_session(..)?`.
   `Session::new` no longer panics for one: the session is refused where it
   is given.
+- The local TEIDs that `Endpoint::install` and `install_s1u` return were
+  1, 2, 3 and on, and are drawn at random: a program that expected the
+  first to be 1 no longer finds it.
 - An `Endpoint` and the test UPF answered every G-PDU on a TEID without a
   tunnel with an Error Indication, and every message with an unknown header
   that must be understood with a notification, and logged a line for each
