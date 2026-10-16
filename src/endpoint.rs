@@ -82,7 +82,9 @@ pub struct ReceivedPacket {
 /// A task answers Echo Requests, sends an Error Indication for a G-PDU on
 /// an unknown TEID and a Supported Extension Headers Notification for an
 /// unsupported comprehension-required extension header, and delivers the
-/// tunnels' messages. As in TS 29.281, the TEID alone identifies a tunnel:
+/// tunnels' messages, with every extension header that
+/// [`ExtensionHeader`](crate::ExtensionHeader) has a variant for: those of
+/// a handover and of the RAN protocols among them. As in TS 29.281, the TEID alone identifies a tunnel:
 /// peers may send from another address than their F-TEID's. GTP-U has no
 /// authentication, so whoever reaches the socket can send on a tunnel or
 /// report an Error Indication for it. Clones share
@@ -417,7 +419,8 @@ impl Endpoint {
     /// into the TUN goes into the tunnel, and the IP packets of the
     /// tunnel's G-PDUs go to Linux. The receiver of [`bind`](Self::bind)
     /// no longer gets these G-PDUs; it still gets the tunnel's End Markers
-    /// and Error Indications.
+    /// and Error Indications, and a G-PDU that has no packet, only its
+    /// extension headers.
     ///
     /// The TUN closes with its tunnel: on [`remove`](Self::remove),
     /// [`remove_ran`](Self::remove_ran) and [`shutdown`](Self::shutdown),
@@ -575,10 +578,12 @@ async fn receive(
                 continue;
             }
         };
-        // A tunnel's IP packets go to its TUN, if it has one.
+        // A tunnel's IP packets go to its TUN, if it has one. A G-PDU
+        // without a T-PDU has only its extension headers to give, such as
+        // a frame of a RAN protocol: it goes to the receiver.
         #[cfg(all(target_os = "linux", feature = "tun"))]
         let tun = match packet.message_type {
-            MessageType::G_PDU => routes.tun(key),
+            MessageType::G_PDU if !packet.payload.is_empty() => routes.tun(key),
             _ => None,
         };
         #[cfg(all(target_os = "linux", feature = "tun"))]

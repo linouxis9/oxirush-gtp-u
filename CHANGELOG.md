@@ -36,6 +36,14 @@ First release.
   sets no limit and its types make eight at most, and a datagram that is
   nothing but headers, of which it holds more than 16 000, is refused at
   its seventeenth, as `Error::TooManyExtensionHeaders`.
+- Every extension header of TS 29.281 V19.2.0 §5.2.2 has a variant of
+  `ExtensionHeader`: the UDP Port, the PDU Session Container, the PDCP PDU
+  Number and the Long PDCP PDU Number of a handover, the Service Class
+  Indicator, the RAN Container, the Xw RAN Container and the NR RAN
+  Container, whose frames stay octets, and the PDU Set Information
+  Container with the downlink PDU Set Information of TS 38.415 §6.5.2. A
+  header of another type is kept as its octets. `examples/handover.rs` has
+  the headers of a handover.
 - PDU Session Container (TS 38.415 V18 §5.5.2): downlink and uplink PDU
   Session Information with their QoS monitoring, sequence number, delay and
   congestion fields; new IEs of later releases are kept as received. A test
@@ -49,7 +57,9 @@ First release.
   sends Error Indication and Supported Extension Headers Notification to
   port 2152, and delivers G-PDUs, End Markers and the peer's Error
   Indications with their source address; the TEID alone identifies a
-  tunnel. `install_s1u` gives an eNB's S1-U tunnels, without a PDU Session
+  tunnel. A G-PDU is delivered with every extension header that has a
+  variant, so with those of a handover and of the RAN protocols, and one
+  without a packet goes to the receiver of a tunnel that has a TUN. `install_s1u` gives an eNB's S1-U tunnels, without a PDU Session
   Container. `install` returns an `io::Result`: a QFI above 63 is
   `InvalidInput`, as with `install_with_teid`.
 - An endpoint finds the tunnel that an Error Indication names, and the
@@ -186,6 +196,23 @@ revision `ac3a019` for a program that uses the crate:
     where it was `OtherTv { kind: 1, value }`, which the encoder now
     refuses. The Echo Response to an Echo Request that is not well formed
     has `Cause::INVALID_MESSAGE_FORMAT`.
+- `ExtensionHeader` has variants for the types that it kept as
+  `Other { kind, content }`: `PdcpPduNumber(u16)` (0xc0),
+  `LongPdcpPduNumber { number, legacy_type }` (0x03, and 0x82 with
+  `legacy_type`), `ServiceClassIndicator(u8)` (0x20), `RanContainer`,
+  `XwRanContainer` and `NrRanContainer` with the octets that were the
+  `content` (0x81, 0x83, 0x84), and `PduSetInformationContainer {
+  information, legacy_type }` (0x04, and 0x86). A message with one of these
+  decodes to its variant, and the encoder refuses the type as `Other`. A
+  PDCP PDU Number, a Long PDCP PDU Number or a Service Class Indicator of
+  another length than its own is an error, where any length was kept, and
+  the spare bits of the last two are not kept.
+- An `Endpoint` and the test UPF refused a message whose PDCP PDU Number,
+  RAN, Xw RAN or NR RAN Container, or Long PDCP PDU Number or PDU Set
+  Information Container of the earlier type, they did not know, and
+  answered a G-PDU with a Supported Extension Headers Notification. They
+  deliver it, and the notification lists the eleven types
+  (`ExtensionHeader::TYPES`).
 - `Packet` is `Debug` for a payload that is `AsRef<[u8]>`, where it was for
   one that is `Debug`. What `Debug` prints changed for `Packet`,
   `ExtensionHeader`, `PduSessionContainer`, `UnknownNewIes`,

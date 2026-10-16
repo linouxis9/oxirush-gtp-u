@@ -67,10 +67,17 @@
 //! headers and the payload. There are constructors for G-PDU, Echo Request and
 //! Response, Error Indication, Supported Extension Headers Notification and End
 //! Marker; [`Packet::new`] and [`InformationElement::encode_all`] build any
-//! other message. The PDU Session Container has the downlink and uplink PDU
-//! Session Information of TS 38.415 V18 §5.5.2, with the QoS monitoring,
+//! other message.
+//!
+//! Every extension header of TS 29.281 V19.2.0 §5.2.2 is a variant of
+//! [`ExtensionHeader`]. The PDU Session Container has the downlink and uplink
+//! PDU Session Information of TS 38.415 V18 §5.5.2, with the QoS monitoring,
 //! sequence number, delay and congestion fields, and the downlink Burst Size
-//! and Time To Next Burst.
+//! and Time To Next Burst. The PDCP PDU Number, the long one and the Service
+//! Class Indicator are their numbers. The PDU Set Information Container has
+//! the downlink PDU Set Information of TS 38.415 §6.5.2. The RAN Container,
+//! the Xw RAN Container and the NR RAN Container are the octets of a frame of
+//! TS 36.425, TS 36.465 or TS 38.425, which the crate does not read.
 //!
 //! The numbers that say what a message, an extension header, an information
 //! element or a cause is are types that know the names of the specification:
@@ -112,7 +119,9 @@
 //! | What | API | Specification |
 //! |------|-----|---------------|
 //! | Messages | `Packet`: every header field, the chain of extension headers, the information elements, and constructors for G-PDU, Echo Request and Response, Error Indication, Supported Extension Headers Notification and End Marker | TS 29.281 §5, §7 and §8 |
+//! | Extension headers | `ExtensionHeader`: the UDP Port, the PDCP PDU Number and the long one, the Service Class Indicator, the RAN, Xw RAN and NR RAN containers as octets, and the two below; a header of another type is kept as octets | TS 29.281 §5.2 |
 //! | PDU Session Container | `PduSessionContainer`: the downlink and the uplink PDU Session Information, with their QoS monitoring, sequence number, delay and congestion fields | TS 38.415 §5.5.2 |
+//! | PDU Set Information Container | `PduSetInformationContainer`: the downlink PDU Set Information | TS 38.415 §6.5.2 |
 //! | Tunnels of a gNB or an eNB | `Endpoint`: tunnels by UE and PDU session or E-RAB, and the replies that a node owes its peer | TS 29.281 §4.4 and §7 |
 //! | A UPF to test against | `upf_sim::UpfSimulator` and the `oxirush-upf-sim` program: sessions, an echo service, an End Marker on a path switch | |
 //! | Linux as the device or as N6 | `tun::TunPort`, `Endpoint::attach_tun`, `UpfSimulator::attach_tun` | |
@@ -151,7 +160,7 @@
 //! - 3GPP TS 29.281: GTPv1-U (header, extension headers, messages, information
 //!   elements, path management)
 //! - 3GPP TS 38.415: NG-RAN PDU Session User Plane protocol (PDU Session
-//!   Container)
+//!   Container, PDU Set Information Container)
 //! - 3GPP TS 29.060: imported TV information elements and receive rules
 //!
 //! # Source layout
@@ -161,6 +170,7 @@
 //! ├── packet.rs              owned and borrowed messages (TS 29.281 §5.1, §6, §7)
 //! ├── types.rs               message, header and element types, and causes, by name
 //! ├── extension.rs           extension headers and PDU Session Container (TS 38.415)
+//! ├── pdu_set.rs             PDU Set Information Container (TS 38.415)
 //! ├── headers.rs             the list of the extension headers of a message
 //! ├── ie.rs, error.rs         information elements and codec errors
 //! ├── ipv4.rs, icmp.rs        inner IPv4 UDP and ICMP Echo packets
@@ -195,6 +205,7 @@ mod icmp;
 mod ie;
 mod ipv4;
 mod packet;
+mod pdu_set;
 mod types;
 
 #[cfg(feature = "endpoint")]
@@ -231,6 +242,7 @@ pub use icmp::{
 pub use ie::InformationElement;
 pub use ipv4::{ipv4_udp, parse_ipv4_udp};
 pub use packet::Packet;
+pub use pdu_set::{DownlinkPduSetInformation, PduSetInformationContainer};
 #[cfg(feature = "endpoint")]
 pub use stats::ReceiveStats;
 pub use types::{Cause, ExtensionHeaderType, InformationElementType, MessageType};

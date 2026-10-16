@@ -17,7 +17,7 @@ use std::time::Duration;
 use oxirush_gtp_u::tun::{Routing, TunConfig, TunPort};
 use oxirush_gtp_u::upf_sim::{Session, UpfSimulator};
 use oxirush_gtp_u::{
-    EchoKind, Endpoint, MessageType, Packet, RemoteTunnel, ipv4_icmp_echo_reply,
+    EchoKind, Endpoint, ExtensionHeader, Packet, RemoteTunnel, ipv4_icmp_echo_reply,
     ipv4_icmp_echo_request, parse_ipv4_icmp_echo,
 };
 use tokio::process::Command;
@@ -662,17 +662,24 @@ async fn an_endpoint_carries_a_tunnel_s_tun_and_closes_it_with_the_tunnel() {
     // Both ways: the test UPF's echo service answers the ping.
     ping(&["-I", "198.19.1.1", "203.0.113.1"]).await;
     // The reply went to Linux and not to the receiver, whose first message
-    // is the tunnel's next End Marker.
+    // is a G-PDU without a T-PDU, which has only its headers to give: a
+    // frame of the NR user plane protocol. The next is the tunnel's End
+    // Marker.
     let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let marker = Packet::end_marker(teid).encode().unwrap();
-    peer.send_to(&marker, gnb.local_addr().unwrap())
-        .await
-        .unwrap();
-    let message = tokio::time::timeout(Duration::from_secs(3), received.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(message.packet.message_type, MessageType::END_MARKER);
+    let mut frame = Packet::g_pdu(teid, vec![]);
+    frame
+        .extension_headers
+        .push(ExtensionHeader::NrRanContainer(vec![1, 2, 3, 4, 5, 6]));
+    for packet in [&frame, &Packet::end_marker(teid)] {
+        peer.send_to(&packet.encode().unwrap(), gnb.local_addr().unwrap())
+            .await
+            .unwrap();
+        let message = tokio::time::timeout(Duration::from_secs(3), received.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&message.packet, packet);
+    }
 
     // The tunnel keeps its TUN when it is installed again, here with
     // another QFI, and its removal closes the TUN.

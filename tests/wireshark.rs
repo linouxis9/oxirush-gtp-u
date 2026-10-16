@@ -7,8 +7,9 @@ use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use oxirush_gtp_u::{
-    Cause, DownlinkPduSessionInformation, ExtensionHeader, ExtensionHeaderType, InformationElement,
-    Packet, PduSessionContainer, UplinkPduSessionInformation, UplinkTimeStamps, ipv4_udp,
+    Cause, DownlinkPduSessionInformation, DownlinkPduSetInformation, ExtensionHeader,
+    ExtensionHeaderType, InformationElement, Packet, PduSessionContainer,
+    PduSetInformationContainer, UplinkPduSessionInformation, UplinkTimeStamps, ipv4_udp,
 };
 
 /// Dissect `packet`, sent in UDP to port 2152, and return `fields` as
@@ -349,9 +350,9 @@ fn optional_fields_and_an_extension_header_chain() {
     packet.extension_headers = vec![
         ExtensionHeader::UdpPort(2152),
         ExtensionHeader::PduSessionContainer(PduSessionContainer::downlink(1)),
-        ExtensionHeader::Other {
-            kind: ExtensionHeaderType::LONG_PDCP_PDU_NUMBER,
-            content: vec![0x01, 0x02, 0x03, 0x00, 0x00, 0x00],
+        ExtensionHeader::LongPdcpPduNumber {
+            number: 0x01_0203,
+            legacy_type: false,
         },
     ]
     .into();
@@ -368,15 +369,85 @@ fn optional_fields_and_an_extension_header_chain() {
         ],
     );
     // tshark 4.6 decodes the content of the legacy type only.
-    packet.extension_headers[2] = ExtensionHeader::Other {
-        kind: ExtensionHeaderType::LONG_PDCP_PDU_NUMBER_LEGACY,
-        content: vec![0x01, 0x02, 0x03, 0x00, 0x00, 0x00],
+    packet.extension_headers[2] = ExtensionHeader::LongPdcpPduNumber {
+        number: 0x01_0203,
+        legacy_type: true,
     };
     check(
         &packet,
         &[
             ("gtp.ext_hdr.next", "0x40,0x85,0x82,0x00"),
             ("gtp.ext_hdr.long_pdcp_sn", "66051"),
+        ],
+    );
+}
+
+/// What a handover and the RAN protocols put in a G-PDU, as Wireshark reads
+/// it: the PDCP PDU Number, the long one, and the containers whose content
+/// it shows as octets. It has no field for the Service Class Indicator, the
+/// NR RAN Container or the PDU Set Information Container, of which it finds
+/// the place and the length.
+#[test]
+#[ignore = "needs tshark"]
+fn handover_and_forwarding_headers() {
+    let with = |headers: Vec<ExtensionHeader>| {
+        let mut packet = Packet::g_pdu(0x2001, vec![0x45]);
+        packet.extension_headers = headers.into();
+        packet
+    };
+    check(
+        &with(vec![ExtensionHeader::PdcpPduNumber(0x0abc)]),
+        &[
+            ("gtp.ext_hdr.next", "0xc0,0x00"),
+            ("gtp.ext_hdr.length", "1"),
+            ("gtp.ext_hdr.pdcp_sn", "2748"),
+        ],
+    );
+    check(
+        &with(vec![ExtensionHeader::LongPdcpPduNumber {
+            number: 0x2_abcd,
+            legacy_type: true,
+        }]),
+        &[
+            ("gtp.ext_hdr.next", "0x82,0x00"),
+            ("gtp.ext_hdr.length", "2"),
+            ("gtp.ext_hdr.long_pdcp_sn", "175053"),
+        ],
+    );
+    // tshark 4.6 shows a container with the octet of the next type, here
+    // the 00 that ends the chain.
+    check(
+        &with(vec![ExtensionHeader::RanContainer(vec![0xaa, 0xbb])]),
+        &[
+            ("gtp.ext_hdr.next", "0x81,0x00"),
+            ("gtp.ext_hdr.ran_cont", "aabb00"),
+        ],
+    );
+    check(
+        &with(vec![ExtensionHeader::XwRanContainer(vec![
+            1, 2, 3, 4, 5, 6,
+        ])]),
+        &[
+            ("gtp.ext_hdr.next", "0x83,0x00"),
+            ("gtp.ext_hdr.length", "2"),
+            ("gtp.ext_hdr.xw_ran_cont", "01020304050600"),
+        ],
+    );
+    let mut information = DownlinkPduSetInformation::new(9);
+    information.pdu_set_size = Some(0x01_0203);
+    check(
+        &with(vec![
+            ExtensionHeader::PduSessionContainer(PduSessionContainer::downlink(9)),
+            ExtensionHeader::PduSetInformationContainer {
+                information: PduSetInformationContainer::Downlink(information),
+                legacy_type: false,
+            },
+            ExtensionHeader::ServiceClassIndicator(7),
+        ]),
+        &[
+            ("gtp.ext_hdr.next", "0x85,0x04,0x20,0x00"),
+            ("gtp.ext_hdr.length", "1,3,1"),
+            ("gtp.ext_hdr.pdu_ses_con.qos_flow_id", "9"),
         ],
     );
 }
@@ -391,9 +462,9 @@ fn chains_of_every_length_with_an_unknown_header() {
     let chain = [
         ExtensionHeader::PduSessionContainer(PduSessionContainer::uplink(9)),
         ExtensionHeader::UdpPort(2152),
-        ExtensionHeader::Other {
-            kind: ExtensionHeaderType::LONG_PDCP_PDU_NUMBER_LEGACY,
-            content: vec![0x01, 0x02, 0x03, 0x00, 0x00, 0x00],
+        ExtensionHeader::LongPdcpPduNumber {
+            number: 0x01_0203,
+            legacy_type: true,
         },
         ExtensionHeader::Other {
             kind: ExtensionHeaderType(0x21),

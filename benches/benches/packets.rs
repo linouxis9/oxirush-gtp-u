@@ -61,7 +61,7 @@ fn chains(octets: usize) -> [(&'static str, Vec<u8>); 3] {
     let mut three = Packet::uplink(TEID, QFI, payload(octets));
     three.extension_headers.push(ExtensionHeader::UdpPort(2152));
     three.extension_headers.push(ExtensionHeader::Other {
-        kind: ExtensionHeaderType::SERVICE_CLASS_INDICATOR,
+        kind: ExtensionHeaderType(0x21),
         content: vec![7, 0],
     });
     [

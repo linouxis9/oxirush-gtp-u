@@ -147,7 +147,7 @@ fn a_chain_of_extension_headers_allocates_its_list_and_the_octets_it_keeps() {
         .extension_headers
         .push(ExtensionHeader::UdpPort(2152));
     message.extension_headers.push(ExtensionHeader::Other {
-        kind: ExtensionHeaderType::SERVICE_CLASS_INDICATOR,
+        kind: ExtensionHeaderType(0x21),
         content: vec![7, 0],
     });
     let datagram = message.encode().unwrap();

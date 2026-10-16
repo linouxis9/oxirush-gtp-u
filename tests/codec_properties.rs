@@ -1,10 +1,10 @@
 use std::net::IpAddr;
 
 use oxirush_gtp_u::{
-    Cause, DownlinkPduSessionInformation, Error, ExtensionHeader, ExtensionHeaderType,
-    ExtensionHeaders, InformationElement, InformationElementType, MessageType, Packet, Part,
-    PduSessionContainer, UplinkPduSessionInformation, UplinkTimeStamps, parse_ipv4_icmp_echo,
-    parse_ipv4_udp,
+    Cause, DownlinkPduSessionInformation, DownlinkPduSetInformation, Error, ExtensionHeader,
+    ExtensionHeaderType, ExtensionHeaders, InformationElement, InformationElementType, MessageType,
+    Packet, Part, PduSessionContainer, PduSetInformationContainer, UplinkPduSessionInformation,
+    UplinkTimeStamps, parse_ipv4_icmp_echo, parse_ipv4_udp,
 };
 use proptest::collection::vec;
 use proptest::option::of;
@@ -106,9 +106,57 @@ fn content(valid: bool) -> impl Strategy<Value = Vec<u8>> {
     })
 }
 
+fn pdu_set() -> impl Strategy<Value = PduSetInformationContainer> {
+    (
+        0u8..64,
+        any::<[bool; 2]>(),
+        0u16..1 << 10,
+        0u8..16,
+        any::<u8>(),
+        of(0u32..1 << 24),
+    )
+        .prop_map(|(qfi, [burst, pdu], sequence, importance, number, size)| {
+            let mut information = DownlinkPduSetInformation::new(qfi);
+            information.end_of_data_burst = burst;
+            information.end_pdu = pdu;
+            information.pdu_set_sequence_number = sequence;
+            information.pdu_set_importance = importance;
+            information.pdu_sequence_number = number;
+            information.pdu_set_size = size;
+            PduSetInformationContainer::Downlink(information)
+        })
+}
+
 fn extension_header(valid: bool) -> impl Strategy<Value = ExtensionHeader> {
     prop_oneof![
         any::<u16>().prop_map(ExtensionHeader::UdpPort),
+        any::<u16>().prop_map(ExtensionHeader::PdcpPduNumber),
+        (0u32..1 << 18, any::<bool>()).prop_map(|(number, legacy_type)| {
+            ExtensionHeader::LongPdcpPduNumber {
+                number,
+                legacy_type,
+            }
+        }),
+        any::<u8>().prop_map(ExtensionHeader::ServiceClassIndicator),
+        content(valid).prop_map(ExtensionHeader::RanContainer),
+        content(valid).prop_map(ExtensionHeader::XwRanContainer),
+        content(valid).prop_map(ExtensionHeader::NrRanContainer),
+        (
+            prop_oneof![
+                pdu_set(),
+                (1u8..16, content(valid)).prop_map(|(pdu_type, mut content)| {
+                    content[0] = pdu_type << 4 | (content[0] & 0x0f);
+                    PduSetInformationContainer::Other(content)
+                }),
+            ],
+            any::<bool>()
+        )
+            .prop_map(|(information, legacy_type)| {
+                ExtensionHeader::PduSetInformationContainer {
+                    information,
+                    legacy_type,
+                }
+            }),
         downlink().prop_map(ExtensionHeader::PduSessionContainer),
         uplink(valid).prop_map(ExtensionHeader::PduSessionContainer),
         (2u8..16, content(valid)).prop_map(|(pdu_type, mut content)| {
@@ -116,7 +164,9 @@ fn extension_header(valid: bool) -> impl Strategy<Value = ExtensionHeader> {
             ExtensionHeader::PduSessionContainer(PduSessionContainer::Other(content))
         }),
         (
-            (1u8..=255).prop_filter("typed", |kind| ![0x40, 0x85].contains(kind)),
+            (1u8..=255).prop_filter("typed", |kind| {
+                !ExtensionHeader::TYPES.contains(&ExtensionHeaderType(*kind))
+            }),
             content(valid)
         )
             .prop_map(|(kind, content)| ExtensionHeader::Other {

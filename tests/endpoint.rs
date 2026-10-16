@@ -6,8 +6,9 @@ use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use oxirush_gtp_u::{
-    Cause, Endpoint, ExtensionHeader, ExtensionHeaderType, InformationElement, MessageType, Packet,
-    PduSessionContainer, ReceivedPacket, RemoteTunnel,
+    Cause, DownlinkPduSetInformation, Endpoint, ExtensionHeader, ExtensionHeaderType,
+    InformationElement, MessageType, Packet, PduSessionContainer, PduSetInformationContainer,
+    ReceivedPacket, RemoteTunnel,
 };
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc::Receiver;
@@ -444,10 +445,9 @@ async fn rejects_an_unsupported_required_extension_header() {
         );
         assert_eq!(
             notification.information_elements().unwrap(),
-            vec![InformationElement::ExtensionHeaderTypeList(vec![
-                ExtensionHeaderType::UDP_PORT,
-                ExtensionHeaderType::PDU_SESSION_CONTAINER
-            ])]
+            vec![InformationElement::ExtensionHeaderTypeList(
+                ExtensionHeader::TYPES.to_vec()
+            )]
         );
         assert!(quiet(&sender).await);
     }
@@ -469,6 +469,57 @@ async fn rejects_an_unsupported_required_extension_header() {
     };
     send(&sender, &endpoint, &packet).await;
     assert_eq!(delivered(&mut received).await.packet, packet);
+}
+
+/// What a handover forwards has a PDCP PDU Number, and the RAN protocols
+/// have containers, which a receiver must understand: an endpoint delivers
+/// the G-PDU with them, and sends no notification.
+#[tokio::test]
+async fn delivers_g_pdus_with_the_headers_of_a_handover_and_of_the_ran_protocols() {
+    let (endpoint, mut received, peer, local_teid) = setup().await;
+    for header in [
+        ExtensionHeader::PdcpPduNumber(0x0abc),
+        ExtensionHeader::LongPdcpPduNumber {
+            number: 0x2_abcd,
+            legacy_type: false,
+        },
+        ExtensionHeader::LongPdcpPduNumber {
+            number: 0x2_abcd,
+            legacy_type: true,
+        },
+        ExtensionHeader::ServiceClassIndicator(7),
+        ExtensionHeader::RanContainer(vec![0xaa, 0xbb]),
+        ExtensionHeader::XwRanContainer(vec![0xaa, 0xbb]),
+        ExtensionHeader::NrRanContainer(vec![1, 2, 3, 4, 5, 6]),
+        ExtensionHeader::PduSetInformationContainer {
+            information: PduSetInformationContainer::Downlink(DownlinkPduSetInformation::new(9)),
+            legacy_type: false,
+        },
+        ExtensionHeader::PduSetInformationContainer {
+            information: PduSetInformationContainer::Downlink(DownlinkPduSetInformation::new(9)),
+            legacy_type: true,
+        },
+    ] {
+        let mut packet = Packet::downlink(local_teid, 9, vec![0x45, 1]);
+        packet.extension_headers.push(header.clone());
+        send(&peer, &endpoint, &packet).await;
+        let message = delivered(&mut received).await;
+        assert_eq!((message.ran_id, message.session_id), (7, 1));
+        assert_eq!(message.packet, packet);
+        assert_eq!(message.packet.extension_headers[1], header);
+    }
+    // A frame of the NR user plane protocol comes without a T-PDU.
+    let mut frame = Packet::g_pdu(local_teid, vec![]);
+    frame
+        .extension_headers
+        .push(ExtensionHeader::NrRanContainer(vec![1, 2, 3, 4, 5, 6]));
+    send(&peer, &endpoint, &frame).await;
+    assert_eq!(delivered(&mut received).await.packet, frame);
+    // Nothing went back to the sender, and nothing was counted as handled
+    // for the path.
+    assert!(quiet(&peer).await);
+    assert_eq!(endpoint.stats().path_messages, 0);
+    assert_eq!(endpoint.stats().received_datagrams, 10);
 }
 
 /// The TEID alone identifies the tunnel: free5GC's UPF, for one, sends

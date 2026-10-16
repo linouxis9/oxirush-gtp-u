@@ -11,7 +11,7 @@ fn main() -> Result<(), oxirush_gtp_u::Error> {
     // crate keeps as octets
     let mut packet = Packet::uplink(0x1234_5678, 9, b"an IP packet".to_vec());
     packet.extension_headers.push(ExtensionHeader::Other {
-        kind: ExtensionHeaderType::SERVICE_CLASS_INDICATOR,
+        kind: ExtensionHeaderType(0x21),
         content: vec![7, 0],
     });
 

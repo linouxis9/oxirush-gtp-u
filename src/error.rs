@@ -114,6 +114,27 @@ pub enum Part {
     ExtensionHeader,
     /// The UDP Port extension header.
     UdpPort,
+    /// The PDCP PDU Number extension header.
+    PdcpPduNumber,
+    /// The Long PDCP PDU Number extension header, and its number of 18
+    /// bits.
+    LongPdcpPduNumber,
+    /// The Service Class Indicator extension header.
+    ServiceClassIndicator,
+    /// The RAN Container extension header.
+    RanContainer,
+    /// The Xw RAN Container extension header.
+    XwRanContainer,
+    /// The NR RAN Container extension header.
+    NrRanContainer,
+    /// The PDU Set Information Container (TS 38.415 §6.5.2).
+    PduSetInformationContainer,
+    /// The PDU Set Sequence Number, 10 bits.
+    PduSetSequenceNumber,
+    /// The PDU Set Importance, 4 bits.
+    PduSetImportance,
+    /// The PDU Set Size, 24 bits.
+    PduSetSize,
     /// The PDU Session Container (TS 38.415 §5.5.2).
     PduSessionContainer,
     /// The QoS Flow Identifier, 6 bits.
@@ -165,6 +186,16 @@ impl fmt::Display for Part {
             Part::OptionalHeader => "GTP-U optional header",
             Part::ExtensionHeader => "extension header",
             Part::UdpPort => "UDP Port extension header",
+            Part::PdcpPduNumber => "PDCP PDU Number extension header",
+            Part::LongPdcpPduNumber => "Long PDCP PDU Number",
+            Part::ServiceClassIndicator => "Service Class Indicator extension header",
+            Part::RanContainer => "RAN Container",
+            Part::XwRanContainer => "Xw RAN Container",
+            Part::NrRanContainer => "NR RAN Container",
+            Part::PduSetInformationContainer => "PDU Set Information Container",
+            Part::PduSetSequenceNumber => "PDU Set Sequence Number",
+            Part::PduSetImportance => "PDU Set Importance",
+            Part::PduSetSize => "PDU Set Size",
             Part::PduSessionContainer => "PDU Session Container",
             Part::Qfi => "QFI",
             Part::Ppi => "PPI",

@@ -6,15 +6,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use tokio::net::UdpSocket;
 use tracing::{debug, warn};
 
-use crate::{
-    Cause, ExtensionHeader, ExtensionHeaderType, InformationElement, MessageType, PORT, Packet,
-};
-
-/// The extension header types the endpoint and the test UPF understand.
-const SUPPORTED_EXTENSION_HEADERS: [ExtensionHeaderType; 2] = [
-    ExtensionHeaderType::UDP_PORT,
-    ExtensionHeaderType::PDU_SESSION_CONTAINER,
-];
+use crate::{Cause, ExtensionHeader, InformationElement, MessageType, PORT, Packet};
 
 #[derive(Debug)]
 enum PathAction {
@@ -66,8 +58,10 @@ fn classify<P: AsRef<[u8]>>(packet: &Packet<P>, from: SocketAddr) -> PathAction 
             packet.message_type,
             MessageType::ECHO_REQUEST | MessageType::G_PDU
         ) {
+            // The types that the codec has a variant for: a message with
+            // one of them is delivered with it.
             let notification =
-                Packet::supported_extension_headers_notification(&SUPPORTED_EXTENSION_HEADERS);
+                Packet::supported_extension_headers_notification(&ExtensionHeader::TYPES);
             return PathAction::Reply {
                 packet: notification,
                 to: user_plane_port(from),
@@ -228,6 +222,7 @@ pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ExtensionHeaderType;
     use std::net::{Ipv4Addr, SocketAddrV6};
 
     #[test]
@@ -247,7 +242,7 @@ mod tests {
         }
         let mut packet = Packet::g_pdu(1, vec![]);
         packet.extension_headers.push(ExtensionHeader::Other {
-            kind: ExtensionHeaderType::RAN_CONTAINER,
+            kind: ExtensionHeaderType(0xc5),
             content: vec![0, 0],
         });
         match classify(&packet, from) {

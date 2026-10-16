@@ -5,7 +5,7 @@ use std::fmt;
 
 use crate::error::{header_length, truncated};
 use crate::types::Octets;
-use crate::{Error, ExtensionHeaderType, Part};
+use crate::{Error, ExtensionHeaderType, Part, PduSetInformationContainer};
 
 // The same serializer counts validated bytes before writing them. This avoids
 // maintaining separate length and field-validation implementations.
@@ -59,12 +59,49 @@ pub enum ExtensionHeader {
     UdpPort(u16),
     /// PDU Session Container: the QoS flow of a G-PDU on N3 and N9.
     PduSessionContainer(PduSessionContainer),
-    /// Any other extension header, kept as received. A later version may
-    /// decode more types into variants of their own, which the encoder then
-    /// refuses as `Other`.
+    /// PDCP PDU Number (TS 29.281 §5.2.2.2): the PDCP sequence number of a
+    /// packet that is forwarded during a handover. It is 15 bits between
+    /// eNBs and 12 between NG-RAN nodes, whose other bits are spare; all 16
+    /// are kept as received.
+    PdcpPduNumber(u16),
+    /// Long PDCP PDU Number (§5.2.2.2A): the PDCP sequence number of a
+    /// forwarded packet when it is 18 bits long.
+    LongPdcpPduNumber {
+        /// The PDCP PDU number, 18 bits. Spare bits that a sender set are
+        /// not kept.
+        number: u32,
+        /// Whether the header has the type of earlier releases, 0x82,
+        /// which a receiver may still get, and not 0x03.
+        legacy_type: bool,
+    },
+    /// Service Class Indicator (§5.2.2.3) of the packet of a downlink
+    /// G-PDU, for GERAN: an operator's value when below 128.
+    ServiceClassIndicator(u8),
+    /// RAN Container (§5.2.2.4), between eNBs: the frame of TS 36.425 as
+    /// octets, padding included. Its length plus 2 is a multiple of 4.
+    RanContainer(Vec<u8>),
+    /// Xw RAN Container (§5.2.2.5), between an eNB and a WLAN termination:
+    /// the frame of TS 36.465 as octets, as for `RanContainer`.
+    XwRanContainer(Vec<u8>),
+    /// NR RAN Container (§5.2.2.6), on X2-U, Xn-U and F1-U: the frame of
+    /// TS 38.425 as octets, as for `RanContainer`.
+    NrRanContainer(Vec<u8>),
+    /// PDU Set Information Container (§5.2.2.8): the PDU Set of a downlink
+    /// G-PDU on N3 and N9, and on Xn-U and F1-U.
+    PduSetInformationContainer {
+        /// Its content.
+        information: PduSetInformationContainer,
+        /// Whether the header has the type of earlier versions, 0x86,
+        /// which a receiver may still get, and not 0x04.
+        legacy_type: bool,
+    },
+    /// An extension header of a type that has no variant above, kept as
+    /// received: one of a later release, or of the control plane. A later
+    /// version of the crate may decode more types into variants of their
+    /// own, which the encoder then refuses as `Other`.
     Other {
-        /// Extension header type: not 0, and not a type with a variant
-        /// above.
+        /// Extension header type: not 0, and not one of
+        /// [`TYPES`](Self::TYPES).
         kind: ExtensionHeaderType,
         /// The octets between the length octet and the next extension
         /// header type octet. Its length plus 2 is a multiple of 4.
@@ -73,15 +110,60 @@ pub enum ExtensionHeader {
 }
 
 // The types with a variant, as the octets that the decoder matches.
+const LONG_PDCP_PDU_NUMBER: u8 = ExtensionHeaderType::LONG_PDCP_PDU_NUMBER.0;
+const PDU_SET_INFORMATION_CONTAINER: u8 = ExtensionHeaderType::PDU_SET_INFORMATION_CONTAINER.0;
+const SERVICE_CLASS_INDICATOR: u8 = ExtensionHeaderType::SERVICE_CLASS_INDICATOR.0;
 const UDP_PORT: u8 = ExtensionHeaderType::UDP_PORT.0;
+const RAN_CONTAINER: u8 = ExtensionHeaderType::RAN_CONTAINER.0;
+const LONG_PDCP_PDU_NUMBER_LEGACY: u8 = ExtensionHeaderType::LONG_PDCP_PDU_NUMBER_LEGACY.0;
+const XW_RAN_CONTAINER: u8 = ExtensionHeaderType::XW_RAN_CONTAINER.0;
+const NR_RAN_CONTAINER: u8 = ExtensionHeaderType::NR_RAN_CONTAINER.0;
 const PDU_SESSION_CONTAINER: u8 = ExtensionHeaderType::PDU_SESSION_CONTAINER.0;
+const PDU_SET_INFORMATION_CONTAINER_LEGACY: u8 =
+    ExtensionHeaderType::PDU_SET_INFORMATION_CONTAINER_LEGACY.0;
+const PDCP_PDU_NUMBER: u8 = ExtensionHeaderType::PDCP_PDU_NUMBER.0;
+
+/// The largest PDCP PDU number of 18 bits.
+const U18: u32 = 0x3_ffff;
 
 impl ExtensionHeader {
+    /// The types that have a variant of their own: those of TS 29.281
+    /// V19.2.0, in the order of their numbers. An endpoint understands
+    /// them, and [`Other`](Self::Other) cannot have them.
+    pub const TYPES: [ExtensionHeaderType; 11] = [
+        ExtensionHeaderType::LONG_PDCP_PDU_NUMBER,
+        ExtensionHeaderType::PDU_SET_INFORMATION_CONTAINER,
+        ExtensionHeaderType::SERVICE_CLASS_INDICATOR,
+        ExtensionHeaderType::UDP_PORT,
+        ExtensionHeaderType::RAN_CONTAINER,
+        ExtensionHeaderType::LONG_PDCP_PDU_NUMBER_LEGACY,
+        ExtensionHeaderType::XW_RAN_CONTAINER,
+        ExtensionHeaderType::NR_RAN_CONTAINER,
+        ExtensionHeaderType::PDU_SESSION_CONTAINER,
+        ExtensionHeaderType::PDU_SET_INFORMATION_CONTAINER_LEGACY,
+        ExtensionHeaderType::PDCP_PDU_NUMBER,
+    ];
+
     /// The extension header type.
     pub fn kind(&self) -> ExtensionHeaderType {
         match self {
             ExtensionHeader::UdpPort(_) => ExtensionHeaderType::UDP_PORT,
             ExtensionHeader::PduSessionContainer(_) => ExtensionHeaderType::PDU_SESSION_CONTAINER,
+            ExtensionHeader::PdcpPduNumber(_) => ExtensionHeaderType::PDCP_PDU_NUMBER,
+            ExtensionHeader::LongPdcpPduNumber { legacy_type, .. } => match legacy_type {
+                false => ExtensionHeaderType::LONG_PDCP_PDU_NUMBER,
+                true => ExtensionHeaderType::LONG_PDCP_PDU_NUMBER_LEGACY,
+            },
+            ExtensionHeader::ServiceClassIndicator(_) => {
+                ExtensionHeaderType::SERVICE_CLASS_INDICATOR
+            }
+            ExtensionHeader::RanContainer(_) => ExtensionHeaderType::RAN_CONTAINER,
+            ExtensionHeader::XwRanContainer(_) => ExtensionHeaderType::XW_RAN_CONTAINER,
+            ExtensionHeader::NrRanContainer(_) => ExtensionHeaderType::NR_RAN_CONTAINER,
+            ExtensionHeader::PduSetInformationContainer { legacy_type, .. } => match legacy_type {
+                false => ExtensionHeaderType::PDU_SET_INFORMATION_CONTAINER,
+                true => ExtensionHeaderType::PDU_SET_INFORMATION_CONTAINER_LEGACY,
+            },
             ExtensionHeader::Other { kind, .. } => *kind,
         }
     }
@@ -106,6 +188,33 @@ impl ExtensionHeader {
             PDU_SESSION_CONTAINER => {
                 PduSessionContainer::decode(content).map(ExtensionHeader::PduSessionContainer)
             }
+            PDCP_PDU_NUMBER => match *content {
+                [high, low] => Ok(ExtensionHeader::PdcpPduNumber(u16::from_be_bytes([
+                    high, low,
+                ]))),
+                _ => Err(fixed_length(Part::PdcpPduNumber, content, 4)),
+            },
+            LONG_PDCP_PDU_NUMBER | LONG_PDCP_PDU_NUMBER_LEGACY => match *content {
+                // Six bits and three octets are spare.
+                [high, middle, low, _, _, _] => Ok(ExtensionHeader::LongPdcpPduNumber {
+                    number: u32::from_be_bytes([0, high, middle, low]) & U18,
+                    legacy_type: kind == LONG_PDCP_PDU_NUMBER_LEGACY,
+                }),
+                _ => Err(fixed_length(Part::LongPdcpPduNumber, content, 8)),
+            },
+            SERVICE_CLASS_INDICATOR => match *content {
+                [indicator, _spare] => Ok(ExtensionHeader::ServiceClassIndicator(indicator)),
+                _ => Err(fixed_length(Part::ServiceClassIndicator, content, 4)),
+            },
+            RAN_CONTAINER => Ok(ExtensionHeader::RanContainer(content.to_vec())),
+            XW_RAN_CONTAINER => Ok(ExtensionHeader::XwRanContainer(content.to_vec())),
+            NR_RAN_CONTAINER => Ok(ExtensionHeader::NrRanContainer(content.to_vec())),
+            PDU_SET_INFORMATION_CONTAINER | PDU_SET_INFORMATION_CONTAINER_LEGACY => {
+                Ok(ExtensionHeader::PduSetInformationContainer {
+                    information: PduSetInformationContainer::decode(content)?,
+                    legacy_type: kind == PDU_SET_INFORMATION_CONTAINER_LEGACY,
+                })
+            }
             _ => Ok(ExtensionHeader::Other {
                 kind: ExtensionHeaderType(kind),
                 content: content.to_vec(),
@@ -126,17 +235,35 @@ impl ExtensionHeader {
         match self {
             ExtensionHeader::UdpPort(port) => out.extend_from_slice(&port.to_be_bytes()),
             ExtensionHeader::PduSessionContainer(container) => container.encode(out)?,
+            ExtensionHeader::PdcpPduNumber(number) => {
+                out.extend_from_slice(&number.to_be_bytes());
+            }
+            ExtensionHeader::LongPdcpPduNumber { number, .. } => {
+                check(Part::LongPdcpPduNumber, Some(*number), U18)?;
+                out.extend_from_slice(&number.to_be_bytes()[1..]);
+                out.extend_from_slice(&[0; 3]);
+            }
+            ExtensionHeader::ServiceClassIndicator(indicator) => {
+                out.extend_from_slice(&[*indicator, 0]);
+            }
+            ExtensionHeader::RanContainer(content) => octets(Part::RanContainer, content, out)?,
+            ExtensionHeader::XwRanContainer(content) => {
+                octets(Part::XwRanContainer, content, out)?;
+            }
+            ExtensionHeader::NrRanContainer(content) => {
+                octets(Part::NrRanContainer, content, out)?;
+            }
+            ExtensionHeader::PduSetInformationContainer { information, .. } => {
+                information.encode(out)?;
+            }
             ExtensionHeader::Other { kind, content } => {
-                if matches!(kind.0, 0 | UDP_PORT | PDU_SESSION_CONTAINER) {
+                if kind.0 == 0 || Self::TYPES.contains(kind) {
                     return Err(Error::InvalidType {
                         what: Part::ExtensionHeader,
                         kind: kind.0,
                     });
                 }
-                if (content.len() + 2) % 4 != 0 {
-                    return Err(header_length(Part::ExtensionHeader, content.len()));
-                }
-                out.extend_from_slice(content);
+                octets(Part::ExtensionHeader, content, out)?;
             }
         }
         // Padding of the typed contents to a multiple of 4 octets.
@@ -156,13 +283,62 @@ impl ExtensionHeader {
     }
 }
 
+/// The length of a header of type `what` and of `content`, which is
+/// `expected` octets long on the wire, never more or less.
+fn fixed_length(what: Part, content: &[u8], expected: usize) -> Error {
+    Error::InvalidLength {
+        what,
+        length: content.len() + 2,
+        expected,
+    }
+}
+
+/// Append the content of a header that is kept as octets: it has its
+/// padding, to the end of a unit of 4 octets.
+fn octets(what: Part, content: &[u8], out: &mut impl EncodeBuffer) -> Result<(), Error> {
+    if !(content.len() + 2).is_multiple_of(4) {
+        return Err(header_length(what, content.len()));
+    }
+    out.extend_from_slice(content);
+    Ok(())
+}
+
 impl fmt::Debug for ExtensionHeader {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let container = |f: &mut fmt::Formatter<'_>, name, content: &[u8]| {
+            f.debug_tuple(name).field(&Octets(content)).finish()
+        };
         match self {
             ExtensionHeader::UdpPort(port) => f.debug_tuple("UdpPort").field(port).finish(),
             ExtensionHeader::PduSessionContainer(container) => f
                 .debug_tuple("PduSessionContainer")
                 .field(container)
+                .finish(),
+            ExtensionHeader::PdcpPduNumber(number) => {
+                f.debug_tuple("PdcpPduNumber").field(number).finish()
+            }
+            ExtensionHeader::LongPdcpPduNumber {
+                number,
+                legacy_type,
+            } => f
+                .debug_struct("LongPdcpPduNumber")
+                .field("number", number)
+                .field("legacy_type", legacy_type)
+                .finish(),
+            ExtensionHeader::ServiceClassIndicator(indicator) => f
+                .debug_tuple("ServiceClassIndicator")
+                .field(indicator)
+                .finish(),
+            ExtensionHeader::RanContainer(content) => container(f, "RanContainer", content),
+            ExtensionHeader::XwRanContainer(content) => container(f, "XwRanContainer", content),
+            ExtensionHeader::NrRanContainer(content) => container(f, "NrRanContainer", content),
+            ExtensionHeader::PduSetInformationContainer {
+                information,
+                legacy_type,
+            } => f
+                .debug_struct("PduSetInformationContainer")
+                .field("information", information)
+                .field("legacy_type", legacy_type)
                 .finish(),
             ExtensionHeader::Other { kind, content } => f
                 .debug_struct("Other")
@@ -592,14 +768,14 @@ fn flag(set: bool, bit: u8) -> u8 {
 }
 
 /// The largest value of a field of 24 bits.
-const U24: u32 = 0xff_ffff;
+pub(crate) const U24: u32 = 0xff_ffff;
 
 fn check_qfi(qfi: u8) -> Result<(), Error> {
     check(Part::Qfi, Some(u32::from(qfi)), 63)
 }
 
 /// Whether `value`, if the field is present, is one that its bits carry.
-fn check(what: Part, value: Option<u32>, max: u32) -> Result<(), Error> {
+pub(crate) fn check(what: Part, value: Option<u32>, max: u32) -> Result<(), Error> {
     match value {
         Some(value) if value > max => Err(Error::OutOfRange {
             what,

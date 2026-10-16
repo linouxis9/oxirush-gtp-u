@@ -533,7 +533,10 @@ async fn write_to_tun(target: &UplinkTarget, packet: &[u8]) -> bool {
     let Some(port) = &target.port else {
         return false;
     };
-    if let Err(error) = port.send(packet).await {
+    // A G-PDU without a T-PDU has nothing for Linux.
+    if !packet.is_empty()
+        && let Err(error) = port.send(packet).await
+    {
         warn!("UPF TUN {} write failed: {error}", port.name());
     }
     true

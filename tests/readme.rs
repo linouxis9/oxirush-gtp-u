@@ -39,11 +39,12 @@ const PAGES: &[(&str, &str)] = &[
     ("src/lib.rs", include_str!("../src/lib.rs")),
 ];
 /// The programs of `examples/`.
-const EXAMPLES: [&str; 6] = [
+const EXAMPLES: [&str; 7] = [
     include_str!("../examples/codec.rs"),
     include_str!("../examples/endpoint.rs"),
     include_str!("../examples/path.rs"),
     include_str!("../examples/extension_headers.rs"),
+    include_str!("../examples/handover.rs"),
     include_str!("../examples/tun.rs"),
     include_str!("../examples/fast_path.rs"),
 ];
@@ -235,7 +236,7 @@ fn the_rust_blocks_of_the_readme_are_parts_of_the_examples() {
         .filter_map(|block| block.split_once('\n'))
         .map(|(_, code)| code)
         .collect();
-    assert_eq!(blocks.len(), 6);
+    assert_eq!(blocks.len(), 7);
     for code in blocks {
         assert!(
             examples.iter().any(|example| example.contains(code)),

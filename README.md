@@ -167,7 +167,7 @@ fn main() -> Result<(), oxirush_gtp_u::Error> {
     // crate keeps as octets
     let mut packet = Packet::uplink(0x1234_5678, 9, b"an IP packet".to_vec());
     packet.extension_headers.push(ExtensionHeader::Other {
-        kind: ExtensionHeaderType::SERVICE_CLASS_INDICATOR,
+        kind: ExtensionHeaderType(0x21),
         content: vec![7, 0],
     });
 
@@ -184,8 +184,63 @@ fn main() -> Result<(), oxirush_gtp_u::Error> {
 
 ```text
 PDU Session Container, comprehension required: true
-Service Class Indicator, comprehension required: false
-Other { kind: Service Class Indicator (0x20), content: 2 octets 0700 }
+0x21, comprehension required: false
+Other { kind: ExtensionHeaderType(0x21), content: 2 octets 0700 }
+```
+
+Every extension header of TS 29.281 V19.2.0 has a variant; one of another
+type is kept as its octets, `Other`. An endpoint delivers a message with
+the headers that have a variant. It refuses one with a header that is kept
+as octets and that a receiver must understand, as the specification
+requires, and answers a G-PDU or an Echo Request that has one with the
+list of the types that it knows.
+
+## The headers of a handover
+
+```rust
+use oxirush_gtp_u::{ExtensionHeader, Packet, PduSessionContainer};
+
+fn main() -> Result<(), oxirush_gtp_u::Error> {
+    // A downlink packet that the source gNB forwards to the target, with
+    // the PDCP sequence number that it had given it
+    let mut forwarded = Packet::downlink(0x2001, 9, b"an IP packet".to_vec());
+    let number = ExtensionHeader::PdcpPduNumber(0x0abc);
+    forwarded.extension_headers.push(number);
+    println!("{:02x?}", &forwarded.encode()?[8..20]);
+
+    // A sequence number of 18 bits has the long header
+    let mut long = Packet::downlink(0x2001, 9, b"an IP packet".to_vec());
+    long.extension_headers
+        .push(ExtensionHeader::LongPdcpPduNumber {
+            number: 0x2_abcd,
+            legacy_type: false,
+        });
+    println!("{:02x?}", &long.encode()?[8..24]);
+
+    // The End Marker of a forwarding tunnel between 5GS and EPS has the PDU
+    // Session Container
+    let container = PduSessionContainer::downlink(9);
+    let marker = Packet::end_marker(0x2001).with_pdu_session_container(container);
+    println!("{:02x?}", marker.encode()?);
+
+    // The target reads the headers of what it receives
+    let decoded = Packet::decode(&forwarded.encode()?)?;
+    for header in &decoded.extension_headers {
+        match header {
+            ExtensionHeader::PdcpPduNumber(number) => println!("PDCP PDU Number {number:#x}"),
+            other => println!("{}", other.kind()),
+        }
+    }
+    Ok(())
+}
+```
+
+```text
+[00, 00, 00, 85, 01, 00, 09, c0, 01, 0a, bc, 00]
+[00, 00, 00, 85, 01, 00, 09, 03, 02, 02, ab, cd, 00, 00, 00, 00]
+[34, fe, 00, 08, 00, 00, 20, 01, 00, 00, 00, 85, 01, 00, 09, 00]
+PDU Session Container
+PDCP PDU Number 0xabc
 ```
 
 ## Give a tunnel a TUN
