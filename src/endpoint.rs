@@ -287,7 +287,9 @@ impl Endpoint {
 
     /// Provision an explicitly assigned, nonzero local TEID. `qfi=None` selects
     /// S1-U framing. A TEID owned by another session is rejected; validation
-    /// errors leave the existing route unchanged.
+    /// errors leave the existing route unchanged. A local TEID of 0 and a QFI
+    /// above 63 are [`InvalidInput`](io::ErrorKind::InvalidInput), the
+    /// second as for [`install`](Self::install).
     pub fn install_with_teid(
         &self,
         ran_id: u32,
@@ -375,7 +377,9 @@ impl Endpoint {
     /// # Errors
     ///
     /// [`InvalidInput`](io::ErrorKind::InvalidInput) if `qfi` is above 63:
-    /// the tunnel then stays as it was.
+    /// the tunnel then stays as it was. The error holds the codec's
+    /// [`Error::OutOfRange`](crate::Error::OutOfRange) for the QFI, which
+    /// is what encoding a G-PDU with it returns.
     pub fn install(
         &self,
         ran_id: u32,
@@ -383,12 +387,7 @@ impl Endpoint {
         remote: RemoteTunnel,
         qfi: u8,
     ) -> io::Result<u32> {
-        if qfi > 63 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("QFI {qfi} is outside 0..=63"),
-            ));
-        }
+        crate::path::qfi(qfi)?;
         Ok(self.install_route(ran_id, session_id, remote, Some(qfi)))
     }
 

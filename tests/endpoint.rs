@@ -6,8 +6,8 @@ use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use oxirush_gtp_u::{
-    Cause, DownlinkPduSetInformation, Endpoint, ExtensionHeader, ExtensionHeaderType,
-    InformationElement, MessageType, Packet, PduSessionContainer, PduSetInformationContainer,
+    Cause, DownlinkPduSetInformation, Endpoint, Error, ExtensionHeader, ExtensionHeaderType,
+    InformationElement, MessageType, Packet, Part, PduSessionContainer, PduSetInformationContainer,
     ReceivedPacket, RemoteTunnel,
 };
 use tokio::net::UdpSocket;
@@ -614,10 +614,29 @@ async fn a_qfi_above_63_is_refused_and_leaves_the_tunnel_as_it_was() {
     let (endpoint, _received, peer, local_teid) = setup().await;
     let other = RemoteTunnel::new("127.0.0.1:9".parse().unwrap(), 50);
     // On the tunnel that exists and on a new one.
+    let codec = Error::OutOfRange {
+        what: Part::Qfi,
+        value: 64,
+        max: 63,
+    };
     for (ran_id, session_id) in [(7, 1), (8, 1)] {
-        let error = endpoint.install(ran_id, session_id, other, 64).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        // With the TEID that the endpoint assigns, and with one that the
+        // caller does: the error of the codec, which a G-PDU with that QFI
+        // gets.
+        for error in [
+            endpoint.install(ran_id, session_id, other, 64).unwrap_err(),
+            endpoint
+                .install_with_teid(ran_id, session_id, 900, other, Some(64))
+                .unwrap_err(),
+        ] {
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+            assert_eq!(
+                error.get_ref().and_then(|inner| inner.downcast_ref()),
+                Some(&codec)
+            );
+        }
     }
+    assert_eq!(Packet::uplink(44, 64, vec![0x45]).encode(), Err(codec));
     assert_eq!(endpoint.local_teid(8, 1), None);
     assert_eq!(endpoint.local_teid(7, 1), Some(local_teid));
     endpoint.send(7, 1, vec![0x45]).await.unwrap();

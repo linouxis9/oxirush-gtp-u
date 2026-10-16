@@ -167,7 +167,7 @@ async fn replacing_an_attached_session_closes_its_old_tun() {
         .await
         .unwrap();
     let peer = "127.0.0.1:2152".parse().unwrap();
-    upf.set_session(Session::new(1, 2, peer, 9));
+    upf.set_session(Session::new(1, 2, peer, 9)).unwrap();
     upf.attach_tun(
         1,
         TunConfig::new(
@@ -183,7 +183,7 @@ async fn replacing_an_attached_session_closes_its_old_tun() {
     upf.switch_downlink(1, peer, 3).await.unwrap();
     assert!(exists("oxreplace"));
     // Reprovisioning the TEID must not carry the old UE's N6 into it.
-    upf.set_session(Session::new(1, 4, peer, 9));
+    upf.set_session(Session::new(1, 4, peer, 9)).unwrap();
     assert!(
         !exists("oxreplace"),
         "replacement session inherited the old TUN"
@@ -200,7 +200,7 @@ async fn shutting_down_the_upf_closes_attachments_and_rejects_new_ones() {
     let other = upf.clone();
     let address = upf.local_addr().unwrap();
     let socket_inode = loopback_udp_inode(address.port());
-    upf.set_session(Session::new(1, 2, address, 9));
+    upf.set_session(Session::new(1, 2, address, 9)).unwrap();
     let config = TunConfig::new(
         "oxshutdown",
         Routing::Upf {
@@ -260,7 +260,8 @@ async fn failed_upf_shutdown_retains_cleanup_resources_for_retry() {
     let (upf, _) = UpfSimulator::bind("127.0.0.1:0".parse().unwrap())
         .await
         .unwrap();
-    upf.set_session(Session::new(1, 2, "127.0.0.1:2152".parse().unwrap(), 9));
+    upf.set_session(Session::new(1, 2, "127.0.0.1:2152".parse().unwrap(), 9))
+        .unwrap();
     upf.attach_tun(
         1,
         TunConfig::new(
@@ -292,7 +293,8 @@ async fn session_creation_race(replace: bool) {
     let (upf, _) = UpfSimulator::bind("127.0.0.1:0".parse().unwrap())
         .await
         .unwrap();
-    upf.set_session(Session::new(1, 2, "127.0.0.1:2152".parse().unwrap(), 9));
+    upf.set_session(Session::new(1, 2, "127.0.0.1:2152".parse().unwrap(), 9))
+        .unwrap();
     let other = upf.clone();
     let remover = std::thread::spawn(move || {
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -303,7 +305,9 @@ async fn session_creation_race(replace: bool) {
         other.remove_session(1);
         if replace {
             // Even identical parameters represent a new provisioning.
-            other.set_session(Session::new(1, 2, "127.0.0.1:2152".parse().unwrap(), 9));
+            other
+                .set_session(Session::new(1, 2, "127.0.0.1:2152".parse().unwrap(), 9))
+                .unwrap();
         }
     });
     // For a deterministic reproducer, strace can delay the return from
@@ -510,7 +514,8 @@ async fn upf_tun_routes_the_kernel_s_reply_back_to_n3() {
         downlink_teid,
         gnb.local_addr().unwrap(),
         9,
-    ));
+    ))
+    .unwrap();
     let ue_address = Ipv4Addr::new(198, 18, 0, 2);
     upf.attach_tun(
         remote.teid,
@@ -581,7 +586,8 @@ async fn upf_routes_32_tun_sessions_without_crossing_teids() {
             downlink_teid,
             gnb.local_addr().unwrap(),
             9,
-        ));
+        ))
+        .unwrap();
         let ue_address = Ipv4Addr::new(198, 18, 64, i);
         upf.attach_tun(
             uplink_teid,
@@ -652,7 +658,8 @@ async fn an_endpoint_carries_a_tunnel_s_tun_and_closes_it_with_the_tunnel() {
         teid,
         gnb.local_addr().unwrap(),
         9,
-    ));
+    ))
+    .unwrap();
     gnb.attach_tun(1, 1, ue_tun("oxe1", 1)).unwrap();
     // And a tunnel has one TUN.
     let error = gnb.attach_tun(1, 1, ue_tun("oxe2", 2)).unwrap_err();

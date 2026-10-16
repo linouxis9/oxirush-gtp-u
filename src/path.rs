@@ -214,6 +214,14 @@ pub(crate) fn transient(error: &std::io::Error) -> bool {
     )
 }
 
+/// Whether `qfi` is one that a PDU Session Container carries: an endpoint
+/// and the test UPF refuse another where they are given it, with the error
+/// that encoding a G-PDU with it would return.
+pub(crate) fn qfi(qfi: u8) -> std::io::Result<()> {
+    crate::extension::check_qfi(qfi)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
+}
+
 /// Lock a mutex whose data stays consistent even if a holder panicked.
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)

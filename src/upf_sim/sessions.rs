@@ -68,8 +68,8 @@ impl SessionRegistry {
         self.closed.load(Ordering::Relaxed)
     }
 
-    pub(super) fn replace(&self, session: Session) {
-        assert!(session.qfi <= 63, "QFI {} is outside 0..=63", session.qfi);
+    pub(super) fn replace(&self, session: Session) -> io::Result<()> {
+        path::qfi(session.qfi)?;
         let old = lock(&self.sessions).insert(
             session.uplink_teid,
             SessionEntry {
@@ -82,6 +82,7 @@ impl SessionRegistry {
         );
         // Cleanup can perform netlink I/O and must run outside this lock.
         drop(old);
+        Ok(())
     }
 
     pub(super) fn remove(&self, uplink_teid: u32) {
@@ -285,7 +286,7 @@ mod tests {
         let registry = SessionRegistry::default();
         let old: SocketAddr = "127.0.0.1:2152".parse().unwrap();
         let new: SocketAddr = "127.0.0.2:2152".parse().unwrap();
-        registry.replace(Session::new(1, 2, old, 9));
+        registry.replace(Session::new(1, 2, old, 9)).unwrap();
         let generation = registry.incarnation(1).unwrap();
         assert!(registry.switch_path(1, &generation, new, 3).unwrap());
         assert!(
@@ -302,7 +303,7 @@ mod tests {
         );
         registry.send_marker(1, &generation, || Ok(8)).unwrap();
         assert_eq!(registry.pending_end_marker(1), None);
-        registry.replace(Session::new(1, 4, old, 9));
+        registry.replace(Session::new(1, 4, old, 9)).unwrap();
         let mut called = false;
         assert_eq!(
             registry

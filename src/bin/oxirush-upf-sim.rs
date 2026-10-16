@@ -56,9 +56,6 @@ fn parse(args: &[String]) -> Result<Args, Box<dyn Error>> {
         [bind, gnb, uplink, downlink, qfi] => (bind, gnb, uplink, downlink, qfi.parse()?),
         _ => return Err("wrong number of arguments".into()),
     };
-    if qfi > 63 {
-        return Err(format!("QFI {qfi} is outside 0..=63").into());
-    }
     Ok(Args {
         bind: bind.parse()?,
         session: Session::new(
@@ -74,7 +71,7 @@ fn parse(args: &[String]) -> Result<Args, Box<dyn Error>> {
 async fn serve(args: Args) -> Result<(), Box<dyn Error>> {
     let (upf, mut packets) = UpfSimulator::bind(args.bind).await?;
     let session = args.session;
-    upf.set_session(session);
+    upf.set_session(session)?;
     if let Some((name, ue_address)) = args.tun {
         attach_tun(&upf, session.uplink_teid, name, ue_address)?;
     }

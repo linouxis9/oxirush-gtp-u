@@ -60,9 +60,13 @@ First release.
   Indications with their source address; the TEID alone identifies a
   tunnel. A G-PDU is delivered with every extension header that has a
   variant, so with those of a handover and of the RAN protocols, and one
-  without a packet goes to the receiver of a tunnel that has a TUN. `install_s1u` gives an eNB's S1-U tunnels, without a PDU Session
+  without a packet goes to the receiver of a tunnel that has a TUN.
+  `install_s1u` gives an eNB's S1-U tunnels, without a PDU Session
   Container. `install` returns an `io::Result`: a QFI above 63 is
-  `InvalidInput`, as with `install_with_teid`.
+  `InvalidInput`, as with `install_with_teid` and with
+  `UpfSimulator::set_session`. That error holds the codec's
+  `Error::OutOfRange` for the QFI, which encoding a G-PDU with it returns:
+  nothing panics for a QFI.
 - An endpoint finds the tunnel that an Error Indication names, and the
   tunnels of a UE for `remove_ran`, in an index: neither walks through the
   tunnels, so an Error Indication, which anyone who reaches the socket can
@@ -219,6 +223,10 @@ revision `ac3a019` for a program that uses the crate:
   answered a G-PDU with a Supported Extension Headers Notification. They
   deliver it, and the notification lists the eleven types
   (`ExtensionHeader::TYPES`).
+- `UpfSimulator::set_session` returns an `io::Result<()>`, where it
+  returned nothing and panicked for a QFI above 63: `set_session(..)?`.
+  `Session::new` no longer panics for one: the session is refused where it
+  is given.
 - `Packet` is `Debug` for a payload that is `AsRef<[u8]>`, where it was for
   one that is `Debug`. What `Debug` prints changed for `Packet`,
   `ExtensionHeader`, `PduSessionContainer`, `UnknownNewIes`,

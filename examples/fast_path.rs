@@ -26,7 +26,7 @@ async fn main() -> std::io::Result<()> {
     gnb.set_fast_path(fast_path.clone())?;
 
     let teid = gnb.install(1, 5, RemoteTunnel::new(upf.local_addr()?, 0x1001), 9)?;
-    upf.set_session(Session::new(0x1001, teid, gnb.local_addr()?, 9));
+    upf.set_session(Session::new(0x1001, teid, gnb.local_addr()?, 9))?;
 
     // As in the `tun` example. The endpoint has a fast path: the TUN is on
     // it, and the kernel carries the tunnel's packets.

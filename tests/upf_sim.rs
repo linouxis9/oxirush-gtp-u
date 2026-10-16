@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use oxirush_gtp_u::upf_sim::{Session, UpfSimulator};
 use oxirush_gtp_u::{
-    EchoKind, Endpoint, InformationElement, MessageType, Packet, PduSessionContainer, RemoteTunnel,
-    ipv4_icmp_echo_request, ipv4_udp, parse_ipv4_icmp_echo, parse_ipv4_udp,
+    EchoKind, Endpoint, Error, InformationElement, MessageType, Packet, Part, PduSessionContainer,
+    RemoteTunnel, ipv4_icmp_echo_request, ipv4_udp, parse_ipv4_icmp_echo, parse_ipv4_udp,
 };
 use tokio::net::UdpSocket;
 use tokio::time::timeout;
@@ -70,7 +70,8 @@ async fn n3_packets_follow_the_target_after_a_path_switch() {
         source_teid,
         source.local_addr().unwrap(),
         9,
-    ));
+    ))
+    .unwrap();
     source.send(1, 1, udp(b"before handover")).await.unwrap();
     assert_eq!(next(&mut upf_rx).await.uplink_teid, remote.teid);
     let before = next(&mut source_rx).await;
@@ -138,7 +139,8 @@ async fn retrying_a_cancelled_switch_sends_the_pending_end_marker() {
         .unwrap();
     let source = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let target = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    upf.set_session(Session::new(1, 2, source.local_addr().unwrap(), 9));
+    upf.set_session(Session::new(1, 2, source.local_addr().unwrap(), 9))
+        .unwrap();
     let mut handover = Box::pin(upf.switch_downlink(1, target.local_addr().unwrap(), 3));
     let mut context = Context::from_waker(Waker::noop());
     // The fresh socket has not observed UDP write readiness yet. Cancelling
@@ -186,7 +188,8 @@ async fn failed_end_marker_is_retained_without_rolling_back_the_new_path() {
         .await
         .unwrap();
     let target = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    upf.set_session(Session::new(1, 2, "[2001:db8::1]:2152".parse().unwrap(), 9));
+    upf.set_session(Session::new(1, 2, "[2001:db8::1]:2152".parse().unwrap(), 9))
+        .unwrap();
     let first = upf
         .switch_downlink(1, target.local_addr().unwrap(), 3)
         .await
@@ -214,22 +217,44 @@ async fn failed_end_marker_is_retained_without_rolling_back_the_new_path() {
 }
 
 #[tokio::test]
-async fn invalid_session_qfi_is_rejected_before_replacing_the_live_session() {
+async fn a_qfi_above_63_is_refused_and_leaves_the_session_as_it_was() {
     let (upf, _) = UpfSimulator::bind("127.0.0.1:0".parse().unwrap())
         .await
         .unwrap();
     let target = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let mut session = Session::new(1, 2, target.local_addr().unwrap(), 9);
-    upf.set_session(session);
-    session.qfi = 64;
-    assert!(
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            upf.set_session(session);
-        }))
-        .is_err()
-    );
+    let address = target.local_addr().unwrap();
+    upf.set_session(Session::new(1, 2, address, 9)).unwrap();
+    // A session is made with any QFI, and refused where it is given: for
+    // the TEID of a session that exists and for a new one, whether the QFI
+    // came through `new` or through the field.
+    let mut changed = Session::new(1, 2, address, 9);
+    changed.qfi = 64;
+    for session in [changed, Session::new(5, 6, address, 64)] {
+        let error = upf.set_session(session).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        // The error of the codec, which a G-PDU with that QFI gets.
+        assert_eq!(
+            error.get_ref().and_then(|inner| inner.downcast_ref()),
+            Some(&qfi_error(64))
+        );
+        assert_eq!(
+            Packet::downlink(2, 64, vec![0x45]).encode(),
+            Err(qfi_error(64))
+        );
+    }
+    assert_eq!(upf.session(5), None);
     upf.send_downlink(1, vec![0x45]).await.unwrap();
     assert_eq!(reply(&target).await.qfi(), Some(9));
+    // 63 is the highest QFI.
+    upf.set_session(Session::new(5, 6, address, 63)).unwrap();
+}
+
+fn qfi_error(qfi: u64) -> Error {
+    Error::OutOfRange {
+        what: Part::Qfi,
+        value: qfi,
+        max: 63,
+    }
 }
 
 #[tokio::test]
@@ -238,7 +263,8 @@ async fn observer_drops_are_counted_without_delaying_path_management() {
         .await
         .unwrap();
     let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    upf.set_session(Session::new(1, 2, peer.local_addr().unwrap(), 9));
+    upf.set_session(Session::new(1, 2, peer.local_addr().unwrap(), 9))
+        .unwrap();
     let address = upf.local_addr().unwrap();
     let pdu = Packet::uplink(1, 9, vec![0x45]).encode().unwrap();
     // Pace each datagram until it is queued/dropped, so this tests the
@@ -291,7 +317,7 @@ async fn cancelled_shutdown_can_be_awaited_again_and_stops_all_clones() {
         .unwrap();
     let other = upf.clone();
     let address = upf.local_addr().unwrap();
-    upf.set_session(Session::new(1, 2, address, 9));
+    upf.set_session(Session::new(1, 2, address, 9)).unwrap();
     assert!(upf.is_running());
     let mut shutdown = Box::pin(upf.shutdown());
     let mut context = Context::from_waker(Waker::noop());
@@ -328,11 +354,13 @@ async fn replacing_a_session_while_send_waits_for_udp_readiness_rejects_the_old_
         .unwrap();
     let old = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let new = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    upf.set_session(Session::new(1, 2, old.local_addr().unwrap(), 9));
+    upf.set_session(Session::new(1, 2, old.local_addr().unwrap(), 9))
+        .unwrap();
     let mut sending = Box::pin(upf.send_downlink(1, vec![0x45]));
     let mut context = Context::from_waker(Waker::noop());
     assert!(matches!(sending.as_mut().poll(&mut context), Poll::Pending));
-    upf.set_session(Session::new(1, 3, new.local_addr().unwrap(), 9));
+    upf.set_session(Session::new(1, 3, new.local_addr().unwrap(), 9))
+        .unwrap();
     assert_eq!(sending.await.unwrap_err().kind(), io::ErrorKind::NotFound);
     let mut buffer = [0; 128];
     assert!(
@@ -356,7 +384,8 @@ async fn replacing_a_session_while_marker_waits_does_not_end_the_replacement_tun
         .unwrap();
     let old = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let target = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    upf.set_session(Session::new(1, 2, old.local_addr().unwrap(), 9));
+    upf.set_session(Session::new(1, 2, old.local_addr().unwrap(), 9))
+        .unwrap();
     let mut switching = Box::pin(upf.switch_downlink(1, target.local_addr().unwrap(), 3));
     let mut context = Context::from_waker(Waker::noop());
     assert!(matches!(
@@ -365,7 +394,8 @@ async fn replacing_a_session_while_marker_waits_does_not_end_the_replacement_tun
     ));
     // Reusing the old peer's TEID means a stale marker could now end an
     // unrelated replacement tunnel, so the send must recheck its generation.
-    upf.set_session(Session::new(1, 2, old.local_addr().unwrap(), 9));
+    upf.set_session(Session::new(1, 2, old.local_addr().unwrap(), 9))
+        .unwrap();
     assert_eq!(switching.await.unwrap_err().kind(), io::ErrorKind::NotFound);
     assert_eq!(upf.pending_end_marker(1), None);
     let mut buffer = [0; 128];
@@ -400,7 +430,8 @@ async fn error_indication_from_the_upf_reaches_the_tunnel() {
         downlink_teid,
         gnb.local_addr().unwrap(),
         9,
-    ));
+    ))
+    .unwrap();
     upf.remove_session(remote.teid);
     gnb.send(4, 2, udp(b"to a session the UPF lost"))
         .await
@@ -432,7 +463,8 @@ async fn built_in_n6_reflects_icmp_echo() {
         downlink_teid,
         gnb.local_addr().unwrap(),
         9,
-    ));
+    ))
+    .unwrap();
     let request = ipv4_icmp_echo_request(
         Ipv4Addr::new(10, 60, 0, 2),
         Ipv4Addr::new(192, 0, 2, 1),
@@ -501,7 +533,8 @@ async fn sends_downlink_packets_and_rejects_unknown_sessions() {
         .await
         .unwrap();
     let gnb = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    upf.set_session(Session::new(10, 20, gnb.local_addr().unwrap(), 5));
+    upf.set_session(Session::new(10, 20, gnb.local_addr().unwrap(), 5))
+        .unwrap();
     upf.send_downlink(10, &[0x60, 0][..]).await.unwrap();
     let downlink = reply(&gnb).await;
     assert_eq!((downlink.teid, downlink.qfi()), (20, Some(5)));
@@ -530,7 +563,8 @@ async fn accepts_uplink_from_another_address_of_the_gnb() {
         .unwrap();
     let gnb = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let other_address = UdpSocket::bind("127.0.0.2:0").await.unwrap();
-    upf.set_session(Session::new(10, 20, gnb.local_addr().unwrap(), 5));
+    upf.set_session(Session::new(10, 20, gnb.local_addr().unwrap(), 5))
+        .unwrap();
     other_address
         .send_to(
             &Packet::uplink(10, 5, udp(b"x")).encode().unwrap(),

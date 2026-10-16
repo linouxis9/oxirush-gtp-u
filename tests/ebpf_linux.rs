@@ -220,7 +220,8 @@ async fn upf(
         downlink_teid,
         gnb.local_addr().unwrap(),
         9,
-    ));
+    ))
+    .unwrap();
     let routing = Routing::Upf { ue_address: UE };
     upf.attach_tun(uplink_teid, TunConfig::new("oxn1", routing))
         .unwrap();

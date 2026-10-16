@@ -58,13 +58,10 @@ pub struct Session {
 }
 
 impl Session {
-    /// A session with these tunnels.
-    ///
-    /// # Panics
-    ///
-    /// If `qfi` is above 63.
+    /// A session with these tunnels. A QFI above 63 is refused where the
+    /// session is given to a UPF,
+    /// [`set_session`](UpfSimulator::set_session).
     pub fn new(uplink_teid: u32, downlink_teid: u32, gnb_address: SocketAddr, qfi: u8) -> Self {
-        assert!(qfi <= 63, "QFI {qfi} is outside 0..=63");
         Self {
             uplink_teid,
             downlink_teid,
@@ -126,7 +123,7 @@ impl fmt::Debug for UplinkPacket {
 /// let (upf, mut observed) = UpfSimulator::bind("127.0.0.1:0".parse().unwrap()).await?;
 /// // The gNB under test: here a socket that sends and receives G-PDUs.
 /// let gnb = tokio::net::UdpSocket::bind("127.0.0.1:0").await?;
-/// upf.set_session(Session::new(0x1001, 0x2001, gnb.local_addr()?, 9));
+/// upf.set_session(Session::new(0x1001, 0x2001, gnb.local_addr()?, 9))?;
 ///
 /// let (ue, server) = ("10.45.0.2:4000".parse().unwrap(), "192.0.2.1:7".parse().unwrap());
 /// let uplink = Packet::uplink(0x1001, 9, ipv4_udp(ue, server, b"hello")?);
@@ -291,12 +288,16 @@ impl UpfSimulator {
     /// closing its previous TUN. Use [`switch_downlink`](Self::switch_downlink)
     /// for a handover that retains the session's N6 attachment.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// If `session.qfi` is above 63, including when the public field was
-    /// changed after constructing the session.
-    pub fn set_session(&self, session: Session) {
-        self.shared.state.replace(session);
+    /// [`InvalidInput`](io::ErrorKind::InvalidInput) if `session.qfi` is
+    /// above 63, as [`Endpoint::install`](crate::Endpoint::install)
+    /// returns: the session that the uplink TEID had, if any, then stays
+    /// as it was. The error holds the codec's
+    /// [`Error::OutOfRange`](crate::Error::OutOfRange) for the QFI, which
+    /// is what encoding a G-PDU with it returns.
+    pub fn set_session(&self, session: Session) -> io::Result<()> {
+        self.shared.state.replace(session)
     }
 
     /// A snapshot of the current session, including the committed downlink path.
@@ -593,13 +594,15 @@ mod tests {
             .await
             .unwrap();
         let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        upf.set_session(Session::new(1, 2, peer.local_addr().unwrap(), 9));
+        upf.set_session(Session::new(1, 2, peer.local_addr().unwrap(), 9))
+            .unwrap();
         let target = upf.shared.state.uplink_target(1).unwrap();
         let guard = target.incarnation.downlink.lock().await;
         let mut waiting = Box::pin(upf.send_downlink(1, vec![0x45]));
         let mut context = Context::from_waker(Waker::noop());
         assert!(matches!(waiting.as_mut().poll(&mut context), Poll::Pending));
-        upf.set_session(Session::new(1, 3, peer.local_addr().unwrap(), 9));
+        upf.set_session(Session::new(1, 3, peer.local_addr().unwrap(), 9))
+            .unwrap();
         drop(guard);
         assert_eq!(waiting.await.unwrap_err().kind(), io::ErrorKind::NotFound);
         assert_eq!(

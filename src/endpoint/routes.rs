@@ -163,11 +163,14 @@ impl RouteTable {
         remote: RemoteTunnel,
         qfi: Option<u8>,
     ) -> io::Result<()> {
-        if local_teid == 0 || qfi.is_some_and(|qfi| qfi > 63) {
+        if local_teid == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "invalid local TEID or QFI",
+                "a local TEID is not 0",
             ));
+        }
+        if let Some(qfi) = qfi {
+            crate::path::qfi(qfi)?;
         }
         let mut routes = lock(&self.0);
         if routes

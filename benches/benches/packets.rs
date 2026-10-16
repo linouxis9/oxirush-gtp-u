@@ -117,7 +117,8 @@ fn endpoint(criterion: &mut Criterion) {
             .expect("the endpoint binds");
         let remote = RemoteTunnel::new(upf.local_addr().unwrap(), 0x1001);
         let teid = gnb.install(1, 5, remote, QFI).expect("the tunnel");
-        upf.set_session(Session::new(0x1001, teid, gnb.local_addr().unwrap(), QFI));
+        upf.set_session(Session::new(0x1001, teid, gnb.local_addr().unwrap(), QFI))
+            .unwrap();
         (gnb, received, upf, observed)
     });
 
