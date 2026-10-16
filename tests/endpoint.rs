@@ -6,9 +6,8 @@ use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use oxirush_gtp_u::{
-    ECHO_REQUEST, ECHO_RESPONSE, END_MARKER, ERROR_INDICATION, Endpoint, ExtensionHeader,
-    InformationElement, Packet, PduSessionContainer, ReceivedPacket, RemoteTunnel,
-    SUPPORTED_EXTENSION_HEADERS_NOTIFICATION,
+    Cause, Endpoint, ExtensionHeader, ExtensionHeaderType, InformationElement, MessageType, Packet,
+    PduSessionContainer, ReceivedPacket, RemoteTunnel,
 };
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc::Receiver;
@@ -190,14 +189,19 @@ async fn answers_echo_requests() {
     let (endpoint, _received, peer, _) = setup().await;
     send(&peer, &endpoint, &Packet::echo_request(77)).await;
     let response = reply(&peer).await;
-    assert_eq!(response.message_type, ECHO_RESPONSE);
+    assert_eq!(response.message_type, MessageType::ECHO_RESPONSE);
     assert_eq!((response.teid, response.sequence), (0, Some(77)));
     assert_eq!(
         response.information_elements().unwrap(),
         vec![InformationElement::Recovery(0)]
     );
     // Without a sequence number, the response still has one.
-    send(&peer, &endpoint, &Packet::new(ECHO_REQUEST, 0, vec![])).await;
+    send(
+        &peer,
+        &endpoint,
+        &Packet::new(MessageType::ECHO_REQUEST, 0, vec![]),
+    )
+    .await;
     assert_eq!(reply(&peer).await.sequence, Some(0));
 }
 
@@ -225,15 +229,12 @@ async fn answers_out_of_sequence_echo_request_with_error_cause() {
     let response = reply(&peer).await;
     assert_eq!(
         (response.message_type, response.sequence),
-        (ECHO_RESPONSE, Some(77))
+        (MessageType::ECHO_RESPONSE, Some(77))
     );
     assert_eq!(
         response.information_elements().unwrap(),
         vec![
-            InformationElement::OtherTv {
-                kind: 1,
-                value: vec![193]
-            },
+            InformationElement::Cause(Cause::INVALID_MESSAGE_FORMAT),
             InformationElement::Recovery(0),
         ]
     );
@@ -265,10 +266,7 @@ async fn answers_echo_request_length_errors_with_error_cause() {
             assert_eq!(
                 response.information_elements().unwrap(),
                 vec![
-                    InformationElement::OtherTv {
-                        kind: 1,
-                        value: vec![193]
-                    },
+                    InformationElement::Cause(Cause::INVALID_MESSAGE_FORMAT),
                     InformationElement::Recovery(0),
                 ]
             );
@@ -323,7 +321,7 @@ async fn keeps_answering_echo_while_the_receiver_lags() {
     let response = reply(&peer).await;
     assert_eq!(
         (response.message_type, response.sequence),
-        (ECHO_RESPONSE, Some(1))
+        (MessageType::ECHO_RESPONSE, Some(1))
     );
     assert!(endpoint.stats().queue_full_drops > 0);
 }
@@ -336,7 +334,7 @@ async fn sends_error_indication_for_an_unknown_teid() {
     send(&sender, &endpoint, &Packet::downlink(999, 9, vec![0x45])).await;
     // To port 2152, with the G-PDU's source port in the UDP Port header.
     let indication = reply(&listener).await;
-    assert_eq!(indication.message_type, ERROR_INDICATION);
+    assert_eq!(indication.message_type, MessageType::ERROR_INDICATION);
     assert_eq!((indication.teid, indication.sequence), (0, Some(0)));
     assert_eq!(
         indication.extension_headers,
@@ -390,7 +388,10 @@ async fn delivers_the_peer_s_error_indication_to_its_tunnel() {
     send(&peer, &endpoint, &Packet::error_indication(44, peer_ip)).await;
     let indication = delivered(&mut received).await;
     assert_eq!((indication.ran_id, indication.session_id), (7, 1));
-    assert_eq!(indication.packet.message_type, ERROR_INDICATION);
+    assert_eq!(
+        indication.packet.message_type,
+        MessageType::ERROR_INDICATION
+    );
     // One naming another tunnel is not delivered.
     send(&peer, &endpoint, &Packet::error_indication(45, peer_ip)).await;
     assert!(timeout(QUIET, received.recv()).await.is_err());
@@ -426,7 +427,7 @@ async fn rejects_an_unsupported_required_extension_header() {
     let (endpoint, mut received, _peer, local_teid) = setup().await;
     let (listener, sender) = user_plane_peer(23).await;
     let unsupported = ExtensionHeader::Other {
-        kind: 0xc5,
+        kind: ExtensionHeaderType(0xc5),
         content: vec![0, 0],
     };
     // A G-PDU or a request gets a notification at port 2152 and is dropped.
@@ -439,12 +440,13 @@ async fn rejects_an_unsupported_required_extension_header() {
         let notification = reply(&listener).await;
         assert_eq!(
             notification.message_type,
-            SUPPORTED_EXTENSION_HEADERS_NOTIFICATION
+            MessageType::SUPPORTED_EXTENSION_HEADERS_NOTIFICATION
         );
         assert_eq!(
             notification.information_elements().unwrap(),
             vec![InformationElement::ExtensionHeaderTypeList(vec![
-                0x40, 0x85
+                ExtensionHeaderType::UDP_PORT,
+                ExtensionHeaderType::PDU_SESSION_CONTAINER
             ])]
         );
         assert!(quiet(&sender).await);
@@ -462,7 +464,7 @@ async fn rejects_an_unsupported_required_extension_header() {
     assert!(timeout(QUIET, received.recv()).await.is_err());
     // A header that needs no comprehension is ignored.
     packet.extension_headers[1] = ExtensionHeader::Other {
-        kind: 0x45,
+        kind: ExtensionHeaderType(0x45),
         content: vec![0, 0],
     };
     send(&sender, &endpoint, &packet).await;
@@ -487,7 +489,10 @@ async fn delivers_end_markers() {
     let (endpoint, mut received, peer, local_teid) = setup().await;
     send(&peer, &endpoint, &Packet::end_marker(local_teid)).await;
     let marker = delivered(&mut received).await;
-    assert_eq!((marker.ran_id, marker.packet.message_type), (7, END_MARKER));
+    assert_eq!(
+        (marker.ran_id, marker.packet.message_type),
+        (7, MessageType::END_MARKER)
+    );
     // An End Marker for an unknown tunnel gets no Error Indication.
     send(&peer, &endpoint, &Packet::end_marker(999)).await;
     assert!(quiet(&peer).await);
@@ -544,7 +549,10 @@ async fn install_and_remove_tunnels() {
     {
         let (listener, sender) = user_plane_peer(25).await;
         send(&sender, &endpoint, &Packet::g_pdu(local_teid, vec![0x45])).await;
-        assert_eq!(reply(&listener).await.message_type, ERROR_INDICATION);
+        assert_eq!(
+            reply(&listener).await.message_type,
+            MessageType::ERROR_INDICATION
+        );
     }
     endpoint.remove(8, 1);
     assert_eq!(endpoint.local_teid(8, 1), None);

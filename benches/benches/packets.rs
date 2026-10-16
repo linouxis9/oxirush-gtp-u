@@ -20,7 +20,9 @@
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use oxirush_gtp_u::upf_sim::{Session, UpfSimulator};
-use oxirush_gtp_u::{Endpoint, ExtensionHeader, Packet, RemoteTunnel, ipv4_udp};
+use oxirush_gtp_u::{
+    Endpoint, ExtensionHeader, ExtensionHeaderType, Packet, RemoteTunnel, ipv4_udp,
+};
 use oxirush_gtp_u_benches::payload;
 use pprof::criterion::{Output, PProfProfiler};
 use std::hint::black_box;
@@ -59,7 +61,7 @@ fn chains(octets: usize) -> [(&'static str, Vec<u8>); 3] {
     let mut three = Packet::uplink(TEID, QFI, payload(octets));
     three.extension_headers.push(ExtensionHeader::UdpPort(2152));
     three.extension_headers.push(ExtensionHeader::Other {
-        kind: ExtensionHeader::SERVICE_CLASS_INDICATOR,
+        kind: ExtensionHeaderType::SERVICE_CLASS_INDICATOR,
         content: vec![7, 0],
     });
     [

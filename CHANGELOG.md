@@ -13,6 +13,14 @@ First release.
   the numbers that disagree, as in "truncated GTP-U message: the Length
   field says 9 octets after the header, the datagram has 1". It converts
   into a `std::io::Error`.
+- `MessageType`, `ExtensionHeaderType`, `InformationElementType` and
+  `Cause`: the numbers that say what a message, an extension header, an
+  information element or a cause is, with a constant for each that the
+  specification names. Any number is a value; `Display` prints the name or
+  the number, and `Debug` both, as `G-PDU (255)`. `Debug` of a message
+  prints its TEID in hexadecimal and its payload as its length and all its
+  octets in hexadecimal, as it does for every TEID and for what is kept as
+  received.
 - `ExtensionHeaders`, the list of a message's extension headers
   (`Packet::extension_headers`): a slice to read and to change, `push`,
   `extend` and `clear`; it is made from a `Vec`, an array or one header,
@@ -151,3 +159,33 @@ revision `ac3a019` for a program that uses the crate:
     Part::UdpDatagram, received, computed }`, and likewise
     `Part::Ipv4Header` and `Part::IcmpMessage`.
   - What `Display` prints has these numbers after the text that it printed.
+- The types of messages, extension headers and information elements were
+  `u8`, with constants in three places. They are types of their own:
+  - `G_PDU`, `ECHO_REQUEST`, `ECHO_RESPONSE`, `ERROR_INDICATION`,
+    `SUPPORTED_EXTENSION_HEADERS_NOTIFICATION`, `TUNNEL_STATUS` and
+    `END_MARKER` are `MessageType::G_PDU` and so on. `Packet::message_type`
+    is a `MessageType`, and `Packet::new` takes one: `MessageType(77)` for
+    a number without a name, `.0` for the number of a value.
+  - `ExtensionHeader::UDP_PORT` and the other constants of
+    `ExtensionHeader` are `ExtensionHeaderType::UDP_PORT` and so on.
+    `ExtensionHeader::kind` returns an `ExtensionHeaderType`, and so is
+    the `kind` of `ExtensionHeader::Other`.
+  - `InformationElement::RECOVERY` and the other constants of
+    `InformationElement` are `InformationElementType::RECOVERY` and so on.
+    `InformationElement::kind` returns an `InformationElementType`, and
+    so are the `kind` of `OtherTv` and `Other` and the value of
+    `Error::UnknownInformationElement`.
+  - `InformationElement::ExtensionHeaderTypeList` holds a
+    `Vec<ExtensionHeaderType>`, and
+    `Packet::supported_extension_headers_notification` takes a
+    `&[ExtensionHeaderType]`.
+  - A Cause (type 1) is decoded as `InformationElement::Cause(Cause)`,
+    where it was `OtherTv { kind: 1, value }`, which the encoder now
+    refuses. The Echo Response to an Echo Request that is not well formed
+    has `Cause::INVALID_MESSAGE_FORMAT`.
+- `Packet` is `Debug` for a payload that is `AsRef<[u8]>`, where it was for
+  one that is `Debug`. What `Debug` prints changed for `Packet`,
+  `ExtensionHeader`, `PduSessionContainer`, `UnknownNewIes`,
+  `InformationElement`, `RemoteTunnel`, `upf_sim::Session` and
+  `upf_sim::UplinkPacket`: names, TEIDs in hexadecimal, octets as
+  `2 octets 0700`.

@@ -260,7 +260,7 @@ impl SessionRegistry {
 fn unknown_session(uplink_teid: u32) -> io::Error {
     io::Error::new(
         io::ErrorKind::NotFound,
-        format!("no session with uplink TEID {uplink_teid}"),
+        format!("no session with uplink TEID {uplink_teid:#010x}"),
     )
 }
 
@@ -272,7 +272,7 @@ pub(super) fn stopped() -> io::Error {
 fn already_attached(uplink_teid: u32) -> io::Error {
     io::Error::new(
         io::ErrorKind::AlreadyExists,
-        format!("a TUN is already attached to uplink TEID {uplink_teid}"),
+        format!("a TUN is already attached to uplink TEID {uplink_teid:#010x}"),
     )
 }
 

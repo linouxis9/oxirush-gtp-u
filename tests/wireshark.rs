@@ -7,8 +7,8 @@ use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use oxirush_gtp_u::{
-    DownlinkPduSessionInformation, ExtensionHeader, InformationElement, Packet,
-    PduSessionContainer, UplinkPduSessionInformation, UplinkTimeStamps, ipv4_udp,
+    Cause, DownlinkPduSessionInformation, ExtensionHeader, ExtensionHeaderType, InformationElement,
+    Packet, PduSessionContainer, UplinkPduSessionInformation, UplinkTimeStamps, ipv4_udp,
 };
 
 /// Dissect `packet`, sent in UDP to port 2152, and return `fields` as
@@ -134,8 +134,8 @@ fn path_management_messages() {
     );
     check(
         &Packet::supported_extension_headers_notification(&[
-            ExtensionHeader::UDP_PORT,
-            ExtensionHeader::PDU_SESSION_CONTAINER,
+            ExtensionHeaderType::UDP_PORT,
+            ExtensionHeaderType::PDU_SESSION_CONTAINER,
         ]),
         &[
             ("gtp.message", "0x1f"),
@@ -150,10 +150,7 @@ fn path_management_messages() {
 fn echo_error_response() {
     let mut response = Packet::echo_response(77);
     response.payload = InformationElement::encode_all(&[
-        InformationElement::OtherTv {
-            kind: 1,
-            value: vec![193],
-        },
+        InformationElement::Cause(Cause::INVALID_MESSAGE_FORMAT),
         InformationElement::Recovery(0),
     ])
     .unwrap();
@@ -353,7 +350,7 @@ fn optional_fields_and_an_extension_header_chain() {
         ExtensionHeader::UdpPort(2152),
         ExtensionHeader::PduSessionContainer(PduSessionContainer::downlink(1)),
         ExtensionHeader::Other {
-            kind: ExtensionHeader::LONG_PDCP_PDU_NUMBER,
+            kind: ExtensionHeaderType::LONG_PDCP_PDU_NUMBER,
             content: vec![0x01, 0x02, 0x03, 0x00, 0x00, 0x00],
         },
     ]
@@ -372,7 +369,7 @@ fn optional_fields_and_an_extension_header_chain() {
     );
     // tshark 4.6 decodes the content of the legacy type only.
     packet.extension_headers[2] = ExtensionHeader::Other {
-        kind: ExtensionHeader::LONG_PDCP_PDU_NUMBER_LEGACY,
+        kind: ExtensionHeaderType::LONG_PDCP_PDU_NUMBER_LEGACY,
         content: vec![0x01, 0x02, 0x03, 0x00, 0x00, 0x00],
     };
     check(
@@ -395,11 +392,11 @@ fn chains_of_every_length_with_an_unknown_header() {
         ExtensionHeader::PduSessionContainer(PduSessionContainer::uplink(9)),
         ExtensionHeader::UdpPort(2152),
         ExtensionHeader::Other {
-            kind: ExtensionHeader::LONG_PDCP_PDU_NUMBER_LEGACY,
+            kind: ExtensionHeaderType::LONG_PDCP_PDU_NUMBER_LEGACY,
             content: vec![0x01, 0x02, 0x03, 0x00, 0x00, 0x00],
         },
         ExtensionHeader::Other {
-            kind: 0x21,
+            kind: ExtensionHeaderType(0x21),
             content: vec![0xaa, 0xbb],
         },
     ];

@@ -6,12 +6,14 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use tokio::net::UdpSocket;
 use tracing::{debug, warn};
 
-use crate::{ECHO_REQUEST, ExtensionHeader, G_PDU, InformationElement, PORT, Packet};
+use crate::{
+    Cause, ExtensionHeader, ExtensionHeaderType, InformationElement, MessageType, PORT, Packet,
+};
 
 /// The extension header types the endpoint and the test UPF understand.
-const SUPPORTED_EXTENSION_HEADERS: [u8; 2] = [
-    ExtensionHeader::UDP_PORT,
-    ExtensionHeader::PDU_SESSION_CONTAINER,
+const SUPPORTED_EXTENSION_HEADERS: [ExtensionHeaderType; 2] = [
+    ExtensionHeaderType::UDP_PORT,
+    ExtensionHeaderType::PDU_SESSION_CONTAINER,
 ];
 
 #[derive(Debug)]
@@ -60,7 +62,10 @@ fn classify<P: AsRef<[u8]>>(packet: &Packet<P>, from: SocketAddr) -> PathAction 
     });
     if unsupported {
         let reason = "unsupported comprehension-required extension header";
-        if matches!(packet.message_type, ECHO_REQUEST | G_PDU) {
+        if matches!(
+            packet.message_type,
+            MessageType::ECHO_REQUEST | MessageType::G_PDU
+        ) {
             let notification =
                 Packet::supported_extension_headers_notification(&SUPPORTED_EXTENSION_HEADERS);
             return PathAction::Reply {
@@ -74,7 +79,7 @@ fn classify<P: AsRef<[u8]>>(packet: &Packet<P>, from: SocketAddr) -> PathAction 
     // TS 29.281 section 9.1 imports TS 29.060 section 11.1.10:
     // signalling IEs must be in ascending type order. The raw codec keeps
     // their received order for lossless re-encoding.
-    if packet.message_type != G_PDU
+    if packet.message_type != MessageType::G_PDU
         && packet.information_elements().is_ok_and(|elements| {
             elements
                 .windows(2)
@@ -82,7 +87,7 @@ fn classify<P: AsRef<[u8]>>(packet: &Packet<P>, from: SocketAddr) -> PathAction 
         })
     {
         let reason = "out-of-sequence information elements";
-        if packet.message_type == ECHO_REQUEST {
+        if packet.message_type == MessageType::ECHO_REQUEST {
             // TS 29.060 section 11.1.10 requires an error response with
             // Cause 193 (Invalid message format). Retain the mandatory
             // Recovery IE of the Echo Response (TS 29.281 section 7.2.2).
@@ -95,7 +100,7 @@ fn classify<P: AsRef<[u8]>>(packet: &Packet<P>, from: SocketAddr) -> PathAction 
         }
         return PathAction::Discard(reason);
     }
-    if packet.message_type == ECHO_REQUEST {
+    if packet.message_type == MessageType::ECHO_REQUEST {
         let response = Packet::echo_response(packet.sequence.unwrap_or(0));
         return PathAction::Reply {
             packet: response,
@@ -118,7 +123,7 @@ pub(crate) async fn answer_length_error(socket: &UdpSocket, bytes: &[u8], from: 
 fn length_error_response(bytes: &[u8]) -> Option<Packet> {
     let header = bytes.first_chunk::<8>()?;
     let flags = header[0];
-    if flags & 0xf0 != 0x30 || header[1] != ECHO_REQUEST {
+    if flags & 0xf0 != 0x30 || header[1] != MessageType::ECHO_REQUEST.0 {
         return None;
     }
     let header_length = if flags & 0x07 != 0 { 12 } else { 8 };
@@ -140,10 +145,7 @@ fn length_error_response(bytes: &[u8]) -> Option<Packet> {
 fn echo_error_response(sequence: u16) -> Packet {
     let mut response = Packet::echo_response(sequence);
     response.payload = InformationElement::encode_all(&[
-        InformationElement::OtherTv {
-            kind: 1,
-            value: vec![193],
-        },
+        InformationElement::Cause(Cause::INVALID_MESSAGE_FORMAT),
         InformationElement::Recovery(0),
     ])
     .expect("fixed-length Cause and Recovery IEs encode");
@@ -245,7 +247,7 @@ mod tests {
         }
         let mut packet = Packet::g_pdu(1, vec![]);
         packet.extension_headers.push(ExtensionHeader::Other {
-            kind: 0x81,
+            kind: ExtensionHeaderType::RAN_CONTAINER,
             content: vec![0, 0],
         });
         match classify(&packet, from) {
@@ -257,13 +259,13 @@ mod tests {
                 assert_eq!(to, user_plane_port(from));
                 assert_eq!(
                     packet.message_type,
-                    crate::SUPPORTED_EXTENSION_HEADERS_NOTIFICATION
+                    MessageType::SUPPORTED_EXTENSION_HEADERS_NOTIFICATION
                 );
                 assert!(discard_reason.is_some());
             }
             other => panic!("unexpected action: {other:?}"),
         }
-        packet.message_type = crate::END_MARKER;
+        packet.message_type = MessageType::END_MARKER;
         assert!(matches!(classify(&packet, from), PathAction::Discard(_)));
         assert!(matches!(
             classify(&Packet::g_pdu(1, vec![1]), from),
@@ -281,10 +283,7 @@ mod tests {
         assert_eq!(response.sequence, Some(42));
         assert_eq!(
             response.information_elements().unwrap()[0],
-            InformationElement::OtherTv {
-                kind: 1,
-                value: vec![193]
-            }
+            InformationElement::Cause(Cause::INVALID_MESSAGE_FORMAT)
         );
         for end in 0..invalid.len() {
             assert!(length_error_response(&invalid[..end]).is_none());

@@ -127,7 +127,7 @@ async fn main() -> std::io::Result<()> {
     let (length, _) = peer.recv_from(&mut buffer).await?;
     let response = Packet::decode(&buffer[..length])?;
     println!(
-        "message type {}, sequence number {:?}, {:?}",
+        "{}, sequence number {:?}, {:?}",
         response.message_type,
         response.sequence,
         response.information_elements()?
@@ -139,7 +139,7 @@ async fn main() -> std::io::Result<()> {
     gnb.send(1, 5, b"an IP packet".as_slice()).await?;
     let indication = received.recv().await.expect("the endpoint is running");
     println!(
-        "message type {} for RAN UE {} session {}: {:?}",
+        "{} for RAN UE {} session {}: {:?}",
         indication.packet.message_type,
         indication.ran_id,
         indication.session_id,
@@ -150,25 +150,24 @@ async fn main() -> std::io::Result<()> {
 ```
 
 ```text
-message type 2, sequence number Some(7), [Recovery(0)]
-message type 26 for RAN UE 1 session 5: [TeidDataI(4097), GtpUPeerAddress(127.0.0.10)]
+Echo Response, sequence number Some(7), [Recovery(0)]
+Error Indication for RAN UE 1 session 5: [TeidDataI(0x00001001), GtpUPeerAddress(127.0.0.10)]
 ```
 
-Message type 2 is the Echo Response and 26 the Error Indication. An
-endpoint also sends an Error Indication for a G-PDU on a TEID that it does
-not have.
+An endpoint also sends an Error Indication for a G-PDU on a TEID that it
+does not have.
 
 ## Read and write extension headers
 
 ```rust
-use oxirush_gtp_u::{ExtensionHeader, Packet};
+use oxirush_gtp_u::{ExtensionHeader, ExtensionHeaderType, Packet};
 
 fn main() -> Result<(), oxirush_gtp_u::Error> {
     // The container of an uplink G-PDU, then a header of a type that the
     // crate keeps as octets
     let mut packet = Packet::uplink(0x1234_5678, 9, b"an IP packet".to_vec());
     packet.extension_headers.push(ExtensionHeader::Other {
-        kind: ExtensionHeader::SERVICE_CLASS_INDICATOR,
+        kind: ExtensionHeaderType::SERVICE_CLASS_INDICATOR,
         content: vec![7, 0],
     });
 
@@ -176,10 +175,7 @@ fn main() -> Result<(), oxirush_gtp_u::Error> {
     let decoded = Packet::decode(&packet.encode()?)?;
     for header in &decoded.extension_headers {
         let required = header.comprehension_required();
-        println!(
-            "type {:#04x}, comprehension required: {required}",
-            header.kind()
-        );
+        println!("{}, comprehension required: {required}", header.kind());
     }
     println!("{:?}", decoded.extension_headers[1]);
     Ok(())
@@ -187,9 +183,9 @@ fn main() -> Result<(), oxirush_gtp_u::Error> {
 ```
 
 ```text
-type 0x85, comprehension required: true
-type 0x20, comprehension required: false
-Other { kind: 32, content: [7, 0] }
+PDU Session Container, comprehension required: true
+Service Class Indicator, comprehension required: false
+Other { kind: Service Class Indicator (0x20), content: 2 octets 0700 }
 ```
 
 ## Give a tunnel a TUN

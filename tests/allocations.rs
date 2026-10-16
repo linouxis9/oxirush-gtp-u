@@ -7,8 +7,8 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
 use oxirush_gtp_u::{
-    DownlinkPduSessionInformation, Error, ExtensionHeader, Packet, Part, PduSessionContainer,
-    UnknownNewIes, UplinkPduSessionInformation, UplinkTimeStamps,
+    DownlinkPduSessionInformation, Error, ExtensionHeader, ExtensionHeaderType, Packet, Part,
+    PduSessionContainer, UnknownNewIes, UplinkPduSessionInformation, UplinkTimeStamps,
 };
 
 thread_local! {
@@ -146,7 +146,7 @@ fn a_chain_of_extension_headers_allocates_its_list_and_the_octets_it_keeps() {
         .extension_headers
         .push(ExtensionHeader::UdpPort(2152));
     message.extension_headers.push(ExtensionHeader::Other {
-        kind: ExtensionHeader::SERVICE_CLASS_INDICATOR,
+        kind: ExtensionHeaderType::SERVICE_CLASS_INDICATOR,
         content: vec![7, 0],
     });
     let datagram = message.encode().unwrap();

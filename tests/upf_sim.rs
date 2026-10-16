@@ -9,9 +9,8 @@ use std::time::Duration;
 
 use oxirush_gtp_u::upf_sim::{Session, UpfSimulator};
 use oxirush_gtp_u::{
-    ECHO_RESPONSE, END_MARKER, ERROR_INDICATION, EchoKind, Endpoint, InformationElement, Packet,
-    PduSessionContainer, RemoteTunnel, ipv4_icmp_echo_request, ipv4_udp, parse_ipv4_icmp_echo,
-    parse_ipv4_udp,
+    EchoKind, Endpoint, InformationElement, MessageType, Packet, PduSessionContainer, RemoteTunnel,
+    ipv4_icmp_echo_request, ipv4_udp, parse_ipv4_icmp_echo, parse_ipv4_udp,
 };
 use tokio::net::UdpSocket;
 use tokio::time::timeout;
@@ -96,7 +95,7 @@ async fn n3_packets_follow_the_target_after_a_path_switch() {
             marker.packet.message_type,
             marker.packet.teid
         ),
-        (1, END_MARKER, source_teid)
+        (1, MessageType::END_MARKER, source_teid)
     );
     source.remove(1, 1);
     target.send(2, 1, udp(b"after handover")).await.unwrap();
@@ -164,7 +163,10 @@ async fn retrying_a_cancelled_switch_sends_the_pending_end_marker() {
         .await
         .unwrap();
     let marker = reply(&source).await;
-    assert_eq!((marker.message_type, marker.teid), (END_MARKER, 2));
+    assert_eq!(
+        (marker.message_type, marker.teid),
+        (MessageType::END_MARKER, 2)
+    );
     assert_eq!(upf.pending_end_marker(1), None);
     upf.switch_downlink(1, target.local_addr().unwrap(), 3)
         .await
@@ -374,7 +376,7 @@ async fn replacing_a_session_while_marker_waits_does_not_end_the_replacement_tun
     );
     upf.send_downlink(1, vec![0x45]).await.unwrap();
     let sent = reply(&old).await;
-    assert_eq!((sent.message_type, sent.teid), (oxirush_gtp_u::G_PDU, 2));
+    assert_eq!((sent.message_type, sent.teid), (MessageType::G_PDU, 2));
 }
 
 /// The UPF's Error Indication reaches a gNB endpoint on port 2152, here
@@ -405,7 +407,10 @@ async fn error_indication_from_the_upf_reaches_the_tunnel() {
         .unwrap();
     let indication = next(&mut received).await;
     assert_eq!((indication.ran_id, indication.session_id), (4, 2));
-    assert_eq!(indication.packet.message_type, ERROR_INDICATION);
+    assert_eq!(
+        indication.packet.message_type,
+        MessageType::ERROR_INDICATION
+    );
     assert_eq!(indication.from.ip(), remote.address.ip());
 }
 
@@ -459,7 +464,7 @@ async fn answers_echo_requests() {
     let response = reply(&gnb).await;
     assert_eq!(
         (response.message_type, response.sequence),
-        (ECHO_RESPONSE, Some(9))
+        (MessageType::ECHO_RESPONSE, Some(9))
     );
 }
 
@@ -480,7 +485,7 @@ async fn sends_error_indication_for_an_unknown_uplink_teid() {
     .await
     .unwrap();
     let indication = reply(&gnb_listener).await;
-    assert_eq!(indication.message_type, ERROR_INDICATION);
+    assert_eq!(indication.message_type, MessageType::ERROR_INDICATION);
     assert_eq!(
         indication.information_elements().unwrap(),
         vec![

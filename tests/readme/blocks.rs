@@ -129,7 +129,7 @@ fn block_3() {
         let (length, _) = peer.recv_from(&mut buffer).await?;
         let response = Packet::decode(&buffer[..length])?;
         println!(
-            "message type {}, sequence number {:?}, {:?}",
+            "{}, sequence number {:?}, {:?}",
             response.message_type,
             response.sequence,
             response.information_elements()?
@@ -141,7 +141,7 @@ fn block_3() {
         gnb.send(1, 5, b"an IP packet".as_slice()).await?;
         let indication = received.recv().await.expect("the endpoint is running");
         println!(
-            "message type {} for RAN UE {} session {}: {:?}",
+            "{} for RAN UE {} session {}: {:?}",
             indication.packet.message_type,
             indication.ran_id,
             indication.session_id,
@@ -154,14 +154,14 @@ fn block_3() {
 
 /// The Rust block 4 of README.md.
 fn block_4() {
-    use oxirush_gtp_u::{ExtensionHeader, Packet};
+    use oxirush_gtp_u::{ExtensionHeader, ExtensionHeaderType, Packet};
 
     fn main() -> Result<(), oxirush_gtp_u::Error> {
         // The container of an uplink G-PDU, then a header of a type that the
         // crate keeps as octets
         let mut packet = Packet::uplink(0x1234_5678, 9, b"an IP packet".to_vec());
         packet.extension_headers.push(ExtensionHeader::Other {
-            kind: ExtensionHeader::SERVICE_CLASS_INDICATOR,
+            kind: ExtensionHeaderType::SERVICE_CLASS_INDICATOR,
             content: vec![7, 0],
         });
 
@@ -169,10 +169,7 @@ fn block_4() {
         let decoded = Packet::decode(&packet.encode()?)?;
         for header in &decoded.extension_headers {
             let required = header.comprehension_required();
-            println!(
-                "type {:#04x}, comprehension required: {required}",
-                header.kind()
-            );
+            println!("{}, comprehension required: {required}", header.kind());
         }
         println!("{:?}", decoded.extension_headers[1]);
         Ok(())

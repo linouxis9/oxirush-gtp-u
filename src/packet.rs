@@ -1,26 +1,14 @@
 //! The GTP-U header and messages (TS 29.281 §5.1, §6, §7).
 
+use std::fmt;
 use std::net::IpAddr;
 
 use crate::error::truncated;
+use crate::types::{Octets, Teid};
 use crate::{
-    Error, ExtensionHeader, ExtensionHeaders, InformationElement, Part, PduSessionContainer,
+    Error, ExtensionHeader, ExtensionHeaderType, ExtensionHeaders, InformationElement, MessageType,
+    Part, PduSessionContainer,
 };
-
-/// Echo Request (TS 29.281 §7.2.1).
-pub const ECHO_REQUEST: u8 = 1;
-/// Echo Response (TS 29.281 §7.2.2).
-pub const ECHO_RESPONSE: u8 = 2;
-/// Error Indication (TS 29.281 §7.3.1).
-pub const ERROR_INDICATION: u8 = 26;
-/// Supported Extension Headers Notification (TS 29.281 §7.2.3).
-pub const SUPPORTED_EXTENSION_HEADERS_NOTIFICATION: u8 = 31;
-/// Tunnel Status (TS 29.281 §7.3.3).
-pub const TUNNEL_STATUS: u8 = 253;
-/// End Marker (TS 29.281 §7.3.2).
-pub const END_MARKER: u8 = 254;
-/// G-PDU: a T-PDU, the user's IP packet, in a tunnel.
-pub const G_PDU: u8 = 255;
 
 /// Version 1, protocol type GTP.
 const VERSION_1_GTP: u8 = 0x30;
@@ -45,7 +33,7 @@ const OPTIONAL_LEN: usize = 4;
 /// list that holds the first of them itself.
 ///
 /// ```
-/// use oxirush_gtp_u::{G_PDU, Packet};
+/// use oxirush_gtp_u::{MessageType, Packet};
 ///
 /// # fn main() -> Result<(), oxirush_gtp_u::Error> {
 /// let packet = Packet::uplink(0x1234_5678, 9, b"an IP packet".to_vec());
@@ -53,16 +41,32 @@ const OPTIONAL_LEN: usize = 4;
 ///
 /// let decoded = Packet::decode(&bytes)?;
 /// assert_eq!(decoded, packet);
-/// assert_eq!((decoded.message_type, decoded.teid), (G_PDU, 0x1234_5678));
+/// assert_eq!(decoded.message_type, MessageType::G_PDU);
+/// assert_eq!(decoded.teid, 0x1234_5678);
 /// assert_eq!(decoded.qfi(), Some(9));
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// `Debug` prints what a person compares with a capture: the name of the
+/// message type, the TEID in hexadecimal, and the payload as its length and
+/// all its octets in hexadecimal.
+///
+/// ```
+/// # use oxirush_gtp_u::Packet;
+/// let packet = Packet::g_pdu(0x1001, [0x45, 0, 0, 0x1c]);
+/// assert_eq!(
+///     format!("{packet:?}"),
+///     "Packet { message_type: G-PDU (255), teid: 0x00001001, sequence: None, \
+///      n_pdu_number: None, extension_headers: [], payload: 4 octets 4500001c }"
+/// );
+/// ```
+#[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Packet<P = Vec<u8>> {
-    /// Message type, such as [`G_PDU`] or [`ECHO_REQUEST`].
-    pub message_type: u8,
+    /// Message type, such as [`MessageType::G_PDU`] or
+    /// [`MessageType::ECHO_REQUEST`].
+    pub message_type: MessageType,
     /// Tunnel Endpoint Identifier, assigned by the receiver of the tunnel;
     /// 0 in path management messages and Error Indication.
     pub teid: u32,
@@ -77,9 +81,22 @@ pub struct Packet<P = Vec<u8>> {
     pub payload: P,
 }
 
+impl<P: AsRef<[u8]>> fmt::Debug for Packet<P> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Packet")
+            .field("message_type", &self.message_type)
+            .field("teid", &Teid(self.teid))
+            .field("sequence", &self.sequence)
+            .field("n_pdu_number", &self.n_pdu_number)
+            .field("extension_headers", &self.extension_headers)
+            .field("payload", &Octets(self.payload.as_ref()))
+            .finish()
+    }
+}
+
 impl<P: AsRef<[u8]>> Packet<P> {
     /// A message without optional header fields.
-    pub fn new(message_type: u8, teid: u32, payload: P) -> Self {
+    pub fn new(message_type: MessageType, teid: u32, payload: P) -> Self {
         Self {
             message_type,
             teid,
@@ -92,7 +109,7 @@ impl<P: AsRef<[u8]>> Packet<P> {
 
     /// A G-PDU without extension headers, as on S1-U.
     pub fn g_pdu(teid: u32, payload: P) -> Self {
-        Self::new(G_PDU, teid, payload)
+        Self::new(MessageType::G_PDU, teid, payload)
     }
 
     /// An uplink G-PDU on N3 or N9: its PDU Session Container holds UL PDU
@@ -135,20 +152,24 @@ impl<P: AsRef<[u8]>> Packet<P> {
 impl Packet {
     /// An Echo Request. Echo messages always carry a sequence number.
     pub fn echo_request(sequence: u16) -> Self {
-        Self::signalling(ECHO_REQUEST, sequence, &[])
+        Self::signalling(MessageType::ECHO_REQUEST, sequence, &[])
     }
 
     /// The Echo Response to an Echo Request with `sequence`. Its Recovery
     /// restart counter is 0, as TS 29.281 §7.2.2 requires.
     pub fn echo_response(sequence: u16) -> Self {
-        Self::signalling(ECHO_RESPONSE, sequence, &[InformationElement::Recovery(0)])
+        Self::signalling(
+            MessageType::ECHO_RESPONSE,
+            sequence,
+            &[InformationElement::Recovery(0)],
+        )
     }
 
     /// An Error Indication for a G-PDU with TEID `teid` sent to `peer`, the
     /// local address it reached, which has no tunnel with that TEID.
     pub fn error_indication(teid: u32, peer: IpAddr) -> Self {
         Self::signalling(
-            ERROR_INDICATION,
+            MessageType::ERROR_INDICATION,
             0,
             &[
                 InformationElement::TeidDataI(teid),
@@ -164,13 +185,13 @@ impl Packet {
     ///
     /// If `types` has more than 255 entries (there are 255 extension header
     /// types).
-    pub fn supported_extension_headers_notification(types: &[u8]) -> Self {
+    pub fn supported_extension_headers_notification(types: &[ExtensionHeaderType]) -> Self {
         assert!(
             types.len() <= 255,
             "an Extension Header Type List has at most 255 types"
         );
         Self::signalling(
-            SUPPORTED_EXTENSION_HEADERS_NOTIFICATION,
+            MessageType::SUPPORTED_EXTENSION_HEADERS_NOTIFICATION,
             0,
             &[InformationElement::ExtensionHeaderTypeList(types.to_vec())],
         )
@@ -179,12 +200,16 @@ impl Packet {
     /// An End Marker, the last message on the tunnel with TEID `teid` before
     /// its downlink moves to another path.
     pub fn end_marker(teid: u32) -> Self {
-        Self::new(END_MARKER, teid, Vec::new())
+        Self::new(MessageType::END_MARKER, teid, Vec::new())
     }
 
     /// A path management or tunnel management message: TEID 0 and the S
     /// flag set (TS 29.281 §5.1).
-    fn signalling(message_type: u8, sequence: u16, elements: &[InformationElement]) -> Self {
+    fn signalling(
+        message_type: MessageType,
+        sequence: u16,
+        elements: &[InformationElement],
+    ) -> Self {
         let payload = InformationElement::encode_all(elements)
             .expect("the elements of the constructors above always encode");
         let mut packet = Self::new(message_type, 0, payload);
@@ -235,7 +260,7 @@ fn decode<'a, P>(bytes: &'a [u8], payload: impl Fn(&'a [u8]) -> P) -> Result<Pac
             expected: rest.len(),
         });
     }
-    let message_type = header[1];
+    let message_type = MessageType(header[1]);
     let teid = u32::from_be_bytes([header[4], header[5], header[6], header[7]]);
     let (mut sequence, mut n_pdu_number, mut next) = (None, None, 0);
     let mut rest = rest;
@@ -379,22 +404,15 @@ impl<P: AsRef<[u8]>> Packet<P> {
         if self.n_pdu_number.is_some() {
             flags |= PN;
         }
-        out.extend_from_slice(&[flags, self.message_type, 0, 0]);
+        out.extend_from_slice(&[flags, self.message_type.0, 0, 0]);
         out.extend_from_slice(&self.teid.to_be_bytes());
         if flags & (E | S | PN) != 0 {
             out.extend_from_slice(&self.sequence.unwrap_or(0).to_be_bytes());
             out.push(self.n_pdu_number.unwrap_or(0));
-            out.push(
-                self.extension_headers
-                    .first()
-                    .map_or(0, ExtensionHeader::kind),
-            );
+            out.push(self.extension_headers.first().map_or(0, kind));
         }
         for (index, header) in self.extension_headers.iter().enumerate() {
-            let next = self
-                .extension_headers
-                .get(index + 1)
-                .map_or(0, ExtensionHeader::kind);
+            let next = self.extension_headers.get(index + 1).map_or(0, kind);
             header.encode(next, out)?;
         }
         out.extend_from_slice(payload);
@@ -404,13 +422,20 @@ impl<P: AsRef<[u8]>> Packet<P> {
     }
 }
 
+/// The type of an extension header, as the octet that names it to the
+/// header before it.
+fn kind(header: &ExtensionHeader) -> u8 {
+    header.kind().0
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::Ipv4Addr;
 
     use super::*;
     use crate::{
-        DownlinkPduSessionInformation, UnknownNewIes, UplinkPduSessionInformation, UplinkTimeStamps,
+        DownlinkPduSessionInformation, InformationElementType, UnknownNewIes,
+        UplinkPduSessionInformation, UplinkTimeStamps,
     };
 
     fn hex(text: &str) -> Vec<u8> {
@@ -492,7 +517,7 @@ mod tests {
         invalid_extension
             .extension_headers
             .push(ExtensionHeader::Other {
-                kind: 0x20,
+                kind: ExtensionHeaderType::SERVICE_CLASS_INDICATOR,
                 content: vec![0; 1022],
             });
         for packet in [
@@ -523,7 +548,10 @@ mod tests {
             "32 1a 0010 00000000 0000 00 00 10 0000002a 85 0004 7f000001",
         );
         round_trip(
-            &Packet::supported_extension_headers_notification(&[0x40, 0x85]),
+            &Packet::supported_extension_headers_notification(&[
+                ExtensionHeaderType::UDP_PORT,
+                ExtensionHeaderType::PDU_SESSION_CONTAINER,
+            ]),
             "32 1f 0008 00000000 0000 00 00 8d 02 40 85",
         );
         round_trip(&Packet::end_marker(7), "30 fe 0000 00000007");
@@ -709,12 +737,12 @@ mod tests {
             ExtensionHeader::UdpPort(2152),
             ExtensionHeader::PduSessionContainer(PduSessionContainer::downlink(1)),
             ExtensionHeader::Other {
-                kind: ExtensionHeader::SERVICE_CLASS_INDICATOR,
+                kind: ExtensionHeaderType::SERVICE_CLASS_INDICATOR,
                 content: vec![7, 0],
             },
             // Unknown and comprehension-required: kept for the endpoint to reject.
             ExtensionHeader::Other {
-                kind: 0xe0,
+                kind: ExtensionHeaderType(0xe0),
                 content: vec![1, 2, 3, 4, 5, 6],
             },
         ]
@@ -921,7 +949,7 @@ mod tests {
         congested.dl_congestion_information = Some(u16::MAX);
         assert!(unpadded(PduSessionContainer::Uplink(congested)).is_ok());
         packet.extension_headers = vec![ExtensionHeader::Other {
-            kind: 0,
+            kind: ExtensionHeaderType(0),
             content: vec![0, 0],
         }]
         .into();
@@ -931,18 +959,18 @@ mod tests {
         };
         assert_eq!(packet.encode(), Err(kept(0)));
         for kind in [
-            ExtensionHeader::UDP_PORT,
-            ExtensionHeader::PDU_SESSION_CONTAINER,
+            ExtensionHeaderType::UDP_PORT,
+            ExtensionHeaderType::PDU_SESSION_CONTAINER,
         ] {
             packet.extension_headers = vec![ExtensionHeader::Other {
                 kind,
                 content: vec![0, 0],
             }]
             .into();
-            assert_eq!(packet.encode(), Err(kept(kind)));
+            assert_eq!(packet.encode(), Err(kept(kind.0)));
         }
         packet.extension_headers = vec![ExtensionHeader::Other {
-            kind: 0x20,
+            kind: ExtensionHeaderType::SERVICE_CLASS_INDICATOR,
             content: vec![0],
         }]
         .into();
@@ -955,7 +983,7 @@ mod tests {
             })
         );
         packet.extension_headers = vec![ExtensionHeader::Other {
-            kind: 0x20,
+            kind: ExtensionHeaderType::SERVICE_CLASS_INDICATOR,
             content: vec![0; 1022],
         }]
         .into();
@@ -998,9 +1026,11 @@ mod tests {
             InformationElement::Recovery(0),
             InformationElement::TeidDataI(9),
             InformationElement::GtpUPeerAddress("2001:db8::1".parse().unwrap()),
-            InformationElement::ExtensionHeaderTypeList(vec![0x85]),
+            InformationElement::ExtensionHeaderTypeList(vec![
+                ExtensionHeaderType::PDU_SESSION_CONTAINER,
+            ]),
             InformationElement::Other {
-                kind: 230,
+                kind: InformationElementType::GTP_U_TUNNEL_STATUS_INFORMATION,
                 value: vec![1, 2, 3, 4],
             },
             InformationElement::PrivateExtension {
@@ -1026,11 +1056,11 @@ mod tests {
         }
         assert_eq!(
             InformationElement::decode_all(&[6, 0]),
-            Err(Error::UnknownInformationElement(6))
+            Err(Error::UnknownInformationElement(InformationElementType(6)))
         );
         for kind in [14, 133, 141, 255] {
             let other = InformationElement::Other {
-                kind,
+                kind: InformationElementType(kind),
                 value: vec![1],
             };
             assert_eq!(

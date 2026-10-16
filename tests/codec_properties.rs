@@ -1,9 +1,10 @@
 use std::net::IpAddr;
 
 use oxirush_gtp_u::{
-    DownlinkPduSessionInformation, Error, ExtensionHeader, ExtensionHeaders, InformationElement,
-    Packet, Part, PduSessionContainer, UplinkPduSessionInformation, UplinkTimeStamps,
-    parse_ipv4_icmp_echo, parse_ipv4_udp,
+    Cause, DownlinkPduSessionInformation, Error, ExtensionHeader, ExtensionHeaderType,
+    ExtensionHeaders, InformationElement, InformationElementType, MessageType, Packet, Part,
+    PduSessionContainer, UplinkPduSessionInformation, UplinkTimeStamps, parse_ipv4_icmp_echo,
+    parse_ipv4_udp,
 };
 use proptest::collection::vec;
 use proptest::option::of;
@@ -118,7 +119,10 @@ fn extension_header(valid: bool) -> impl Strategy<Value = ExtensionHeader> {
             (1u8..=255).prop_filter("typed", |kind| ![0x40, 0x85].contains(kind)),
             content(valid)
         )
-            .prop_map(|(kind, content)| ExtensionHeader::Other { kind, content }),
+            .prop_map(|(kind, content)| ExtensionHeader::Other {
+                kind: ExtensionHeaderType(kind),
+                content
+            }),
     ]
 }
 
@@ -135,7 +139,7 @@ fn packet(valid: bool) -> impl Strategy<Value = Packet> {
     )
         .prop_map(
             |(message_type, teid, sequence, n_pdu_number, (headers, one_at_a_time), payload)| {
-                let mut packet = Packet::new(message_type, teid, payload);
+                let mut packet = Packet::new(MessageType(message_type), teid, payload);
                 packet.sequence = sequence;
                 packet.n_pdu_number = n_pdu_number;
                 if one_at_a_time {
@@ -150,10 +154,10 @@ fn packet(valid: bool) -> impl Strategy<Value = Packet> {
 
 fn information_element() -> impl Strategy<Value = InformationElement> {
     prop_oneof![
+        any::<u8>().prop_map(|cause| InformationElement::Cause(Cause(cause))),
         any::<u8>().prop_map(InformationElement::Recovery),
         any::<u32>().prop_map(InformationElement::TeidDataI),
         proptest::sample::select(vec![
-            (1, 1),
             (2, 8),
             (3, 6),
             (4, 4),
@@ -180,11 +184,14 @@ fn information_element() -> impl Strategy<Value = InformationElement> {
             (127, 4),
         ])
         .prop_flat_map(|(kind, length)| {
-            vec(any::<u8>(), length)
-                .prop_map(move |value| InformationElement::OtherTv { kind, value })
+            vec(any::<u8>(), length).prop_map(move |value| InformationElement::OtherTv {
+                kind: InformationElementType(kind),
+                value,
+            })
         }),
         any::<IpAddr>().prop_map(InformationElement::GtpUPeerAddress),
-        vec(any::<u8>(), 0..8).prop_map(InformationElement::ExtensionHeaderTypeList),
+        vec(any::<u8>().prop_map(ExtensionHeaderType), 0..8)
+            .prop_map(InformationElement::ExtensionHeaderTypeList),
         (any::<u16>(), vec(any::<u8>(), 0..8)).prop_map(|(identifier, value)| {
             InformationElement::PrivateExtension { identifier, value }
         }),
@@ -192,7 +199,10 @@ fn information_element() -> impl Strategy<Value = InformationElement> {
             (128u8..255).prop_filter("typed", |kind| ![133, 141].contains(kind)),
             vec(any::<u8>(), 0..8)
         )
-            .prop_map(|(kind, value)| InformationElement::Other { kind, value }),
+            .prop_map(|(kind, value)| InformationElement::Other {
+                kind: InformationElementType(kind),
+                value
+            }),
     ]
 }
 

@@ -1,8 +1,11 @@
 //! GTP-U extension headers (TS 29.281 §5.2) and the PDU Session Container
 //! content (TS 38.415 §5.5.2).
 
+use std::fmt;
+
 use crate::error::{header_length, truncated};
-use crate::{Error, Part};
+use crate::types::Octets;
+use crate::{Error, ExtensionHeaderType, Part};
 
 // The same serializer counts validated bytes before writing them. This avoids
 // maintaining separate length and field-validation implementations.
@@ -45,7 +48,10 @@ impl EncodeBuffer for EncodedLength {
 }
 
 /// A GTP-U extension header (TS 29.281 §5.2).
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// `Debug` prints the octets of a header that is kept as received in
+/// hexadecimal, after their number.
+#[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ExtensionHeader {
     /// UDP Port: the UDP source port of the G-PDU that triggered an Error
@@ -59,38 +65,23 @@ pub enum ExtensionHeader {
     Other {
         /// Extension header type: not 0, and not a type with a variant
         /// above.
-        kind: u8,
+        kind: ExtensionHeaderType,
         /// The octets between the length octet and the next extension
         /// header type octet. Its length plus 2 is a multiple of 4.
         content: Vec<u8>,
     },
 }
 
-impl ExtensionHeader {
-    /// Service Class Indicator.
-    pub const SERVICE_CLASS_INDICATOR: u8 = 0x20;
-    /// UDP Port.
-    pub const UDP_PORT: u8 = 0x40;
-    /// RAN Container.
-    pub const RAN_CONTAINER: u8 = 0x81;
-    /// Long PDCP PDU Number, the value current senders use.
-    pub const LONG_PDCP_PDU_NUMBER: u8 = 0x03;
-    /// Long PDCP PDU Number as sent by earlier releases.
-    pub const LONG_PDCP_PDU_NUMBER_LEGACY: u8 = 0x82;
-    /// Xw RAN Container.
-    pub const XW_RAN_CONTAINER: u8 = 0x83;
-    /// NR RAN Container.
-    pub const NR_RAN_CONTAINER: u8 = 0x84;
-    /// PDU Session Container.
-    pub const PDU_SESSION_CONTAINER: u8 = 0x85;
-    /// PDCP PDU Number.
-    pub const PDCP_PDU_NUMBER: u8 = 0xc0;
+// The types with a variant, as the octets that the decoder matches.
+const UDP_PORT: u8 = ExtensionHeaderType::UDP_PORT.0;
+const PDU_SESSION_CONTAINER: u8 = ExtensionHeaderType::PDU_SESSION_CONTAINER.0;
 
+impl ExtensionHeader {
     /// The extension header type.
-    pub fn kind(&self) -> u8 {
+    pub fn kind(&self) -> ExtensionHeaderType {
         match self {
-            ExtensionHeader::UdpPort(_) => Self::UDP_PORT,
-            ExtensionHeader::PduSessionContainer(_) => Self::PDU_SESSION_CONTAINER,
+            ExtensionHeader::UdpPort(_) => ExtensionHeaderType::UDP_PORT,
+            ExtensionHeader::PduSessionContainer(_) => ExtensionHeaderType::PDU_SESSION_CONTAINER,
             ExtensionHeader::Other { kind, .. } => *kind,
         }
     }
@@ -98,13 +89,13 @@ impl ExtensionHeader {
     /// Whether an endpoint that does not know this type must discard the
     /// message (bit 8 of the type, TS 29.281 §5.2.1).
     pub fn comprehension_required(&self) -> bool {
-        self.kind() & 0x80 != 0
+        self.kind().comprehension_required()
     }
 
     /// Decode the content of an extension header of type `kind`.
     pub(crate) fn decode(kind: u8, content: &[u8]) -> Result<Self, Error> {
         match kind {
-            Self::UDP_PORT => match *content {
+            UDP_PORT => match *content {
                 [high, low] => Ok(ExtensionHeader::UdpPort(u16::from_be_bytes([high, low]))),
                 _ => Err(Error::InvalidLength {
                     what: Part::UdpPort,
@@ -112,11 +103,11 @@ impl ExtensionHeader {
                     expected: 4,
                 }),
             },
-            Self::PDU_SESSION_CONTAINER => {
+            PDU_SESSION_CONTAINER => {
                 PduSessionContainer::decode(content).map(ExtensionHeader::PduSessionContainer)
             }
             _ => Ok(ExtensionHeader::Other {
-                kind,
+                kind: ExtensionHeaderType(kind),
                 content: content.to_vec(),
             }),
         }
@@ -136,10 +127,10 @@ impl ExtensionHeader {
             ExtensionHeader::UdpPort(port) => out.extend_from_slice(&port.to_be_bytes()),
             ExtensionHeader::PduSessionContainer(container) => container.encode(out)?,
             ExtensionHeader::Other { kind, content } => {
-                if matches!(*kind, 0 | Self::UDP_PORT | Self::PDU_SESSION_CONTAINER) {
+                if matches!(kind.0, 0 | UDP_PORT | PDU_SESSION_CONTAINER) {
                     return Err(Error::InvalidType {
                         what: Part::ExtensionHeader,
-                        kind: *kind,
+                        kind: kind.0,
                     });
                 }
                 if (content.len() + 2) % 4 != 0 {
@@ -165,8 +156,25 @@ impl ExtensionHeader {
     }
 }
 
+impl fmt::Debug for ExtensionHeader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ExtensionHeader::UdpPort(port) => f.debug_tuple("UdpPort").field(port).finish(),
+            ExtensionHeader::PduSessionContainer(container) => f
+                .debug_tuple("PduSessionContainer")
+                .field(container)
+                .finish(),
+            ExtensionHeader::Other { kind, content } => f
+                .debug_struct("Other")
+                .field("kind", kind)
+                .field("content", &Octets(content))
+                .finish(),
+        }
+    }
+}
+
 /// The content of a PDU Session Container (TS 38.415 §5.5.2).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PduSessionContainer {
     /// DL PDU SESSION INFORMATION (PDU type 0).
@@ -227,6 +235,22 @@ impl PduSessionContainer {
                 // No content is a container of 2 octets, where the least is 4.
                 _ => Err(header_length(Part::PduSessionContainer, content.len())),
             },
+        }
+    }
+}
+
+impl fmt::Debug for PduSessionContainer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PduSessionContainer::Downlink(information) => {
+                f.debug_tuple("Downlink").field(information).finish()
+            }
+            PduSessionContainer::Uplink(information) => {
+                f.debug_tuple("Uplink").field(information).finish()
+            }
+            PduSessionContainer::Other(content) => {
+                f.debug_tuple("Other").field(&Octets(content)).finish()
+            }
         }
     }
 }
@@ -377,7 +401,7 @@ pub struct UplinkPduSessionInformation {
 /// New IEs of UL PDU Session Information that this crate does not decode:
 /// those announced by New IE Flags 3 to 6 and by extension octets of the
 /// New IE Flags (TS 38.415 Annex A).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct UnknownNewIes {
     /// The New IE Flags octets, extension octets included, with New IE
     /// Flags 0 to 2 clear. The first octet is not 0, and bit 7 (E) of an
@@ -386,6 +410,15 @@ pub struct UnknownNewIes {
     /// The octets after the IEs this crate decodes, padding included: the
     /// length of the whole container content is a multiple of 4 minus 2.
     pub content: Vec<u8>,
+}
+
+impl fmt::Debug for UnknownNewIes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UnknownNewIes")
+            .field("flags", &Octets(&self.flags))
+            .field("content", &Octets(&self.content))
+            .finish()
+    }
 }
 
 /// The QoS monitoring time stamps of UL PDU Session Information.

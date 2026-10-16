@@ -16,13 +16,18 @@ use crate::ExtensionHeader;
 /// moves the list to the heap.
 ///
 /// ```
-/// use oxirush_gtp_u::{ExtensionHeader, ExtensionHeaders, Packet, PduSessionContainer};
+/// use oxirush_gtp_u::{
+///     ExtensionHeader, ExtensionHeaderType, ExtensionHeaders, Packet, PduSessionContainer,
+/// };
 ///
 /// # fn main() -> Result<(), oxirush_gtp_u::Error> {
 /// // A message gets its headers one at a time, or all at once
 /// let mut packet = Packet::uplink(0x1234_5678, 9, b"an IP packet".to_vec());
 /// packet.extension_headers.push(ExtensionHeader::UdpPort(2152));
-/// let unknown = ExtensionHeader::Other { kind: 0x21, content: vec![1, 2] };
+/// let unknown = ExtensionHeader::Other {
+///     kind: ExtensionHeaderType(0x21),
+///     content: vec![1, 2],
+/// };
 /// packet.extension_headers.push(unknown.clone());
 /// let same = ExtensionHeaders::from([
 ///     ExtensionHeader::PduSessionContainer(PduSessionContainer::uplink(9)),
@@ -34,7 +39,7 @@ use crate::ExtensionHeader;
 /// // A decoded message has every header of the chain, in its order
 /// let decoded = Packet::decode(&packet.encode()?)?;
 /// let headers = &decoded.extension_headers;
-/// let kinds: Vec<u8> = headers.iter().map(ExtensionHeader::kind).collect();
+/// let kinds: Vec<u8> = headers.iter().map(|header| header.kind().0).collect();
 /// assert_eq!(kinds, [0x85, 0x40, 0x21]);
 /// assert_eq!(decoded.extension_headers[2], unknown);
 /// assert_eq!(decoded.extension_headers.len(), 3);
@@ -254,7 +259,7 @@ impl Iterator for ExtensionHeadersIntoIter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::PduSessionContainer;
+    use crate::{ExtensionHeaderType, PduSessionContainer};
 
     fn headers(count: usize) -> Vec<ExtensionHeader> {
         (0..count)
@@ -262,7 +267,7 @@ mod tests {
                 0 => ExtensionHeader::PduSessionContainer(PduSessionContainer::uplink(index as u8)),
                 1 => ExtensionHeader::UdpPort(index as u16),
                 _ => ExtensionHeader::Other {
-                    kind: 0x21,
+                    kind: ExtensionHeaderType(0x21),
                     content: vec![index as u8, 0],
                 },
             })
@@ -342,7 +347,11 @@ mod tests {
                         changed[count - 1],
                         ExtensionHeader::UdpPort(count as u16 - 1)
                     );
-                    assert!(changed.iter().all(|header| header.kind() == 0x40));
+                    assert!(
+                        changed
+                            .iter()
+                            .all(|header| header.kind() == ExtensionHeaderType::UDP_PORT)
+                    );
                 }
             }
         }

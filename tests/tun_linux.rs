@@ -17,7 +17,7 @@ use std::time::Duration;
 use oxirush_gtp_u::tun::{Routing, TunConfig, TunPort};
 use oxirush_gtp_u::upf_sim::{Session, UpfSimulator};
 use oxirush_gtp_u::{
-    END_MARKER, EchoKind, Endpoint, Packet, RemoteTunnel, ipv4_icmp_echo_reply,
+    EchoKind, Endpoint, MessageType, Packet, RemoteTunnel, ipv4_icmp_echo_reply,
     ipv4_icmp_echo_request, parse_ipv4_icmp_echo,
 };
 use tokio::process::Command;
@@ -672,7 +672,7 @@ async fn an_endpoint_carries_a_tunnel_s_tun_and_closes_it_with_the_tunnel() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(message.packet.message_type, END_MARKER);
+    assert_eq!(message.packet.message_type, MessageType::END_MARKER);
 
     // The tunnel keeps its TUN when it is installed again, here with
     // another QFI, and its removal closes the TUN.

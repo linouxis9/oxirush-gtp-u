@@ -1,15 +1,24 @@
 //! GTP-U information elements (TS 29.281 §8), the content of signalling
 //! messages.
 
+use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use crate::error::truncated;
-use crate::{Error, Part};
+use crate::types::{Octets, Teid};
+use crate::{Cause, Error, ExtensionHeaderType, InformationElementType, Part};
 
 /// A GTP-U information element (TS 29.281 §8).
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// `Debug` prints a TEID and the octets of a value that is kept as received
+/// in hexadecimal.
+#[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum InformationElement {
+    /// Cause (TS 29.060 §7.7.1): why a request is refused. GTP-U has it in
+    /// the Echo Response to an Echo Request that is not well formed
+    /// (TS 29.060 §11.1).
+    Cause(Cause),
     /// Recovery: a restart counter, which GTP-U sends as 0 and ignores.
     Recovery(u8),
     /// TEID Data I: the TEID of the G-PDU that triggered an Error
@@ -20,7 +29,7 @@ pub enum InformationElement {
     GtpUPeerAddress(IpAddr),
     /// Extension Header Type List: the extension header types a node
     /// supports, at most 255.
-    ExtensionHeaderTypeList(Vec<u8>),
+    ExtensionHeaderTypeList(Vec<ExtensionHeaderType>),
     /// Private Extension: vendor or operator specific information.
     PrivateExtension {
         /// Extension Identifier, a private enterprise number.
@@ -32,8 +41,8 @@ pub enum InformationElement {
     /// expected in GTP-U signalling. Its known fixed length allows the
     /// receiver to skip it (TS 29.060 section 11.1.11).
     OtherTv {
-        /// Type, excluding Recovery and TEID Data I.
-        kind: u8,
+        /// Type, excluding Cause, Recovery and TEID Data I.
+        kind: InformationElementType,
         /// The fixed-length value, kept as received.
         value: Vec<u8>,
     },
@@ -43,37 +52,34 @@ pub enum InformationElement {
     /// encoder then refuses as `Other`.
     Other {
         /// Type.
-        kind: u8,
+        kind: InformationElementType,
         /// Value.
         value: Vec<u8>,
     },
 }
 
-impl InformationElement {
-    /// Recovery, a TV element.
-    pub const RECOVERY: u8 = 14;
-    /// TEID Data I, a TV element.
-    pub const TEID_DATA_I: u8 = 16;
-    /// GTP-U Peer Address.
-    pub const GTP_U_PEER_ADDRESS: u8 = 133;
-    /// Extension Header Type List, a TLV element with a one-octet length.
-    pub const EXTENSION_HEADER_TYPE_LIST: u8 = 141;
-    /// GTP-U Tunnel Status Information, kept as [`Other`](Self::Other).
-    pub const GTP_U_TUNNEL_STATUS_INFORMATION: u8 = 230;
-    /// Recovery Time Stamp, kept as [`Other`](Self::Other): the start time
-    /// of the sender, in the first four octets of an NTP timestamp.
-    pub const RECOVERY_TIME_STAMP: u8 = 231;
-    /// Private Extension.
-    pub const PRIVATE_EXTENSION: u8 = 255;
+// The types with a variant, as the octets that the decoder matches.
+const CAUSE: u8 = InformationElementType::CAUSE.0;
+const RECOVERY: u8 = InformationElementType::RECOVERY.0;
+const TEID_DATA_I: u8 = InformationElementType::TEID_DATA_I.0;
+const GTP_U_PEER_ADDRESS: u8 = InformationElementType::GTP_U_PEER_ADDRESS.0;
+const EXTENSION_HEADER_TYPE_LIST: u8 = InformationElementType::EXTENSION_HEADER_TYPE_LIST.0;
+const PRIVATE_EXTENSION: u8 = InformationElementType::PRIVATE_EXTENSION.0;
 
+impl InformationElement {
     /// The information element type.
-    pub fn kind(&self) -> u8 {
+    pub fn kind(&self) -> InformationElementType {
         match self {
-            InformationElement::Recovery(_) => Self::RECOVERY,
-            InformationElement::TeidDataI(_) => Self::TEID_DATA_I,
-            InformationElement::GtpUPeerAddress(_) => Self::GTP_U_PEER_ADDRESS,
-            InformationElement::ExtensionHeaderTypeList(_) => Self::EXTENSION_HEADER_TYPE_LIST,
-            InformationElement::PrivateExtension { .. } => Self::PRIVATE_EXTENSION,
+            InformationElement::Cause(_) => InformationElementType::CAUSE,
+            InformationElement::Recovery(_) => InformationElementType::RECOVERY,
+            InformationElement::TeidDataI(_) => InformationElementType::TEID_DATA_I,
+            InformationElement::GtpUPeerAddress(_) => InformationElementType::GTP_U_PEER_ADDRESS,
+            InformationElement::ExtensionHeaderTypeList(_) => {
+                InformationElementType::EXTENSION_HEADER_TYPE_LIST
+            }
+            InformationElement::PrivateExtension { .. } => {
+                InformationElementType::PRIVATE_EXTENSION
+            }
             InformationElement::OtherTv { kind, .. } => *kind,
             InformationElement::Other { kind, .. } => *kind,
         }
@@ -85,13 +91,19 @@ impl InformationElement {
         let mut elements = Vec::new();
         while let Some((&kind, rest)) = bytes.split_first() {
             let (element, rest) = match kind {
-                Self::RECOVERY => {
+                CAUSE => {
+                    let (&cause, rest) = rest
+                        .split_first()
+                        .ok_or_else(|| truncated(Part::Cause, 1, rest))?;
+                    (InformationElement::Cause(Cause(cause)), rest)
+                }
+                RECOVERY => {
                     let (&counter, rest) = rest
                         .split_first()
                         .ok_or_else(|| truncated(Part::Recovery, 1, rest))?;
                     (InformationElement::Recovery(counter), rest)
                 }
-                Self::TEID_DATA_I => {
+                TEID_DATA_I => {
                     let (teid, rest) = rest
                         .split_first_chunk::<4>()
                         .ok_or_else(|| truncated(Part::TeidDataI, 4, rest))?;
@@ -100,7 +112,7 @@ impl InformationElement {
                         rest,
                     )
                 }
-                Self::EXTENSION_HEADER_TYPE_LIST => {
+                EXTENSION_HEADER_TYPE_LIST => {
                     let list = Part::ExtensionHeaderTypeList;
                     let (&length, rest) =
                         rest.split_first().ok_or_else(|| truncated(list, 1, rest))?;
@@ -108,10 +120,8 @@ impl InformationElement {
                     let (types, rest) = rest
                         .split_at_checked(length)
                         .ok_or_else(|| truncated(list, length, rest))?;
-                    (
-                        InformationElement::ExtensionHeaderTypeList(types.to_vec()),
-                        rest,
-                    )
+                    let types = types.iter().copied().map(ExtensionHeaderType).collect();
+                    (InformationElement::ExtensionHeaderTypeList(types), rest)
                 }
                 128.. => {
                     let element = Part::InformationElement;
@@ -125,13 +135,15 @@ impl InformationElement {
                     (Self::decode_tlv(kind, value)?, rest)
                 }
                 _ => {
-                    let length = tv_length(kind).ok_or(Error::UnknownInformationElement(kind))?;
+                    let length = tv_length(kind).ok_or(Error::UnknownInformationElement(
+                        InformationElementType(kind),
+                    ))?;
                     let (value, rest) = rest
                         .split_at_checked(length)
                         .ok_or_else(|| truncated(Part::InformationElement, length, rest))?;
                     (
                         InformationElement::OtherTv {
-                            kind,
+                            kind: InformationElementType(kind),
                             value: value.to_vec(),
                         },
                         rest,
@@ -146,7 +158,7 @@ impl InformationElement {
 
     fn decode_tlv(kind: u8, value: &[u8]) -> Result<Self, Error> {
         Ok(match kind {
-            Self::GTP_U_PEER_ADDRESS => InformationElement::GtpUPeerAddress(
+            GTP_U_PEER_ADDRESS => InformationElement::GtpUPeerAddress(
                 if let Ok(octets) = <[u8; 4]>::try_from(value) {
                     Ipv4Addr::from(octets).into()
                 } else if let Ok(octets) = <[u8; 16]>::try_from(value) {
@@ -160,7 +172,7 @@ impl InformationElement {
                     });
                 },
             ),
-            Self::PRIVATE_EXTENSION => {
+            PRIVATE_EXTENSION => {
                 let (identifier, value) =
                     value.split_first_chunk::<2>().ok_or(Error::InvalidLength {
                         what: Part::PrivateExtension,
@@ -173,7 +185,7 @@ impl InformationElement {
                 }
             }
             _ => InformationElement::Other {
-                kind,
+                kind: InformationElementType(kind),
                 value: value.to_vec(),
             },
         })
@@ -190,8 +202,9 @@ impl InformationElement {
     }
 
     fn encode(&self, out: &mut Vec<u8>) -> Result<(), Error> {
-        out.push(self.kind());
+        out.push(self.kind().0);
         match self {
+            InformationElement::Cause(cause) => out.push(cause.0),
             InformationElement::Recovery(counter) => out.push(*counter),
             InformationElement::TeidDataI(teid) => out.extend_from_slice(&teid.to_be_bytes()),
             InformationElement::ExtensionHeaderTypeList(types) => {
@@ -201,7 +214,7 @@ impl InformationElement {
                     max: u64::from(u8::MAX),
                 })?;
                 out.push(length);
-                out.extend_from_slice(types);
+                out.extend(types.iter().map(|kind| kind.0));
             }
             InformationElement::GtpUPeerAddress(IpAddr::V4(address)) => {
                 push_tlv(out, &[&address.octets()])?;
@@ -213,11 +226,11 @@ impl InformationElement {
                 push_tlv(out, &[&identifier.to_be_bytes(), value])?;
             }
             InformationElement::OtherTv { kind, value } => {
-                let length = tv_length(*kind)
-                    .filter(|_| !matches!(*kind, Self::RECOVERY | Self::TEID_DATA_I))
+                let length = tv_length(kind.0)
+                    .filter(|_| !matches!(kind.0, CAUSE | RECOVERY | TEID_DATA_I))
                     .ok_or(Error::InvalidType {
                         what: Part::InformationElement,
-                        kind: *kind,
+                        kind: kind.0,
                     })?;
                 if value.len() != length {
                     return Err(Error::InvalidLength {
@@ -229,23 +242,57 @@ impl InformationElement {
                 out.extend_from_slice(value);
             }
             InformationElement::Other { kind, value } => {
-                if *kind < 128
+                if kind.0 < 128
                     || matches!(
-                        *kind,
-                        Self::GTP_U_PEER_ADDRESS
-                            | Self::EXTENSION_HEADER_TYPE_LIST
-                            | Self::PRIVATE_EXTENSION
+                        kind.0,
+                        GTP_U_PEER_ADDRESS | EXTENSION_HEADER_TYPE_LIST | PRIVATE_EXTENSION
                     )
                 {
                     return Err(Error::InvalidType {
                         what: Part::InformationElement,
-                        kind: *kind,
+                        kind: kind.0,
                     });
                 }
                 push_tlv(out, &[value])?;
             }
         }
         Ok(())
+    }
+}
+
+impl fmt::Debug for InformationElement {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            InformationElement::Cause(cause) => f.debug_tuple("Cause").field(cause).finish(),
+            InformationElement::Recovery(counter) => {
+                f.debug_tuple("Recovery").field(counter).finish()
+            }
+            InformationElement::TeidDataI(teid) => {
+                f.debug_tuple("TeidDataI").field(&Teid(*teid)).finish()
+            }
+            InformationElement::GtpUPeerAddress(address) => {
+                f.debug_tuple("GtpUPeerAddress").field(address).finish()
+            }
+            InformationElement::ExtensionHeaderTypeList(types) => f
+                .debug_tuple("ExtensionHeaderTypeList")
+                .field(types)
+                .finish(),
+            InformationElement::PrivateExtension { identifier, value } => f
+                .debug_struct("PrivateExtension")
+                .field("identifier", identifier)
+                .field("value", &Octets(value))
+                .finish(),
+            InformationElement::OtherTv { kind, value } => f
+                .debug_struct("OtherTv")
+                .field("kind", kind)
+                .field("value", &Octets(value))
+                .finish(),
+            InformationElement::Other { kind, value } => f
+                .debug_struct("Other")
+                .field("kind", kind)
+                .field("value", &Octets(value))
+                .finish(),
+        }
     }
 }
 
@@ -287,9 +334,8 @@ mod tests {
     #[test]
     fn every_known_tv_ie_has_its_specified_length() {
         // TS 29.060 V19.0.0 table 37, excluding the separately typed
-        // Recovery (14) and TEID Data I (16).
+        // Cause (1), Recovery (14) and TEID Data I (16).
         let types = [
-            (1, 1),
             (2, 8),
             (3, 6),
             (4, 4),
@@ -317,7 +363,7 @@ mod tests {
         ];
         for (kind, length) in types {
             let element = InformationElement::OtherTv {
-                kind,
+                kind: InformationElementType(kind),
                 value: vec![0xaa; length],
             };
             let mut wire = vec![kind];
@@ -343,7 +389,7 @@ mod tests {
             for wrong in [length - 1, length + 1] {
                 assert_eq!(
                     InformationElement::encode_all(&[InformationElement::OtherTv {
-                        kind,
+                        kind: InformationElementType(kind),
                         value: vec![0xaa; wrong]
                     }]),
                     Err(Error::InvalidLength {
@@ -354,10 +400,10 @@ mod tests {
                 );
             }
         }
-        for kind in [0, 6, 7, 10, 30, 116, 117, 126, 128, 255, 14, 16] {
+        for kind in [0, 6, 7, 10, 30, 116, 117, 126, 128, 255, 1, 14, 16] {
             assert_eq!(
                 InformationElement::encode_all(&[InformationElement::OtherTv {
-                    kind,
+                    kind: InformationElementType(kind),
                     value: vec![]
                 }]),
                 Err(Error::InvalidType {

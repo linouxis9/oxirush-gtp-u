@@ -72,6 +72,13 @@
 //! sequence number, delay and congestion fields, and the downlink Burst Size
 //! and Time To Next Burst.
 //!
+//! The numbers that say what a message, an extension header, an information
+//! element or a cause is are types that know the names of the specification:
+//! [`MessageType`], [`ExtensionHeaderType`], [`InformationElementType`] and
+//! [`Cause`]. `Debug` prints these names, a TEID in hexadecimal, and a payload
+//! or a value that is kept as received as its length and all its octets in
+//! hexadecimal.
+//!
 //! Decoding follows the receiver rules of §5.1: the flags decide which
 //! optional fields are read and the spare bit is ignored. Extension headers,
 //! TLV information elements and uplink New IEs that have no type of their own
@@ -152,6 +159,7 @@
 //! ```text
 //! src/
 //! ├── packet.rs              owned and borrowed messages (TS 29.281 §5.1, §6, §7)
+//! ├── types.rs               message, header and element types, and causes, by name
 //! ├── extension.rs           extension headers and PDU Session Container (TS 38.415)
 //! ├── headers.rs             the list of the extension headers of a message
 //! ├── ie.rs, error.rs         information elements and codec errors
@@ -187,6 +195,7 @@ mod icmp;
 mod ie;
 mod ipv4;
 mod packet;
+mod types;
 
 #[cfg(feature = "endpoint")]
 mod datagram;
@@ -221,12 +230,10 @@ pub use icmp::{
 };
 pub use ie::InformationElement;
 pub use ipv4::{ipv4_udp, parse_ipv4_udp};
-pub use packet::{
-    ECHO_REQUEST, ECHO_RESPONSE, END_MARKER, ERROR_INDICATION, G_PDU, Packet,
-    SUPPORTED_EXTENSION_HEADERS_NOTIFICATION, TUNNEL_STATUS,
-};
+pub use packet::Packet;
 #[cfg(feature = "endpoint")]
 pub use stats::ReceiveStats;
+pub use types::{Cause, ExtensionHeaderType, InformationElementType, MessageType};
 
 /// The UDP port of GTP-U.
 pub const PORT: u16 = 2152;

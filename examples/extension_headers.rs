@@ -4,14 +4,14 @@
 //! cargo run --example extension_headers
 //! ```
 
-use oxirush_gtp_u::{ExtensionHeader, Packet};
+use oxirush_gtp_u::{ExtensionHeader, ExtensionHeaderType, Packet};
 
 fn main() -> Result<(), oxirush_gtp_u::Error> {
     // The container of an uplink G-PDU, then a header of a type that the
     // crate keeps as octets
     let mut packet = Packet::uplink(0x1234_5678, 9, b"an IP packet".to_vec());
     packet.extension_headers.push(ExtensionHeader::Other {
-        kind: ExtensionHeader::SERVICE_CLASS_INDICATOR,
+        kind: ExtensionHeaderType::SERVICE_CLASS_INDICATOR,
         content: vec![7, 0],
     });
 
@@ -19,10 +19,7 @@ fn main() -> Result<(), oxirush_gtp_u::Error> {
     let decoded = Packet::decode(&packet.encode()?)?;
     for header in &decoded.extension_headers {
         let required = header.comprehension_required();
-        println!(
-            "type {:#04x}, comprehension required: {required}",
-            header.kind()
-        );
+        println!("{}, comprehension required: {required}", header.kind());
     }
     println!("{:?}", decoded.extension_headers[1]);
     Ok(())

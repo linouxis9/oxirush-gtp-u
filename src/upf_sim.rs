@@ -33,9 +33,9 @@ use tracing::{debug, warn};
 use crate::datagram::DatagramSocket;
 #[cfg(all(target_os = "linux", feature = "tun"))]
 use crate::tun::{TunConfig, TunPort};
+use crate::types::Teid;
 use crate::{
-    ERROR_INDICATION, G_PDU, Packet, ReceiveStats, RemoteTunnel, ipv4_icmp_echo_reply, ipv4_udp,
-    parse_ipv4_udp,
+    MessageType, Packet, ReceiveStats, RemoteTunnel, ipv4_icmp_echo_reply, ipv4_udp, parse_ipv4_udp,
 };
 
 mod sessions;
@@ -43,8 +43,8 @@ mod sessions;
 use sessions::TunAttachment;
 use sessions::{Incarnation, SessionRegistry, UplinkTarget, stopped};
 
-/// The tunnels of one PDU session.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// The tunnels of one PDU session. `Debug` prints the TEIDs in hexadecimal.
+#[derive(Clone, Copy, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct Session {
     /// The TEID the UPF receives uplink G-PDUs on.
@@ -74,8 +74,19 @@ impl Session {
     }
 }
 
+impl fmt::Debug for Session {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Session")
+            .field("uplink_teid", &Teid(self.uplink_teid))
+            .field("downlink_teid", &Teid(self.downlink_teid))
+            .field("gnb_address", &self.gnb_address)
+            .field("qfi", &self.qfi)
+            .finish()
+    }
+}
+
 /// An uplink G-PDU of a session, as the UPF received it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct UplinkPacket {
     /// The session's uplink TEID.
@@ -84,6 +95,16 @@ pub struct UplinkPacket {
     pub from: SocketAddr,
     /// The G-PDU: its payload is the UE's IP packet.
     pub packet: Packet,
+}
+
+impl fmt::Debug for UplinkPacket {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UplinkPacket")
+            .field("uplink_teid", &Teid(self.uplink_teid))
+            .field("from", &self.from)
+            .field("packet", &self.packet)
+            .finish()
+    }
 }
 
 /// A test UPF on one N3 socket.
@@ -467,8 +488,8 @@ async fn receive(
             }
         };
         match packet.message_type {
-            G_PDU => {}
-            ERROR_INDICATION => {
+            MessageType::G_PDU => {}
+            MessageType::ERROR_INDICATION => {
                 debug!(
                     "UPF got an Error Indication from {from}: {:?}",
                     packet.information_elements()
@@ -481,7 +502,10 @@ async fn receive(
             }
         }
         let Some(target) = state.uplink_target(packet.teid) else {
-            debug!("UPF G-PDU for unknown TEID {} from {from}", packet.teid);
+            debug!(
+                "UPF G-PDU for unknown TEID {:#010x} from {from}",
+                packet.teid
+            );
             socket.error_indication(packet.teid, from).await;
             continue;
         };
@@ -491,7 +515,7 @@ async fn receive(
                 send_downlink(&socket, &state, packet.teid, &target.incarnation, reply).await
         {
             debug!(
-                "UPF echo reply on uplink TEID {} failed: {error}",
+                "UPF echo reply on uplink TEID {:#010x} failed: {error}",
                 packet.teid
             );
         }

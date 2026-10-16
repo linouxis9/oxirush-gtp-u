@@ -1,5 +1,7 @@
 use std::fmt;
 
+use crate::InformationElementType;
+
 /// Why a GTP-U message, or an inner IPv4 packet, cannot be decoded or encoded.
 ///
 /// An error names the part of the message that is wrong and has the numbers
@@ -75,7 +77,7 @@ pub enum Error {
     Malformed(Part),
     /// A TV information element of unknown type. Its length is not
     /// encoded, so the rest of the message cannot be parsed.
-    UnknownInformationElement(u8),
+    UnknownInformationElement(InformationElementType),
     /// An IPv4 packet that is not what the helper handles.
     UnexpectedPacket(Expected),
     /// A checksum does not match.
@@ -122,6 +124,8 @@ pub enum Part {
     NewIeFlags,
     /// An information element (TS 29.281 §8).
     InformationElement,
+    /// The Cause information element.
+    Cause,
     /// The Recovery information element.
     Recovery,
     /// The TEID Data I information element.
@@ -163,6 +167,7 @@ impl fmt::Display for Part {
             Part::UlQfiSequenceNumber => "UL QFI Sequence Number",
             Part::NewIeFlags => "New IE Flags",
             Part::InformationElement => "information element",
+            Part::Cause => "Cause",
             Part::Recovery => "Recovery",
             Part::TeidDataI => "TEID Data I",
             Part::GtpUPeerAddress => "GTP-U Peer Address",
@@ -261,7 +266,7 @@ impl fmt::Display for Error {
             Error::Missing(what) => write!(f, "{what} missing"),
             Error::Malformed(what) => write!(f, "malformed {what}"),
             Error::UnknownInformationElement(kind) => {
-                write!(f, "unknown TV information element type {kind}")
+                write!(f, "unknown TV information element type {}", kind.0)
             }
             Error::UnexpectedPacket(expected) => write!(f, "unexpected IPv4 packet: {expected}"),
             Error::InvalidChecksum {
@@ -367,7 +372,7 @@ mod tests {
             (Error::Missing(Part::Ppi), "PPI missing"),
             (Error::Malformed(Part::NewIeFlags), "malformed New IE Flags"),
             (
-                Error::UnknownInformationElement(6),
+                Error::UnknownInformationElement(InformationElementType(6)),
                 "unknown TV information element type 6",
             ),
             (

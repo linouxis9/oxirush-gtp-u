@@ -22,7 +22,7 @@ async fn main() -> std::io::Result<()> {
     let (length, _) = peer.recv_from(&mut buffer).await?;
     let response = Packet::decode(&buffer[..length])?;
     println!(
-        "message type {}, sequence number {:?}, {:?}",
+        "{}, sequence number {:?}, {:?}",
         response.message_type,
         response.sequence,
         response.information_elements()?
@@ -34,7 +34,7 @@ async fn main() -> std::io::Result<()> {
     gnb.send(1, 5, b"an IP packet".as_slice()).await?;
     let indication = received.recv().await.expect("the endpoint is running");
     println!(
-        "message type {} for RAN UE {} session {}: {:?}",
+        "{} for RAN UE {} session {}: {:?}",
         indication.packet.message_type,
         indication.ran_id,
         indication.session_id,

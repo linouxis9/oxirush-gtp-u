@@ -14,7 +14,8 @@ use crate::ReceiveStats;
 use crate::datagram::DatagramSocket;
 #[cfg(all(target_os = "linux", feature = "tun"))]
 use crate::tun::{TunConfig, TunPort};
-use crate::{END_MARKER, ERROR_INDICATION, G_PDU, Packet};
+use crate::types::Teid;
+use crate::{MessageType, Packet};
 
 mod routes;
 use routes::RouteTable;
@@ -30,8 +31,8 @@ type N3FastPath = (crate::ebpf::FastPath, std::net::Ipv4Addr);
 const QUEUE: usize = 256;
 
 /// The far end of a tunnel: the peer's GTP-U address and the TEID it
-/// assigned (an F-TEID).
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+/// assigned (an F-TEID). `Debug` prints the TEID in hexadecimal.
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RemoteTunnel {
     /// The peer's address, normally on port [`PORT`](crate::PORT).
@@ -44,6 +45,15 @@ impl RemoteTunnel {
     /// The tunnel that the peer at `address` receives on `teid`.
     pub fn new(address: SocketAddr, teid: u32) -> Self {
         Self { address, teid }
+    }
+}
+
+impl fmt::Debug for RemoteTunnel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RemoteTunnel")
+            .field("address", &self.address)
+            .field("teid", &Teid(self.teid))
+            .finish()
     }
 }
 
@@ -532,25 +542,28 @@ async fn receive(
             continue;
         };
         trace!(
-            "N3 received type {} TEID {} ({} bytes) from {from}",
+            "N3 received {} TEID {:#010x} ({} bytes) from {from}",
             packet.message_type,
             packet.teid,
             packet.payload.len()
         );
         let key = match packet.message_type {
-            G_PDU | END_MARKER => {
+            MessageType::G_PDU | MessageType::END_MARKER => {
                 let found = routes.session(packet.teid);
                 match found {
                     Some(key) => key,
-                    None if packet.message_type == G_PDU => {
-                        debug!("N3 G-PDU for unknown TEID {} from {from}", packet.teid);
+                    None if packet.message_type == MessageType::G_PDU => {
+                        debug!(
+                            "N3 G-PDU for unknown TEID {:#010x} from {from}",
+                            packet.teid
+                        );
                         socket.error_indication(packet.teid, from).await;
                         continue;
                     }
                     None => continue,
                 }
             }
-            ERROR_INDICATION => match routes.error_indication_session(&packet) {
+            MessageType::ERROR_INDICATION => match routes.error_indication_session(&packet) {
                 Some(key) => key,
                 None => {
                     debug!("N3 Error Indication from {from} matches no tunnel");
@@ -565,7 +578,7 @@ async fn receive(
         // A tunnel's IP packets go to its TUN, if it has one.
         #[cfg(all(target_os = "linux", feature = "tun"))]
         let tun = match packet.message_type {
-            G_PDU => routes.tun(key),
+            MessageType::G_PDU => routes.tun(key),
             _ => None,
         };
         #[cfg(all(target_os = "linux", feature = "tun"))]
