@@ -97,6 +97,10 @@ First release.
 - `upf_sim::UpfSimulator` and the `oxirush-upf-sim` binary: a test UPF with
   an IPv4 UDP and ICMP echo service, End Marker on a path switch, and an
   optional TUN per session.
+- The test UPF's receive task waits for no session: a reply of the echo
+  service whose session's downlink a send or a switch holds is sent from a
+  task of its own, 256 at most. It waited there, and one session held up
+  the Echo Requests and the packets of all the others.
 - `tun::TunPort` (Linux, `tun` feature): TUN devices with policy, VRF or UPF
   routing set up over rtnetlink, and without IPv6 addresses, so Linux sends
   nothing through them unasked. A `TunPort` is `Clone`: clones share the

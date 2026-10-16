@@ -28,7 +28,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
-use tokio::task::{AbortHandle, JoinHandle};
+use tokio::task::{AbortHandle, JoinHandle, JoinSet};
 use tracing::warn;
 
 use crate::datagram::DatagramSocket;
@@ -112,8 +112,10 @@ impl fmt::Debug for UplinkPacket {
 /// an unknown uplink TEID, within the limit of an
 /// [`Endpoint`](crate::Endpoint), and passes a session's uplink T-PDUs to
 /// N6: its TUN if it has one, else the echo service, which reflects IPv4
-/// UDP and ICMP Echo Request packets. The TEID alone identifies a session,
-/// whatever address the gNB sends from. Clones share the socket and sessions; the
+/// UDP and ICMP Echo Request packets. A reply of the echo service whose
+/// session's downlink a send or a switch holds waits in a task of its own,
+/// 256 of them at most, and the task that receives goes on. The TEID alone
+/// identifies a session, whatever address the gNB sends from. Clones share the socket and sessions; the
 /// task stops and the TUNs close when the last clone is dropped. Must be
 /// used within a Tokio runtime.
 ///
@@ -447,7 +449,20 @@ async fn send_downlink<P: AsRef<[u8]>>(
     incarnation: &Arc<Incarnation>,
     packet: P,
 ) -> io::Result<()> {
-    let _downlink = incarnation.downlink.lock().await;
+    let downlink = incarnation.downlink.lock().await;
+    send_on_downlink(socket, state, uplink_teid, incarnation, packet, downlink).await
+}
+
+/// Send `packet` on the downlink of session `uplink_teid`, which the
+/// caller holds.
+async fn send_on_downlink<P: AsRef<[u8]>>(
+    socket: &DatagramSocket,
+    state: &SessionRegistry,
+    uplink_teid: u32,
+    incarnation: &Arc<Incarnation>,
+    packet: P,
+    _downlink: tokio::sync::MutexGuard<'_, ()>,
+) -> io::Result<()> {
     if state.is_closed() {
         return Err(stopped());
     }
@@ -467,6 +482,64 @@ async fn send_downlink<P: AsRef<[u8]>>(
     }
 }
 
+/// The replies of the echo service that wait for their session's
+/// downlink, each in a task: a send or a switch may hold it.
+const WAITING_REPLIES: usize = 256;
+
+/// Send the echo service's `reply` on the downlink of session
+/// `uplink_teid`: at once when it is free, and else from a task of
+/// `waiting`, so that the receive task waits for no session. Past
+/// [`WAITING_REPLIES`] such tasks a reply is dropped.
+async fn echo(
+    socket: &Arc<DatagramSocket>,
+    state: &Arc<SessionRegistry>,
+    uplink_teid: u32,
+    incarnation: &Arc<Incarnation>,
+    reply: Vec<u8>,
+    waiting: &mut JoinSet<()>,
+) {
+    let notices = socket.notices();
+    let sent = match incarnation.downlink.try_lock() {
+        Ok(downlink) => {
+            send_on_downlink(socket, state, uplink_teid, incarnation, reply, downlink).await
+        }
+        Err(_) => {
+            while waiting.try_join_next().is_some() {}
+            if waiting.len() >= WAITING_REPLIES {
+                limited!(
+                    DEBUG,
+                    notices,
+                    echo,
+                    "UPF echo reply on uplink TEID {uplink_teid:#010x} dropped: \
+                     {WAITING_REPLIES} replies wait for their session"
+                );
+                return;
+            }
+            let (socket, state, incarnation) = (socket.clone(), state.clone(), incarnation.clone());
+            waiting.spawn(async move {
+                let sent = send_downlink(&socket, &state, uplink_teid, &incarnation, reply).await;
+                if let Err(error) = sent {
+                    limited!(
+                        DEBUG,
+                        socket.notices(),
+                        echo,
+                        "UPF echo reply on uplink TEID {uplink_teid:#010x} failed: {error}"
+                    );
+                }
+            });
+            return;
+        }
+    };
+    if let Err(error) = sent {
+        limited!(
+            DEBUG,
+            notices,
+            echo,
+            "UPF echo reply on uplink TEID {uplink_teid:#010x} failed: {error}"
+        );
+    }
+}
+
 /// The echo service's reply to an uplink T-PDU, if it answers it.
 fn echo_service(packet: &[u8]) -> Option<Vec<u8>> {
     if let Ok((source, destination, payload)) = parse_ipv4_udp(packet) {
@@ -481,6 +554,9 @@ async fn receive(
     tx: mpsc::Sender<UplinkPacket>,
 ) -> io::Result<()> {
     let mut buffer = vec![0; 65536];
+    // The echo replies that wait for their session's downlink. They go with
+    // this task, when the UPF is shut down or dropped.
+    let mut waiting = JoinSet::new();
     loop {
         let (packet, from) = match socket.receive(&mut buffer).await {
             Ok(Some(received)) => received,
@@ -529,16 +605,17 @@ async fn receive(
         };
         if !write_to_tun(&socket, &target, packet.payload).await
             && let Some(reply) = echo_service(packet.payload)
-            && let Err(error) =
-                send_downlink(&socket, &state, packet.teid, &target.incarnation, reply).await
         {
-            limited!(
-                DEBUG,
-                notices,
-                echo,
-                "UPF echo reply on uplink TEID {:#010x} failed: {error}",
-                packet.teid
-            );
+            let incarnation = &target.incarnation;
+            echo(
+                &socket,
+                &state,
+                packet.teid,
+                incarnation,
+                reply,
+                &mut waiting,
+            )
+            .await;
         }
         socket.observe(&tx, || UplinkPacket {
             uplink_teid: packet.teid,
@@ -613,6 +690,63 @@ mod tests {
     use std::task::{Context, Poll, Waker};
     use tokio::net::UdpSocket;
     use tokio::time::{Duration, timeout};
+
+    /// The echo service's reply waits for its session's downlink, which a
+    /// send or a switch may hold up: the receive task does not, and still
+    /// answers Echo Requests and passes on other sessions' packets.
+    #[tokio::test]
+    async fn a_session_whose_downlink_is_held_up_holds_up_nothing_else() {
+        let (upf, mut observed) = UpfSimulator::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let gnb = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let gnb_address = gnb.local_addr().unwrap();
+        upf.set_session(Session::new(1, 2, gnb_address, 9)).unwrap();
+        upf.set_session(Session::new(3, 4, gnb_address, 9)).unwrap();
+        let held = upf.shared.state.uplink_target(1).unwrap();
+        let guard = held.incarnation.downlink.lock().await;
+        let to = upf.local_addr().unwrap();
+        let echoed = |teid| {
+            let server = "192.0.2.1:7".parse().unwrap();
+            let ue = "10.45.0.2:4000".parse().unwrap();
+            Packet::uplink(teid, 9, ipv4_udp(ue, server, b"hello").unwrap())
+                .encode()
+                .unwrap()
+        };
+        gnb.send_to(&echoed(1), to).await.unwrap();
+        gnb.send_to(&Packet::echo_request(5).encode().unwrap(), to)
+            .await
+            .unwrap();
+        gnb.send_to(&echoed(3), to).await.unwrap();
+
+        // The Echo Response, and the echo of the other session, come.
+        let mut buffer = [0; 256];
+        let mut seen = Vec::new();
+        for _ in 0..2 {
+            let (size, _) = timeout(Duration::from_secs(1), gnb.recv_from(&mut buffer))
+                .await
+                .expect("the receive task waits for a session's downlink")
+                .unwrap();
+            let packet = Packet::decode(&buffer[..size]).unwrap();
+            seen.push((packet.message_type, packet.teid));
+        }
+        seen.sort();
+        assert_eq!(
+            seen,
+            [(MessageType::ECHO_RESPONSE, 0), (MessageType::G_PDU, 4)]
+        );
+        for teid in [1, 3] {
+            let uplink = timeout(Duration::from_secs(1), observed.recv()).await;
+            assert_eq!(uplink.unwrap().unwrap().uplink_teid, teid);
+        }
+        // The held one's reply goes once its downlink is free.
+        drop(guard);
+        let (size, _) = timeout(Duration::from_secs(1), gnb.recv_from(&mut buffer))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(Packet::decode(&buffer[..size]).unwrap().teid, 2);
+    }
 
     #[tokio::test]
     async fn replacing_a_session_rejects_waiting_sends_and_stale_uplink_snapshots() {
