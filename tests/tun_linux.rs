@@ -1,7 +1,9 @@
-//! TUN tests. They need root, and each moves its thread to a new network
-//! namespace first, so they leave the host's networking alone:
-//! `CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER=sudo cargo test --features
-//! tun --test tun_linux -- --ignored`.
+//! TUN tests. They need `CAP_NET_ADMIN`, and each moves its thread to a new
+//! network namespace first, so they leave the host's networking alone. As
+//! root: `CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER=sudo cargo test
+//! --features tun --test tun_linux -- --ignored`; without root, where users
+//! may make user namespaces, `"unshare --user --map-root-user --net --"` is
+//! the runner.
 
 #![cfg(target_os = "linux")]
 
@@ -30,7 +32,7 @@ fn isolate() {
     assert_eq!(
         status,
         0,
-        "a new network namespace needs root: {}",
+        "a new network namespace needs CAP_NET_ADMIN: {}",
         io::Error::last_os_error()
     );
     ip(&["link", "set", "lo", "up"]);
@@ -148,19 +150,19 @@ fn without_net_admin() -> RestoreCapabilities {
 }
 
 #[tokio::test]
-#[ignore = "needs root"]
+#[ignore = "needs CAP_NET_ADMIN"]
 async fn removing_a_session_during_tun_creation_does_not_leave_an_orphan() {
     session_creation_race(false).await;
 }
 
 #[tokio::test]
-#[ignore = "needs root"]
+#[ignore = "needs CAP_NET_ADMIN"]
 async fn replacing_a_session_during_tun_creation_does_not_attach_the_old_tun() {
     session_creation_race(true).await;
 }
 
 #[tokio::test]
-#[ignore = "needs root"]
+#[ignore = "needs CAP_NET_ADMIN"]
 async fn replacing_an_attached_session_closes_its_old_tun() {
     isolate();
     let (upf, _) = UpfSimulator::bind("127.0.0.1:0".parse().unwrap())
@@ -191,7 +193,7 @@ async fn replacing_an_attached_session_closes_its_old_tun() {
 }
 
 #[tokio::test]
-#[ignore = "needs root"]
+#[ignore = "needs CAP_NET_ADMIN"]
 async fn shutting_down_the_upf_closes_attachments_and_rejects_new_ones() {
     isolate();
     let (upf, mut observed) = UpfSimulator::bind("127.0.0.1:0".parse().unwrap())
@@ -254,7 +256,7 @@ async fn shutting_down_the_upf_closes_attachments_and_rejects_new_ones() {
 }
 
 #[tokio::test]
-#[ignore = "needs root"]
+#[ignore = "needs CAP_NET_ADMIN"]
 async fn failed_upf_shutdown_retains_cleanup_resources_for_retry() {
     isolate();
     let (upf, _) = UpfSimulator::bind("127.0.0.1:0".parse().unwrap())
@@ -360,7 +362,7 @@ async fn ping(args: &[&str]) {
 }
 
 #[tokio::test]
-#[ignore = "needs root"]
+#[ignore = "needs CAP_NET_ADMIN"]
 async fn ue_policy_routes_the_ue_s_traffic_through_the_tun() {
     isolate();
     let address = Ipv4Addr::new(198, 19, 0, 2);
@@ -387,7 +389,7 @@ async fn ue_policy_routes_the_ue_s_traffic_through_the_tun() {
 }
 
 #[tokio::test]
-#[ignore = "needs root"]
+#[ignore = "needs CAP_NET_ADMIN"]
 async fn clones_share_the_tun_which_goes_with_the_last_one() {
     isolate();
     let address = Ipv4Addr::new(198, 19, 0, 8);
@@ -416,7 +418,7 @@ async fn clones_share_the_tun_which_goes_with_the_last_one() {
 }
 
 #[tokio::test]
-#[ignore = "needs root and the vrf module"]
+#[ignore = "needs CAP_NET_ADMIN and the vrf module"]
 async fn ue_vrf_routes_the_vrf_s_traffic_through_the_tun() {
     isolate();
     let address = Ipv4Addr::new(198, 19, 0, 3);
@@ -437,7 +439,7 @@ async fn ue_vrf_routes_the_vrf_s_traffic_through_the_tun() {
 }
 
 #[tokio::test]
-#[ignore = "needs root"]
+#[ignore = "needs CAP_NET_ADMIN"]
 async fn rejects_names_in_use_and_cleans_up_a_failed_setup() {
     isolate();
     let error = TunPort::create(TunConfig::new(
@@ -493,7 +495,7 @@ async fn rejects_names_in_use_and_cleans_up_a_failed_setup() {
 }
 
 #[tokio::test]
-#[ignore = "needs root"]
+#[ignore = "needs CAP_NET_ADMIN"]
 async fn upf_tun_routes_the_kernel_s_reply_back_to_n3() {
     isolate();
     // The N6 destination is local; Linux routes its reply via the TUN.
@@ -562,7 +564,7 @@ async fn upf_tun_routes_the_kernel_s_reply_back_to_n3() {
 }
 
 #[tokio::test]
-#[ignore = "needs root"]
+#[ignore = "needs CAP_NET_ADMIN"]
 async fn upf_routes_32_tun_sessions_without_crossing_teids() {
     use std::collections::HashSet;
 
@@ -637,7 +639,7 @@ fn ue_tun(name: &str, host: u8) -> TunConfig {
 }
 
 #[tokio::test]
-#[ignore = "needs root"]
+#[ignore = "needs CAP_NET_ADMIN"]
 async fn an_endpoint_carries_a_tunnel_s_tun_and_closes_it_with_the_tunnel() {
     isolate();
     let (upf, _observed) = UpfSimulator::bind("127.0.0.8:0".parse().unwrap())
@@ -698,7 +700,7 @@ async fn an_endpoint_carries_a_tunnel_s_tun_and_closes_it_with_the_tunnel() {
 }
 
 #[tokio::test]
-#[ignore = "needs root"]
+#[ignore = "needs CAP_NET_ADMIN"]
 async fn an_endpoint_s_tuns_close_with_a_ue_s_tunnels_shutdown_and_the_last_clone() {
     isolate();
     let remote = RemoteTunnel::new("127.0.0.8:2152".parse().unwrap(), 0x1001);
@@ -735,7 +737,7 @@ async fn an_endpoint_s_tuns_close_with_a_ue_s_tunnels_shutdown_and_the_last_clon
 }
 
 #[tokio::test]
-#[ignore = "needs root"]
+#[ignore = "needs CAP_NET_ADMIN"]
 async fn linux_sends_nothing_unasked_through_a_tun() {
     isolate();
     let routing = Routing::UePolicy {
@@ -755,7 +757,7 @@ async fn linux_sends_nothing_unasked_through_a_tun() {
 }
 
 #[tokio::test]
-#[ignore = "needs root"]
+#[ignore = "needs CAP_NET_ADMIN"]
 async fn close_wakes_a_reader() {
     isolate();
     let routing = Routing::Upf {

@@ -122,7 +122,9 @@ First release.
   (`src/ebpf/programs.rs`), and `ebpf/` has what rebuilds it, in the
   repository and in the published crate; CI rebuilds it and compares.
 - Examples: `codec`, `extension_headers`, `endpoint`, `path` (echo and
-  Error Indication), and on Linux as root `tun` and `fast_path`. The README
+  Error Indication), and on Linux `tun`, which needs `CAP_NET_ADMIN` and
+  runs without root in a user namespace of its own, as the TUN tests do,
+  and as root `fast_path`. The README
   shows them: a test compares the two, and what those that need no root
   print with the text that the README shows under them.
 - `ebpf` builds and adds nothing on an architecture that aya does not

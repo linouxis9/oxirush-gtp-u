@@ -1,11 +1,14 @@
 //! A UE's TUN whose packets cross an N3 tunnel in userspace, to the test UPF
-//! and back. It needs Linux and root, and is best run in a network namespace
-//! of its own:
+//! and back. It needs Linux and `CAP_NET_ADMIN`, which a user namespace of
+//! its own gives without root, and is best run in a network namespace of its
+//! own:
 //!
 //! ```sh
 //! cargo build --features tun --example tun
-//! sudo unshare --net sh -c 'ip link set lo up && target/debug/examples/tun'
+//! unshare --user --map-root-user --net sh -c 'ip link set lo up && target/debug/examples/tun'
 //! ```
+//!
+//! Where users may not make user namespaces, `sudo unshare --net` does it.
 
 #[cfg(target_os = "linux")]
 #[tokio::main(flavor = "current_thread")]

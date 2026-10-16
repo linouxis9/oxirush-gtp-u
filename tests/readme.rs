@@ -11,7 +11,7 @@
 //! A page is the README, or the documentation of the crate: the `//!` lines
 //! of `src/lib.rs`. A block that is run opens with ` ```rust `, and a block
 //! that defines `main` is run through it. One that opens with
-//! ` ```rust,no_run ` needs root: it is compared with its example and not
+//! ` ```rust,no_run ` needs privileges: it is compared with its example and not
 //! run. The output of a block is the `text` blocks that follow it with
 //! nothing but blank lines between them. A block that shows no output
 //! prints none.

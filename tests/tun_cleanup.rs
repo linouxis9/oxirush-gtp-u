@@ -1,3 +1,7 @@
+//! What a TUN leaves behind when it goes, whatever ends it. These tests
+//! need `CAP_NET_ADMIN`, as those of `tun_linux.rs`, and move their thread
+//! to a network namespace of its own.
+
 #![cfg(all(target_os = "linux", feature = "tun"))]
 
 use std::ffi::CString;
@@ -54,7 +58,7 @@ fn ip(args: &[&str]) -> String {
 }
 
 #[tokio::test]
-#[ignore = "needs root and network namespaces"]
+#[ignore = "needs CAP_NET_ADMIN"]
 async fn close_uses_the_creation_namespace_and_preserves_other_links() {
     isolate();
     let owner = namespace();
@@ -87,7 +91,7 @@ async fn close_uses_the_creation_namespace_and_preserves_other_links() {
 }
 
 #[tokio::test]
-#[ignore = "needs root and network namespaces"]
+#[ignore = "needs CAP_NET_ADMIN"]
 async fn try_close_accepts_externally_removed_resources() {
     isolate();
     let port = TunPort::create(TunConfig::new(
@@ -175,7 +179,7 @@ impl Drop for Capabilities {
 }
 
 #[tokio::test]
-#[ignore = "needs root and network namespaces"]
+#[ignore = "needs CAP_NET_ADMIN"]
 async fn close_retries_resources_after_a_permission_failure() {
     isolate();
     let port = TunPort::create(TunConfig::new(

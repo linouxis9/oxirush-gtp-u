@@ -296,13 +296,18 @@ async fn main() -> std::io::Result<()> {
 }
 ```
 
-It creates an interface and a routing rule, which needs root. A network
-namespace of its own keeps them off the host:
+It creates an interface and a routing rule, which needs `CAP_NET_ADMIN`.
+A user namespace and a network namespace of its own give it that without
+root, and keep them off the host:
 
 ```sh
 cargo build --features tun --example tun
-sudo unshare --net sh -c 'ip link set lo up && target/debug/examples/tun'
+unshare --user --map-root-user --net sh -c 'ip link set lo up && target/debug/examples/tun'
 ```
+
+Where users may not make user namespaces, as Ubuntu restricts them, `sudo
+unshare --net` does it in the place of `unshare --user --map-root-user
+--net`.
 
 ## Carry the tunnel in the kernel
 
@@ -388,10 +393,11 @@ has the benchmarks, the other figures and how to profile.
 
 ```sh
 cargo test --all-features
-# As root, each test in a network namespace of its own: the TUN, then the
-# fast path (Linux 6.6)
-CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER=sudo \
+# The TUN, each test in a network namespace of its own: in a user namespace,
+# without root, or with sudo as the runner
+CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="unshare --user --map-root-user --net --" \
   cargo test --features tun --test tun_linux --test tun_cleanup -- --ignored
+# As root, the fast path (Linux 6.6)
 CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER=sudo \
   cargo test --features ebpf --test ebpf_linux -- --ignored
 # The encoder against Wireshark's dissector, with tshark 4.4 or later
