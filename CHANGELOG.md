@@ -101,6 +101,10 @@ First release.
   routing set up over rtnetlink, and without IPv6 addresses, so Linux sends
   nothing through them unasked. A `TunPort` is `Clone`: clones share the
   device, and the TUN goes with the last one or on `close`.
+- The rtnetlink requests of the TUN and of the fast path wait a second at
+  most for the kernel's answer, and return `TimedOut` past it: an answer
+  that did not come held the caller's thread, a thread of its runtime, for
+  ever.
 - `Endpoint::attach_tun` (Linux, `tun` feature): gives a tunnel a TUN and
   carries its packets both ways, as `UpfSimulator::attach_tun` does for a
   session. The tunnel's G-PDUs then go to Linux instead of the receiver.

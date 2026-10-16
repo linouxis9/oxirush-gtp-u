@@ -1,8 +1,10 @@
 //! The rtnetlink requests of the TUN module. Each waits for the kernel's
-//! acknowledgement, which comes at once.
+//! acknowledgement, which comes at once, and a second at most.
 
 use std::io;
 use std::net::Ipv4Addr;
+use std::os::fd::AsRawFd;
+use std::time::Duration;
 
 use netlink_packet_core::{
     NLM_F_ACK, NLM_F_CREATE, NLM_F_EXCL, NLM_F_REQUEST, NetlinkHeader, NetlinkMessage,
@@ -32,6 +34,12 @@ pub(crate) struct Rule {
     pub priority: u32,
 }
 
+/// How long a request waits for the kernel's answer. The kernel answers
+/// within the request's system call; an answer that does not come, as
+/// when the socket's buffer was full, must not hold the caller for ever:
+/// the calls of an endpoint run in a task of the caller's runtime.
+const ANSWER: Duration = Duration::from_secs(1);
+
 /// A NETLINK_ROUTE socket.
 pub(crate) struct Netlink {
     socket: Socket,
@@ -43,10 +51,40 @@ impl Netlink {
         let mut socket = Socket::new(NETLINK_ROUTE)?;
         socket.bind_auto()?;
         socket.connect(&SocketAddr::new(0, 0))?;
+        let timeout = libc::timeval {
+            tv_sec: ANSWER.as_secs() as libc::time_t,
+            tv_usec: ANSWER.subsec_micros() as libc::suseconds_t,
+        };
+        // SAFETY: the option's value is a timeval, which outlives the call.
+        let set = unsafe {
+            libc::setsockopt(
+                socket.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_RCVTIMEO,
+                (&raw const timeout).cast(),
+                size_of::<libc::timeval>() as libc::socklen_t,
+            )
+        };
+        if set != 0 {
+            return Err(io::Error::last_os_error());
+        }
         Ok(Self {
             socket,
             sequence: 0,
         })
+    }
+
+    /// The next datagram from the kernel, within [`ANSWER`].
+    fn receive(&mut self, buffer: &mut Vec<u8>) -> io::Result<()> {
+        buffer.clear();
+        match self.socket.recv(buffer, 0) {
+            Ok(_) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("the kernel did not answer an rtnetlink request in {ANSWER:?}"),
+            )),
+            Err(error) => Err(error),
+        }
     }
 
     /// Send `message` and wait for the kernel's acknowledgement.
@@ -73,8 +111,7 @@ impl Netlink {
         let mut buffer = Vec::with_capacity(65536);
         let mut answer = None;
         loop {
-            buffer.clear();
-            self.socket.recv(&mut buffer, 0)?;
+            self.receive(&mut buffer)?;
             let mut datagram = buffer.as_slice();
             while !datagram.is_empty() {
                 let reply = NetlinkMessage::<RouteNetlinkMessage>::deserialize(datagram)
@@ -350,4 +387,27 @@ fn rule_message(rule: Rule) -> RuleMessage {
         .push(RuleAttribute::Source(rule.source.into()));
     message.attributes.push(RuleAttribute::Table(rule.table));
     message
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A request whose answer does not come returns an error, and does not
+    /// hold its caller, a task of the runtime, for ever.
+    #[test]
+    fn waiting_for_an_answer_that_does_not_come_ends() {
+        let (sender, answer) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut netlink = Netlink::new().unwrap();
+            let started = std::time::Instant::now();
+            let error = netlink.receive(&mut Vec::with_capacity(4096)).unwrap_err();
+            sender.send((error.kind(), started.elapsed())).unwrap();
+        });
+        let (kind, waited) = answer
+            .recv_timeout(4 * ANSWER)
+            .expect("still waiting for the kernel");
+        assert_eq!(kind, io::ErrorKind::TimedOut);
+        assert!(waited >= ANSWER / 2, "{waited:?}");
+    }
 }
