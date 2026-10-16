@@ -125,6 +125,13 @@ First release.
   programs' object is committed next to its source
   (`src/ebpf/programs.rs`), and `ebpf/` has what rebuilds it, in the
   repository and in the published crate; CI rebuilds it and compares.
+- The reader of a TUN that `attach_tun` made asks for its tunnel's
+  short-cut when the TUN has none (`FastPath::has_shortcut`), each
+  millisecond at most while the N3 interface is getting its program and a
+  second after another failure. It asked before each packet that it
+  carried: a route lookup and an MTU lookup over rtnetlink, under the lock
+  of the endpoint's tunnels, for every packet of a tunnel that could not be
+  short-cut or whose packets were too long for N3.
 - Examples: `codec`, `extension_headers`, `endpoint`, `path` (echo and
   Error Indication), and on Linux `tun`, which needs `CAP_NET_ADMIN` and
   runs without root in a user namespace of its own, as the TUN tests do,

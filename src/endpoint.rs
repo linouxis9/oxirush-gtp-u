@@ -448,10 +448,11 @@ impl Endpoint {
     /// On an endpoint that has a fast path
     /// ([`set_fast_path`](Self::set_fast_path)) the TUN is on it and the
     /// kernel carries the tunnel's packets. The endpoint asks for the
-    /// tunnel's short-cut at once, and again whenever it carried a packet
-    /// from the TUN: it carries those that come while the tunnel's N3
-    /// interface is still getting its program, and those the programs
-    /// leave.
+    /// tunnel's short-cut at once, and again when it carried a packet from
+    /// the TUN and the tunnel has no short-cut: each millisecond at most
+    /// while the tunnel's N3 interface is getting its program, and a second
+    /// after another failure. It carries the packets that come meanwhile,
+    /// and those the programs leave.
     ///
     /// # Errors
     ///
@@ -666,17 +667,21 @@ async fn forward_tun(
     #[cfg(fast_path)] fast_path: Option<N3FastPath>,
 ) {
     let mut packet = vec![0; 65535];
+    #[cfg(fast_path)]
+    let mut asking = Asking::default();
     loop {
-        // At first, and whenever userspace carried a packet: have the
-        // kernel carry the next ones. While the tunnel's N3 interface is
-        // still getting its program this fails, and the next packet asks
-        // again.
+        // At first, and when userspace carries a packet of a tunnel that
+        // has no short-cut: have the kernel carry the next ones.
         #[cfg(fast_path)]
-        if let Some(Err(error)) = fast_path
-            .as_ref()
-            .map(|fast_path| shortcut(&routes, fast_path, key, port.index()))
-        {
-            trace!("N3 TUN {} stays in userspace: {error}", port.name());
+        if let Some(fast_path) = &fast_path {
+            let now = std::time::Instant::now();
+            if asking.due(now) && !fast_path.0.has_shortcut(port.index()) {
+                let asked = shortcut(&routes, fast_path, key, port.index());
+                if let Err(error) = &asked {
+                    trace!("N3 TUN {} stays in userspace: {error}", port.name());
+                }
+                asking.answered(now, &asked);
+            }
         }
         let Ok(length) = port.recv(&mut packet).await else {
             return;
@@ -688,6 +693,37 @@ async fn forward_tun(
         if let Err(error) = socket.send(&uplink, route.remote.address).await {
             debug!("N3 TUN {} uplink failed: {error}", port.name());
         }
+    }
+}
+
+/// When the reader of a TUN asks for the short-cut of its tunnel, which
+/// has none: a route lookup under the lock of the tunnels. Not before an
+/// interval after a failure: a millisecond while the tunnel's N3 interface
+/// is getting its program, a second after another error, such as a tunnel
+/// whose peer the fast path cannot reach. Once the tunnel has its
+/// short-cut, the packets that userspace still carries, too long for N3 or
+/// not IPv4, ask nothing.
+#[cfg(fast_path)]
+#[derive(Debug, Default)]
+struct Asking {
+    not_before: Option<std::time::Instant>,
+}
+
+#[cfg(fast_path)]
+impl Asking {
+    const ATTACHING: std::time::Duration = std::time::Duration::from_millis(1);
+    const FAILED: std::time::Duration = std::time::Duration::from_secs(1);
+
+    fn due(&self, now: std::time::Instant) -> bool {
+        self.not_before.is_none_or(|not_before| now >= not_before)
+    }
+
+    fn answered(&mut self, now: std::time::Instant, answer: &io::Result<()>) {
+        self.not_before = match answer {
+            Ok(()) => None,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => Some(now + Self::ATTACHING),
+            Err(_) => Some(now + Self::FAILED),
+        };
     }
 }
 
@@ -705,4 +741,31 @@ fn shortcut(
             fast_path.shortcut(tun, *local, route.local_teid, route.remote, route.qfi)
         })
         .unwrap_or_else(|| Err(routes::no_tunnel(key)))
+}
+
+#[cfg(all(test, fast_path))]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// A TUN whose tunnel cannot be short-cut asks once a second, and not
+    /// with each of its packets.
+    #[test]
+    fn a_tun_asks_for_its_short_cut_again_after_an_interval() {
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let mut asking = Asking::default();
+        assert!(asking.due(start));
+        // The N3 interface is getting its program.
+        asking.answered(at(0), &Err(io::ErrorKind::WouldBlock.into()));
+        assert!(!asking.due(at(0)));
+        assert!(asking.due(at(1)));
+        // The peer is not on the GTP-U port, or has no route.
+        asking.answered(at(1), &Err(io::ErrorKind::Unsupported.into()));
+        assert!(!asking.due(at(2)));
+        assert!(!asking.due(at(1000)));
+        assert!(asking.due(at(1001)));
+        asking.answered(at(1001), &Ok(()));
+        assert!(asking.due(at(1001)));
+    }
 }

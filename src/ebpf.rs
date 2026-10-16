@@ -47,9 +47,12 @@
 //! # fn steps(gnb: &Endpoint, fast_path: &FastPath, tun: &TunPort) -> std::io::Result<()> {
 //! // Once, when the TUN is made:
 //! fast_path.add_tun(tun.index())?;
-//! // Whenever userspace carried a packet of the tunnel from the TUN: a
-//! // `WouldBlock` then leaves it to the next packet.
-//! gnb.shortcut(1, 5, tun.index())?;
+//! // When userspace carried a packet of the tunnel from the TUN, and the
+//! // TUN has no short-cut. On `WouldBlock`, ask with a later packet; on
+//! // another error, after a while: each asking looks up a route.
+//! if !fast_path.has_shortcut(tun.index()) {
+//!     gnb.shortcut(1, 5, tun.index())?;
+//! }
 //! // Before the TUN is closed:
 //! fast_path.remove_tun(tun.index());
 //! # Ok(())
@@ -80,11 +83,13 @@
 //! `Endpoint::attach_tun` does the rest for the TUN it makes. A program that
 //! carries a TUN of its own does it in three calls. [`FastPath::add_tun`] puts
 //! the TUN on the fast path, once: it attaches `uplink` in the caller's
-//! thread. `Endpoint::shortcut` gives the TUN its tunnel, whenever the TUN's
-//! reader carried a packet: it fails with `WouldBlock` while the N3 interface
-//! is getting its program, and the next packet asks again. And
-//! [`FastPath::remove_tun`] takes the TUN off the fast path, before it is
-//! closed.
+//! thread. `Endpoint::shortcut` gives the TUN its tunnel, when the TUN's
+//! reader carried a packet and the TUN has no short-cut
+//! ([`FastPath::has_shortcut`]): it fails with `WouldBlock` while the N3
+//! interface is getting its program, and a later packet asks again.
+//! `attach_tun` asks each millisecond at most then, and a second after
+//! another failure. And [`FastPath::remove_tun`] takes the TUN off the fast
+//! path, before it is closed.
 //!
 //! # Short-cuts
 //!
@@ -382,6 +387,15 @@ impl FastPath {
     /// next short-cut: when its UE leaves for another endpoint.
     pub fn end_shortcut(&self, tun: u32) {
         lock(&self.inner.state).end_shortcut(tun);
+    }
+
+    /// Whether TUN interface `tun` has a tunnel's short-cut: the reader of
+    /// a TUN that has one need not ask for it again.
+    pub fn has_shortcut(&self, tun: u32) -> bool {
+        lock(&self.inner.state)
+            .tuns
+            .get(&tun)
+            .is_some_and(|tun| tun.key.is_some())
     }
 
     /// Short-cut the tunnel of the endpoint at `local` with local TEID
