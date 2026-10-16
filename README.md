@@ -41,8 +41,6 @@ TEID 0x12345678, QFI Some(9)
 QFI 9, RQI true
 ```
 
-The text under a block is what the block prints.
-
 > This crate is not on crates.io yet.
 
 ## Install
@@ -58,9 +56,9 @@ the others.
 
 ## Carry a tunnel between an endpoint and the test UPF
 
-`Endpoint` is the N3 socket of a gNB, or the S1-U socket of an eNB. A call
-gives a tunnel the TEIDs and addresses that NGAP, S1AP or PFCP would
-negotiate.
+`Endpoint` is the N3 socket of a gNB, or the S1-U socket of an eNB, for
+labs and test tools. A call gives a tunnel the TEIDs (Tunnel Endpoint
+Identifiers) and addresses that NGAP, S1AP or PFCP would negotiate.
 
 ```rust
 use oxirush_gtp_u::upf_sim::{Session, UpfSimulator};
@@ -316,12 +314,49 @@ tunnel between its TUN and the network. The endpoint gets them before its
 tunnels are installed, and `attach_tun` does the rest:
 
 ```rust,no_run
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> std::io::Result<()> {
+    use std::net::Ipv4Addr;
+
+    use oxirush_gtp_u::ebpf::FastPath;
+    use oxirush_gtp_u::tun::{Routing, TunConfig};
+    use oxirush_gtp_u::upf_sim::{Session, UpfSimulator};
+    use oxirush_gtp_u::{Endpoint, RemoteTunnel};
+
+    let (upf, _observed) = UpfSimulator::bind("127.0.0.8:2152".parse().unwrap()).await?;
+    let (gnb, _received) = Endpoint::bind("127.0.0.1:2152".parse().unwrap()).await?;
+
+    // Load the programs and give them to the endpoint before its tunnels:
+    // installing a tunnel then prepares the interface it is routed through.
     let fast_path = FastPath::load()?;
     gnb.set_fast_path(fast_path.clone())?;
+
+    let teid = gnb.install(1, 5, RemoteTunnel::new(upf.local_addr()?, 0x1001), 9)?;
+    upf.set_session(Session::new(0x1001, teid, gnb.local_addr()?, 9))?;
+
+    // As in the `tun` example. The endpoint has a fast path: the TUN is on
+    // it, and the kernel carries the tunnel's packets.
+    let ue = Ipv4Addr::new(10, 45, 0, 2);
+    let routing = Routing::UePolicy {
+        address: ue,
+        table: 100,
+        priority: 100,
+    };
+    gnb.attach_tun(1, 5, TunConfig::new("ue0", routing))?;
+
+    let socket = tokio::net::UdpSocket::bind((ue, 0)).await?;
+    for _ in 0..5 {
+        socket.send_to(b"hello", "192.0.2.1:7").await?;
+        socket.recv_from(&mut [0; 16]).await?;
+    }
+    // What the programs carried. Userspace carries the first packets when
+    // the tunnel's interface is still getting its program.
+    println!("{:?}", fast_path.stats());
+    Ok(())
+}
 ```
 
-`examples/fast_path.rs` is the program above with these two lines. It
-prints `FastPath::stats`, the packets that the programs carried:
+Loading the programs needs root. The program is `examples/fast_path.rs`:
 
 ```sh
 cargo build --features ebpf --example fast_path
@@ -366,8 +401,9 @@ no eBPF linker. The minimum supported Rust version is 1.88.
 ## What it does not do
 
 - Control plane: it has no NGAP, S1AP or PFCP.
-- Authentication: GTP-U has none. Whoever reaches a socket can send on its
-  tunnels.
+- Untrusted peers: the endpoint and the test UPF are for labs and test
+  tools. GTP-U has no authentication: whoever reaches a socket can send on
+  its tunnels.
 - A UPF for real traffic: the test UPF has no PFCP, QoS or charging.
 - GTP' and the versions 0 and 2 of GTP.
 - IPv6 in the helpers, the TUN routing and the fast path. The codec and the
