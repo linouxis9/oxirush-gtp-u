@@ -382,7 +382,7 @@ CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER=sudo \
   cargo test --features tun --test tun_linux --test tun_cleanup -- --ignored
 CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER=sudo \
   cargo test --features ebpf --test ebpf_linux -- --ignored
-# The encoder against Wireshark's dissector, with tshark
+# The encoder against Wireshark's dissector, with tshark 4.4 or later
 cargo test --test wireshark -- --ignored
 ```
 

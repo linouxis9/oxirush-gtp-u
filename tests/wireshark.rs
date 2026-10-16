@@ -1,9 +1,11 @@
 //! Checks the encoder against Wireshark's GTP dissector, an independent
-//! reading of TS 29.281 and TS 38.415. Needs `tshark`:
+//! reading of TS 29.281 and TS 38.415. Needs `tshark` 4.4.0 or later, the
+//! first whose dissector has every field that the tests read:
 //! `cargo test --test wireshark -- --ignored`.
 
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::process::Command;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use oxirush_gtp_u::{
@@ -12,10 +14,49 @@ use oxirush_gtp_u::{
     PduSetInformationContainer, UplinkPduSessionInformation, UplinkTimeStamps, ipv4_udp,
 };
 
+/// The first version of tshark whose GTP dissector has every field that
+/// the tests read. Of the PDU Session Container, 4.2 has the PDU type, the
+/// QFI, the RQI and the PPI only.
+const TSHARK: [u32; 3] = [4, 4, 0];
+
+/// Whether the installed tshark is [`TSHARK`] or later: an older one fails
+/// with "Some fields aren't valid", which says nothing of the codec.
+fn tshark_version() -> &'static Result<(), String> {
+    static VERSION: OnceLock<Result<(), String>> = OnceLock::new();
+    VERSION.get_or_init(|| {
+        let output = Command::new("tshark")
+            .arg("--version")
+            .output()
+            .map_err(|error| format!("tshark must be installed: {error}"))?;
+        // "TShark (Wireshark) 4.6.4." or "TShark (Wireshark) 4.2.2 (Git ...)."
+        let text = String::from_utf8_lossy(&output.stdout);
+        let version = text
+            .split_whitespace()
+            .find(|word| word.starts_with(|c: char| c.is_ascii_digit()))
+            .map(|word| word.trim_end_matches('.'))
+            .ok_or_else(|| format!("no version in {text:?}"))?;
+        let numbers: Vec<u32> = version
+            .split('.')
+            .map(|number| number.parse().unwrap_or(0))
+            .collect();
+        if numbers.as_slice() < TSHARK.as_slice() {
+            return Err(format!(
+                "tshark {version} is older than {}.{}.{}, the first whose dissector \
+                 has every field that these tests read",
+                TSHARK[0], TSHARK[1], TSHARK[2]
+            ));
+        }
+        Ok(())
+    })
+}
+
 /// Dissect `packet`, sent in UDP to port 2152, and return `fields` as
 /// tshark prints them, plus its expert info.
 fn dissect(packet: &Packet, fields: &[&str]) -> (Vec<String>, String) {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
+    if let Err(error) = tshark_version() {
+        panic!("{error}");
+    }
     let gtp = packet.encode().unwrap();
     let ip = ipv4_udp(
         SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 2152),
