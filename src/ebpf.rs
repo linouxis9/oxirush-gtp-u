@@ -71,7 +71,13 @@
 //!   headers, with the PDU Session Container of an N3 tunnel, and sends the
 //!   G-PDU out of the N3 interface. The G-PDU is the one the codec encodes.
 //! - `decap`, at the ingress of the N3 interface, delivers the G-PDUs of
-//!   short-cut tunnels to their TUN.
+//!   short-cut tunnels to their TUN. It checks their IPv4 header as Linux
+//!   does before it delivers a datagram, its checksum and its total length,
+//!   and leaves to Linux one that Linux drops. It does not check the UDP
+//!   checksum, which a TCX program cannot: it is not told whether Linux or
+//!   the network card checked it, and that of a G-PDU from a socket of the
+//!   same host, on loopback or a veth, is still to be completed there. The
+//!   inner packet's own checksums are checked where it is delivered.
 //!
 //! The N3 interface of a tunnel is the one Linux routes it through, from the
 //! endpoint's address to the peer's: the loopback interface for a peer on the

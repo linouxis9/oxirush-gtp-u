@@ -125,6 +125,9 @@ First release.
   programs' object is committed next to its source
   (`src/ebpf/programs.rs`), and `ebpf/` has what rebuilds it, in the
   repository and in the published crate; CI rebuilds it and compares.
+- The fast path's `decap` checks the outer IPv4 header of a G-PDU as Linux
+  does, its checksum and its total length, and leaves to Linux one that
+  Linux drops: it carried such a G-PDU to its TUN.
 - The fast path follows the MTU of each N3 interface, which Linux
   announces over rtnetlink, in a thread of its own: the short-cuts kept the
   MTU of the time they were made, and after N3's shrank a G-PDU too long

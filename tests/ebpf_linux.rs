@@ -677,6 +677,93 @@ async fn a_packet_that_no_longer_fits_n3_once_its_mtu_shrank_is_left_to_userspac
     assert_eq!((stats.uplink_packets, stats.uplink_oversized), (1, 1));
 }
 
+/// Send `frame` out of the loopback interface, which receives it as from a
+/// peer, with whatever its headers have.
+fn inject(frame: &[u8]) {
+    // SAFETY: a new descriptor, closed below.
+    let socket = unsafe { libc::socket(libc::AF_PACKET, libc::SOCK_RAW, 0) };
+    assert!(socket >= 0, "packet socket: {}", io::Error::last_os_error());
+    // SAFETY: plain data, for which all zeros is valid.
+    let mut address: libc::sockaddr_ll = unsafe { std::mem::zeroed() };
+    address.sll_family = libc::AF_PACKET as u16;
+    address.sll_protocol = (libc::ETH_P_IP as u16).to_be();
+    // SAFETY: a C string.
+    address.sll_ifindex = unsafe { libc::if_nametoindex(c"lo".as_ptr()) } as i32;
+    address.sll_halen = 6;
+    // SAFETY: the frame and the address outlive the call.
+    let sent = unsafe {
+        libc::sendto(
+            socket,
+            frame.as_ptr().cast(),
+            frame.len(),
+            0,
+            (&raw const address).cast(),
+            size_of::<libc::sockaddr_ll>() as libc::socklen_t,
+        )
+    };
+    let error = io::Error::last_os_error();
+    // SAFETY: the descriptor is this function's.
+    unsafe { libc::close(socket) };
+    assert_eq!(sent, frame.len() as isize, "send a frame: {error}");
+}
+
+/// The checksum of the IPv4 header at the start of `packet`, set.
+fn checksummed(mut packet: Vec<u8>) -> Vec<u8> {
+    packet[10..12].fill(0);
+    let sum = packet[..20]
+        .chunks(2)
+        .map(|word| u32::from(u16::from_be_bytes([word[0], word[1]])))
+        .sum::<u32>();
+    let sum = (sum & 0xffff) + (sum >> 16);
+    let sum = !((sum & 0xffff) + (sum >> 16)) as u16;
+    packet[10..12].copy_from_slice(&sum.to_be_bytes());
+    packet
+}
+
+/// `decap` checks the outer IPv4 header as Linux does before it delivers a
+/// datagram: one that Linux would drop is left to it, and not carried to
+/// the TUN.
+#[tokio::test]
+#[ignore = "needs root"]
+async fn a_g_pdu_whose_ipv4_header_linux_refuses_is_not_carried() {
+    isolate();
+    let fast_path = FastPath::load().unwrap();
+    let (_gnb, _peer, _port, teid) = short_cut_tunnel(&fast_path, 0x6001).await;
+    let application = UdpSocket::bind((UE, 4000)).await.unwrap();
+    let server = SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 9), 9);
+    let inner = ipv4_udp(server, SocketAddrV4::new(UE, 4000), b"downlink").unwrap();
+    let gtp = Packet::downlink(teid, 9, inner).encode().unwrap();
+    let (peer, local) = (
+        SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 9), 2152),
+        SocketAddrV4::new(Ipv4Addr::LOCALHOST, 2152),
+    );
+    let outer = ipv4_udp(peer, local, &gtp).unwrap();
+    let frame = |ip: &[u8]| [&[0; 12][..], &[0x08, 0x00], ip].concat();
+    let mut datagram = [0; 64];
+
+    // As a peer sends it.
+    inject(&frame(&outer));
+    let size = timeout(SECOND, application.recv(&mut datagram))
+        .await
+        .expect("the injected G-PDU did not reach the UE")
+        .unwrap();
+    assert_eq!(&datagram[..size], b"downlink");
+    assert_eq!(fast_path.stats().downlink_packets, 1);
+
+    // A header checksum that does not add up, and a total length longer
+    // than the frame, whose checksum does.
+    let mut corrupted = outer.clone();
+    corrupted[10] ^= 0xff;
+    let mut long = outer.clone();
+    long[2..4].copy_from_slice(&(outer.len() as u16 + 4).to_be_bytes());
+    for refused in [corrupted, checksummed(long)] {
+        inject(&frame(&refused));
+        let quiet = timeout(Duration::from_millis(300), application.recv(&mut datagram)).await;
+        assert!(quiet.is_err(), "the UE got what Linux refuses");
+    }
+    assert_eq!(fast_path.stats().downlink_packets, 1);
+}
+
 #[tokio::test]
 #[ignore = "needs root"]
 async fn a_peer_on_this_host_is_reached_through_loopback_whatever_its_address() {

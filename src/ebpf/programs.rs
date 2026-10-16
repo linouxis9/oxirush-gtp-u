@@ -248,6 +248,24 @@ pub fn decap(ctx: TcContext) -> i32 {
     if message + 8 + UDP as u32 != datagram {
         return pass;
     }
+    // The IPv4 header as Linux checks it before it delivers a datagram
+    // (ip_rcv), which it then does for one that is not as below: its
+    // checksum, and a total length that the frame holds and that is the
+    // UDP datagram's. The UDP checksum cannot be checked here: a TCX program
+    // is not told whether Linux checked it, and that of a G-PDU from a
+    // socket of this host is still to be completed.
+    let mut sum = 0u32;
+    let mut word = ip;
+    while word < ip + IP {
+        sum += (u32::from(h[word]) << 8) | u32::from(h[word + 1]);
+        word += 2;
+    }
+    sum = (sum & 0xffff) + (sum >> 16);
+    sum = (sum & 0xffff) + (sum >> 16);
+    let total = u32::from(h[ip + 2]) << 8 | u32::from(h[ip + 3]);
+    if sum != 0xffff || total != IP as u32 + datagram || ETH as u32 + total > ctx.len() {
+        return pass;
+    }
     let key = DownlinkKey {
         local: [h[ip + 16], h[ip + 17], h[ip + 18], h[ip + 19]],
         teid: [h[g + 4], h[g + 5], h[g + 6], h[g + 7]],
