@@ -46,28 +46,47 @@ pub(crate) struct Netlink {
     sequence: u32,
 }
 
+/// A socket whose receive waits [`ANSWER`] at most.
+fn socket() -> io::Result<Socket> {
+    let socket = Socket::new(NETLINK_ROUTE)?;
+    let timeout = libc::timeval {
+        tv_sec: ANSWER.as_secs() as libc::time_t,
+        tv_usec: ANSWER.subsec_micros() as libc::suseconds_t,
+    };
+    // SAFETY: the option's value is a timeval, which outlives the call.
+    let set = unsafe {
+        libc::setsockopt(
+            socket.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_RCVTIMEO,
+            (&raw const timeout).cast(),
+            size_of::<libc::timeval>() as libc::socklen_t,
+        )
+    };
+    if set != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(socket)
+}
+
+/// The next datagram from the kernel into `buffer`, within [`ANSWER`].
+fn receive(socket: &Socket, buffer: &mut Vec<u8>) -> io::Result<()> {
+    buffer.clear();
+    match socket.recv(buffer, 0) {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("the kernel said nothing over rtnetlink in {ANSWER:?}"),
+        )),
+        Err(error) => Err(error),
+    }
+}
+
 impl Netlink {
     pub fn new() -> io::Result<Self> {
-        let mut socket = Socket::new(NETLINK_ROUTE)?;
+        let mut socket = socket()?;
         socket.bind_auto()?;
         socket.connect(&SocketAddr::new(0, 0))?;
-        let timeout = libc::timeval {
-            tv_sec: ANSWER.as_secs() as libc::time_t,
-            tv_usec: ANSWER.subsec_micros() as libc::suseconds_t,
-        };
-        // SAFETY: the option's value is a timeval, which outlives the call.
-        let set = unsafe {
-            libc::setsockopt(
-                socket.as_raw_fd(),
-                libc::SOL_SOCKET,
-                libc::SO_RCVTIMEO,
-                (&raw const timeout).cast(),
-                size_of::<libc::timeval>() as libc::socklen_t,
-            )
-        };
-        if set != 0 {
-            return Err(io::Error::last_os_error());
-        }
         Ok(Self {
             socket,
             sequence: 0,
@@ -76,15 +95,7 @@ impl Netlink {
 
     /// The next datagram from the kernel, within [`ANSWER`].
     fn receive(&mut self, buffer: &mut Vec<u8>) -> io::Result<()> {
-        buffer.clear();
-        match self.socket.recv(buffer, 0) {
-            Ok(_) => Ok(()),
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                format!("the kernel did not answer an rtnetlink request in {ANSWER:?}"),
-            )),
-            Err(error) => Err(error),
-        }
+        receive(&self.socket, buffer)
     }
 
     /// Send `message` and wait for the kernel's acknowledgement.
@@ -373,6 +384,71 @@ impl Netlink {
     }
 }
 
+/// What Linux announces of the links of the network namespace that it was
+/// made in (`RTNLGRP_LINK`).
+#[cfg(fast_path)]
+pub(crate) struct LinkEvents {
+    socket: Socket,
+    buffer: Vec<u8>,
+}
+
+#[cfg(fast_path)]
+impl LinkEvents {
+    pub fn new() -> io::Result<Self> {
+        let mut socket = socket()?;
+        // The group of the links, RTMGRP_LINK.
+        socket.bind(&SocketAddr::new(0, 1))?;
+        Ok(Self {
+            socket,
+            buffer: Vec::with_capacity(65536),
+        })
+    }
+
+    /// The links whose announcement the next datagram has, with their MTU,
+    /// within [`ANSWER`]: `TimedOut` past it. `ENOBUFS` says that
+    /// announcements were lost.
+    pub fn next(&mut self) -> io::Result<Vec<(u32, u32)>> {
+        receive(&self.socket, &mut self.buffer)?;
+        Ok(link_mtus(&self.buffer))
+    }
+}
+
+/// The index and the MTU of each link of the `RTM_NEWLINK` messages of
+/// `datagram`.
+#[cfg(fast_path)]
+fn link_mtus(mut datagram: &[u8]) -> Vec<(u32, u32)> {
+    let mut mtus = Vec::new();
+    // Each message starts with its length, which a message that does not
+    // parse still gives.
+    while let Some(length) = datagram
+        .first_chunk::<4>()
+        .map(|length| u32::from_ne_bytes(*length))
+    {
+        let message = NetlinkMessage::<RouteNetlinkMessage>::deserialize(datagram);
+        if let Ok(NetlinkMessage {
+            payload: NetlinkPayload::InnerMessage(RouteNetlinkMessage::NewLink(link)),
+            ..
+        }) = message
+            && let Some(mtu) = link
+                .attributes
+                .iter()
+                .find_map(|attribute| match attribute {
+                    LinkAttribute::Mtu(mtu) => Some(*mtu),
+                    _ => None,
+                })
+        {
+            mtus.push((link.header.index, mtu));
+        }
+        // Messages are aligned to 4 octets.
+        let length = (length as usize + 3) & !3;
+        if length == 0 || length >= datagram.len() {
+            break;
+        }
+        datagram = &datagram[length..];
+    }
+    mtus
+}
+
 fn rule_message(rule: Rule) -> RuleMessage {
     let mut message = RuleMessage::default();
     message.header.family = AddressFamily::Inet;
@@ -392,6 +468,74 @@ fn rule_message(rule: Rule) -> RuleMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The announcements of two links, one of which changed its MTU, and of
+    /// an address, in one datagram.
+    #[cfg(fast_path)]
+    #[test]
+    fn the_mtu_of_announced_links_is_read() {
+        let message = |payload: RouteNetlinkMessage| {
+            let mut message = NetlinkMessage::new(NetlinkHeader::default(), payload.into());
+            message.finalize();
+            let mut bytes = vec![0; message.buffer_len()];
+            message.serialize(&mut bytes);
+            bytes
+        };
+        let link = |index, mtu: Option<u32>| {
+            let mut link = LinkMessage::default();
+            link.header.index = index;
+            link.attributes
+                .push(LinkAttribute::IfName(format!("n3{index}")));
+            link.attributes.extend(mtu.map(LinkAttribute::Mtu));
+            RouteNetlinkMessage::NewLink(link)
+        };
+        let mut address = AddressMessage::default();
+        address.header.index = 7;
+        let datagram = [
+            message(link(7, Some(1400))),
+            message(RouteNetlinkMessage::NewAddress(address)),
+            message(link(9, None)),
+            message(link(1, Some(65536))),
+        ]
+        .concat();
+        assert_eq!(link_mtus(&datagram), [(7, 1400), (1, 65536)]);
+        assert_eq!(link_mtus(&datagram[..3]), []);
+    }
+
+    /// Linux announces the change of a link's MTU to the socket of the
+    /// links' events, in the namespace that it was made in. In a network
+    /// namespace of its own, as root or in a user namespace:
+    /// `CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="unshare --user
+    /// --map-root-user --net --" cargo test --features ebpf --lib -- --ignored
+    /// announced`.
+    #[cfg(fast_path)]
+    #[test]
+    #[ignore = "needs CAP_NET_ADMIN"]
+    fn the_change_of_an_mtu_is_announced() {
+        // SAFETY: unshare only changes this thread's namespace.
+        assert_eq!(
+            unsafe { libc::unshare(libc::CLONE_NEWNET) },
+            0,
+            "a network namespace of its own: {}",
+            io::Error::last_os_error()
+        );
+        let mut events = LinkEvents::new().unwrap();
+        let mut netlink = Netlink::new().unwrap();
+        let lo = netlink.index_of("lo").unwrap();
+        let status = std::process::Command::new("ip")
+            .args(["link", "set", "lo", "mtu", "1400"])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let announced = loop {
+            let changed = events.next().unwrap();
+            if let Some(&(_, mtu)) = changed.iter().find(|(index, _)| *index == lo) {
+                break mtu;
+            }
+        };
+        assert_eq!(announced, 1400);
+        assert_eq!(netlink.mtu_of(lo).unwrap(), 1400);
+    }
 
     /// A request whose answer does not come returns an error, and does not
     /// hold its caller, a task of the runtime, for ever.

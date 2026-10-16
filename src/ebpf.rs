@@ -8,7 +8,7 @@
 //! receives for it. What they leave alone still goes through
 //! userspace, the endpoint's socket and the TUN's reader: anything but
 //! IPv4 in a G-PDU without extension header other than one PDU Session
-//! Container, fragments, G-PDUs longer than the N3 MTU, and ICMP Echo
+//! Container, fragments, G-PDUs longer than the MTU of N3, and ICMP Echo
 //! Replies, which whoever pings through the endpoint expects there.
 //!
 //! It needs Linux 6.6 (TCX), `CAP_BPF` and `CAP_NET_ADMIN`.
@@ -102,7 +102,7 @@
 //! The programs leave to userspace, which keeps working underneath: other
 //! messages than G-PDUs, unknown TEIDs, extension headers other than one PDU
 //! Session Container, fragments, inner packets that are not IPv4, G-PDUs
-//! longer than the N3 MTU (the socket fragments them), and ICMP Echo Replies,
+//! longer than the MTU of N3 (the socket fragments them), and ICMP Echo Replies,
 //! which a caller that pings through the endpoint expects on its receiver.
 //! What they leave also goes on to the interface's other TCX programs and tc
 //! filters (`TC_ACT_UNSPEC`), so several fast paths or other tools can share
@@ -120,6 +120,12 @@
 //! removes it, as an `oxs` veth that is up and whose far end has no program
 //! left.
 //!
+//! `load` starts a thread that follows the MTU of the N3 interfaces, which
+//! Linux announces over rtnetlink, and writes it into the short-cuts: a
+//! program cannot read it but through a helper that is for GPL programs
+//! alone, and the programs are Apache-2.0. The thread ends within a second
+//! of the last clone of the fast path.
+//!
 //! `load` and `add_tun` also spread what the stage's far end and the TUN
 //! receive over the CPUs the process may use (RPS), when `/sys` shows the
 //! process's network namespace. After `unshare --net` alone it shows the former
@@ -135,14 +141,15 @@
 //! when it differs from the committed one. The published crate has these files
 //! too: in a copy of it, `ebpf/build.sh` rebuilds the object that it ships.
 
-use std::collections::HashMap;
 use std::collections::hash_map::RandomState;
+use std::collections::{BTreeSet, HashMap};
 use std::ffi::CStr;
 use std::fmt;
 use std::hash::{BuildHasher, Hasher};
 use std::io;
 use std::net::{IpAddr, Ipv4Addr};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use aya::maps::{HashMap as Map, MapData, PerCpuArray};
@@ -151,7 +158,7 @@ use aya::programs::{LinkOrder, SchedClassifier, TcAttachType};
 use aya::{Ebpf, EbpfLoader, Pod};
 
 use crate::RemoteTunnel;
-use crate::netlink::Netlink;
+use crate::netlink::{LinkEvents, Netlink};
 use crate::path::lock;
 
 mod layout;
@@ -202,10 +209,22 @@ struct Inner {
     /// set-up and short-cut need.
     programs: Mutex<Ebpf>,
     state: Mutex<State>,
+    /// Tells the thread that follows the MTU of the N3 interfaces to end.
+    stop: Arc<AtomicBool>,
 }
 
+impl Drop for Inner {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+type Uplinks = Map<MapData, u32, Uplink>;
+
 struct State {
-    uplinks: Map<MapData, u32, Uplink>,
+    /// Shared with the thread that follows the MTU of the N3 interfaces,
+    /// which takes this lock alone. Whoever takes both takes `state` first.
+    uplinks: Arc<Mutex<Uplinks>>,
     downlinks: Map<MapData, DownlinkKey, u32>,
     stats: PerCpuArray<MapData, u64>,
     /// The N3 interfaces and their `decap` program.
@@ -259,6 +278,9 @@ impl FastPath {
     /// network namespace of this call.
     pub fn load() -> io::Result<Self> {
         let mut netlink = Netlink::new()?;
+        // Before anything is read of the links: a change of an MTU from
+        // now on is announced to it.
+        let events = LinkEvents::new()?;
         remove_stale_stages(&mut netlink);
         let id = RandomState::new().build_hasher().finish() as u32;
         let (near, far) = (format!("{STAGE}{id:08x}a"), format!("{STAGE}{id:08x}b"));
@@ -309,8 +331,19 @@ impl FastPath {
                 .ok_or_else(|| io::Error::other(format!("no eBPF map {name}")))
         };
         let (uplinks, downlinks, stats) = (map("UPLINKS")?, map("DOWNLINKS")?, map("STATS")?);
+        let uplinks = Arc::new(Mutex::new(
+            Map::try_from(uplinks).map_err(io::Error::other)?,
+        ));
+        let stop = Arc::new(AtomicBool::new(false));
+        let follow = {
+            let (uplinks, stop, requests) = (uplinks.clone(), stop.clone(), Netlink::new()?);
+            move || follow_mtus(&uplinks, &stop, events, requests)
+        };
+        std::thread::Builder::new()
+            .name("gtp-u fast path".into())
+            .spawn(follow)?;
         let state = State {
-            uplinks: Map::try_from(uplinks).map_err(io::Error::other)?,
+            uplinks,
             downlinks: Map::try_from(downlinks).map_err(io::Error::other)?,
             stats: PerCpuArray::try_from(stats).map_err(io::Error::other)?,
             n3s: HashMap::new(),
@@ -322,6 +355,7 @@ impl FastPath {
             inner: Arc::new(Inner {
                 programs: Mutex::new(ebpf),
                 state: Mutex::new(state),
+                stop,
             }),
         })
     }
@@ -534,7 +568,6 @@ impl State {
         n3: u32,
         qfi: Option<u8>,
     ) -> io::Result<()> {
-        let mtu = self.stage.netlink.mtu_of(n3)?;
         // A tunnel has one short-cut: the TUN that had it goes back to
         // userspace.
         match self.downlinks.get(&key, 0) {
@@ -545,6 +578,11 @@ impl State {
         if let Some(former) = former.filter(|former| *former != key) {
             let _ = self.downlinks.remove(&former);
         }
+        // The MTU is read with the uplinks locked: a change of it that
+        // comes meanwhile is applied after, by `follow_mtus`.
+        let uplinks = self.uplinks.clone();
+        let mut uplinks = lock(&uplinks);
+        let mtu = self.stage.netlink.mtu_of(n3)?;
         let uplink = Uplink {
             local: key.local,
             peer: peer.octets(),
@@ -557,16 +595,67 @@ impl State {
         self.downlinks
             .insert(key, tun, 0)
             .map_err(io::Error::other)?;
-        self.uplinks
-            .insert(tun, uplink, 0)
-            .map_err(io::Error::other)
+        uplinks.insert(tun, uplink, 0).map_err(io::Error::other)
     }
 
     fn end_shortcut(&mut self, tun: u32) {
         if let Some(key) = self.tuns.get_mut(&tun).and_then(|tun| tun.key.take()) {
-            let _ = self.uplinks.remove(&tun);
+            let _ = lock(&self.uplinks).remove(&tun);
             let _ = self.downlinks.remove(&key);
         }
+    }
+}
+
+/// Keep the MTU of each short-cut's N3 interface as Linux announces it,
+/// until `stop`: `encap` leaves a G-PDU too long for it to userspace,
+/// whose socket fragments it. A program reads no MTU of its own but
+/// through a helper that is for GPL programs alone, `bpf_check_mtu`.
+fn follow_mtus(
+    uplinks: &Mutex<Uplinks>,
+    stop: &AtomicBool,
+    mut events: LinkEvents,
+    mut requests: Netlink,
+) {
+    while !stop.load(Ordering::Relaxed) {
+        let changed = match events.next() {
+            Ok(changed) => changed,
+            Err(error) if error.kind() == io::ErrorKind::TimedOut => continue,
+            // Announcements were lost: the MTU of every N3 interface is
+            // asked for again.
+            Err(error) if error.raw_os_error() == Some(libc::ENOBUFS) => {
+                let n3s: BTreeSet<u32> = lock(uplinks)
+                    .iter()
+                    .filter_map(Result::ok)
+                    .map(|(_, uplink)| uplink.n3)
+                    .collect();
+                n3s.into_iter()
+                    .filter_map(|n3| requests.mtu_of(n3).ok().map(|mtu| (n3, mtu)))
+                    .collect()
+            }
+            Err(_) => {
+                // Not one the socket can recover from: the next load has
+                // another.
+                return;
+            }
+        };
+        let mut uplinks = lock(uplinks);
+        for (n3, mtu) in changed {
+            apply_mtu(&mut uplinks, n3, mtu);
+        }
+    }
+}
+
+/// Give the short-cuts through N3 interface `n3` its MTU, `mtu`.
+fn apply_mtu(uplinks: &mut Uplinks, n3: u32, mtu: u32) {
+    let mtu = u16::try_from(mtu).unwrap_or(u16::MAX);
+    let through: Vec<(u32, Uplink)> = uplinks
+        .iter()
+        .filter_map(Result::ok)
+        .filter(|(_, uplink)| uplink.n3 == n3 && uplink.mtu != mtu)
+        .collect();
+    for (tun, mut uplink) in through {
+        uplink.mtu = mtu;
+        let _ = uplinks.insert(tun, uplink, 0);
     }
 }
 

@@ -13,8 +13,8 @@ pub struct Uplink {
     pub teid: [u8; 4],
     /// The N3 interface.
     pub n3: u32,
-    /// Its MTU: a longer G-PDU is left to the endpoint's socket, which
-    /// fragments it.
+    /// Its MTU, which the loader follows: a longer G-PDU is left to the
+    /// endpoint's socket, which fragments it.
     pub mtu: u16,
     /// The QFI of the PDU Session Container, or [`NO_CONTAINER`].
     pub qfi: u8,

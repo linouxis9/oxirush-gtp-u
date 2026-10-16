@@ -611,6 +611,72 @@ async fn only_plain_ipv4_g_pdus_of_short_cut_tunnels_leave_userspace() {
     assert_eq!((stats.uplink_oversized, stats.uplink_drops), (0, 0));
 }
 
+/// A UE's tunnel through a TUN on the fast path, to a peer on this host:
+/// the endpoint, the peer's socket and the TUN.
+async fn short_cut_tunnel(fast_path: &FastPath, teid: u32) -> (Endpoint, UdpSocket, TunPort, u32) {
+    let (gnb, received) = Endpoint::bind("127.0.0.1:2152".parse().unwrap())
+        .await
+        .unwrap();
+    gnb.set_fast_path(fast_path.clone()).unwrap();
+    // Nobody reads the receiver here: what the programs leave is dropped.
+    tokio::spawn(async move {
+        let mut received = received;
+        while received.recv().await.is_some() {}
+    });
+    let peer = UdpSocket::bind("127.0.0.9:2152").await.unwrap();
+    let remote = RemoteTunnel {
+        address: peer.local_addr().unwrap(),
+        teid,
+    };
+    let local_teid = gnb.install(1, 1, remote, 9).unwrap();
+    let routing = Routing::UePolicy {
+        address: UE,
+        table: 29100,
+        priority: 15100,
+    };
+    let port = TunPort::create(TunConfig::new("oxu1", routing)).unwrap();
+    fast_path.add_tun(port.index()).unwrap();
+    shortcut(&gnb, 1, 1, port.index()).await;
+    (gnb, peer, port, local_teid)
+}
+
+/// The fast path follows the MTU of N3, which Linux announces: a packet
+/// that no longer fits once N3's shrank is the TUN's reader's, whose socket
+/// fragments the G-PDU.
+#[tokio::test]
+#[ignore = "needs root"]
+async fn a_packet_that_no_longer_fits_n3_once_its_mtu_shrank_is_left_to_userspace() {
+    isolate();
+    let fast_path = FastPath::load().unwrap();
+    let (_gnb, peer, port, _) = short_cut_tunnel(&fast_path, 0x5001).await;
+    let server = SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 9), 9);
+    let application = UdpSocket::bind((UE, 4000)).await.unwrap();
+    let mut datagram = vec![0; 4096];
+
+    // 1500 octets, the TUN's MTU, and the G-PDU's headers fit the 65536 of
+    // the loopback interface.
+    application.send_to(&[7; 1472], server).await.unwrap();
+    let size = timeout(SECOND, peer.recv(&mut datagram))
+        .await
+        .expect("the G-PDU did not reach the peer")
+        .unwrap();
+    assert_eq!(size, 16 + 1500);
+    assert_eq!(fast_path.stats().uplink_packets, 1);
+
+    // The same packet once the loopback interface has 1500, and the
+    // thread of the fast path has heard of it.
+    ip(&["link", "set", "lo", "mtu", "1500"]);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    application.send_to(&[8; 1472], server).await.unwrap();
+    let size = timeout(SECOND, port.recv(&mut datagram))
+        .await
+        .expect("the TUN's reader did not get the packet")
+        .unwrap();
+    assert_eq!(parse_ipv4_udp(&datagram[..size]).unwrap().2, [8; 1472]);
+    let stats = fast_path.stats();
+    assert_eq!((stats.uplink_packets, stats.uplink_oversized), (1, 1));
+}
+
 #[tokio::test]
 #[ignore = "needs root"]
 async fn a_peer_on_this_host_is_reached_through_loopback_whatever_its_address() {

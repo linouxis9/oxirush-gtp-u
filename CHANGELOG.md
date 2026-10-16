@@ -125,6 +125,10 @@ First release.
   programs' object is committed next to its source
   (`src/ebpf/programs.rs`), and `ebpf/` has what rebuilds it, in the
   repository and in the published crate; CI rebuilds it and compares.
+- The fast path follows the MTU of each N3 interface, which Linux
+  announces over rtnetlink, in a thread of its own: the short-cuts kept the
+  MTU of the time they were made, and after N3's shrank a G-PDU too long
+  for it was sent all the same.
 - The reader of a TUN that `attach_tun` made asks for its tunnel's
   short-cut when the TUN has none (`FastPath::has_shortcut`), each
   millisecond at most while the N3 interface is getting its program and a
