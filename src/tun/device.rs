@@ -38,9 +38,13 @@ impl TunDevice {
             });
         }
         set_nonblocking(&file)?;
-        Ok(Self {
-            io: AsyncFd::new(file)?,
-        })
+        // Tokio 1.53.3 deprecates `AsyncFd::new` for a value that may close its
+        // descriptor while it is registered. A `File` keeps it open until the
+        // `AsyncFd` drops it, after the registration. `AsyncFd::register`,
+        // which says so, is not in the versions of Tokio before it.
+        #[allow(deprecated)]
+        let io = AsyncFd::new(file)?;
+        Ok(Self { io })
     }
 
     /// Read a raw IPv4 or IPv6 packet that Linux routed to the TUN.
