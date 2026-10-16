@@ -235,7 +235,47 @@ impl Drop for Inner {
     }
 }
 
-type Uplinks = Map<MapData, u32, Uplink>;
+/// Map `UPLINKS`, and its entries in memory: the thread that follows the
+/// MTU of the N3 interfaces looks at them for each link that Linux
+/// announces, which a creation of a TUN is too, and a read of the map is
+/// a system call an entry.
+struct Uplinks {
+    map: Map<MapData, u32, Uplink>,
+    entries: HashMap<u32, Uplink>,
+}
+
+impl Uplinks {
+    fn insert(&mut self, tun: u32, uplink: Uplink) -> io::Result<()> {
+        self.map.insert(tun, uplink, 0).map_err(io::Error::other)?;
+        self.entries.insert(tun, uplink);
+        Ok(())
+    }
+
+    fn remove(&mut self, tun: u32) {
+        let _ = self.map.remove(&tun);
+        self.entries.remove(&tun);
+    }
+
+    /// Give the short-cuts through N3 interface `n3` its MTU, `mtu`.
+    fn apply_mtu(&mut self, n3: u32, mtu: u32) {
+        for (tun, uplink) in with_mtu(&self.entries, n3, mtu) {
+            if self.map.insert(tun, uplink, 0).is_ok() {
+                self.entries.insert(tun, uplink);
+            }
+        }
+    }
+}
+
+/// The entries of the short-cuts through N3 interface `n3` whose MTU is
+/// not `mtu`, with it.
+fn with_mtu(entries: &HashMap<u32, Uplink>, n3: u32, mtu: u32) -> Vec<(u32, Uplink)> {
+    let mtu = u16::try_from(mtu).unwrap_or(u16::MAX);
+    entries
+        .iter()
+        .filter(|(_, uplink)| uplink.n3 == n3 && uplink.mtu != mtu)
+        .map(|(tun, uplink)| (*tun, Uplink { mtu, ..*uplink }))
+        .collect()
+}
 
 struct State {
     /// Shared with the thread that follows the MTU of the N3 interfaces,
@@ -348,9 +388,10 @@ impl FastPath {
                 .ok_or_else(|| io::Error::other(format!("no eBPF map {name}")))
         };
         let (uplinks, downlinks, stats) = (map("UPLINKS")?, map("DOWNLINKS")?, map("STATS")?);
-        let uplinks = Arc::new(Mutex::new(
-            Map::try_from(uplinks).map_err(io::Error::other)?,
-        ));
+        let uplinks = Arc::new(Mutex::new(Uplinks {
+            map: Map::try_from(uplinks).map_err(io::Error::other)?,
+            entries: HashMap::new(),
+        }));
         let stop = Arc::new(AtomicBool::new(false));
         let follow = {
             let (uplinks, stop, requests) = (uplinks.clone(), stop.clone(), Netlink::new()?);
@@ -612,12 +653,12 @@ impl State {
         self.downlinks
             .insert(key, tun, 0)
             .map_err(io::Error::other)?;
-        uplinks.insert(tun, uplink, 0).map_err(io::Error::other)
+        uplinks.insert(tun, uplink)
     }
 
     fn end_shortcut(&mut self, tun: u32) {
         if let Some(key) = self.tuns.get_mut(&tun).and_then(|tun| tun.key.take()) {
-            let _ = lock(&self.uplinks).remove(&tun);
+            lock(&self.uplinks).remove(tun);
             let _ = self.downlinks.remove(&key);
         }
     }
@@ -641,9 +682,9 @@ fn follow_mtus(
             // asked for again.
             Err(error) if error.raw_os_error() == Some(libc::ENOBUFS) => {
                 let n3s: BTreeSet<u32> = lock(uplinks)
-                    .iter()
-                    .filter_map(Result::ok)
-                    .map(|(_, uplink)| uplink.n3)
+                    .entries
+                    .values()
+                    .map(|uplink| uplink.n3)
                     .collect();
                 n3s.into_iter()
                     .filter_map(|n3| requests.mtu_of(n3).ok().map(|mtu| (n3, mtu)))
@@ -657,22 +698,8 @@ fn follow_mtus(
         };
         let mut uplinks = lock(uplinks);
         for (n3, mtu) in changed {
-            apply_mtu(&mut uplinks, n3, mtu);
+            uplinks.apply_mtu(n3, mtu);
         }
-    }
-}
-
-/// Give the short-cuts through N3 interface `n3` its MTU, `mtu`.
-fn apply_mtu(uplinks: &mut Uplinks, n3: u32, mtu: u32) {
-    let mtu = u16::try_from(mtu).unwrap_or(u16::MAX);
-    let through: Vec<(u32, Uplink)> = uplinks
-        .iter()
-        .filter_map(Result::ok)
-        .filter(|(_, uplink)| uplink.n3 == n3 && uplink.mtu != mtu)
-        .collect();
-    for (tun, mut uplink) in through {
-        uplink.mtu = mtu;
-        let _ = uplinks.insert(tun, uplink, 0);
     }
 }
 
@@ -900,6 +927,38 @@ mod tests {
             "load the eBPF programs: map error: failed to create map `UPLINKS`: \
              Operation not permitted (os error 1)"
         );
+    }
+
+    /// An announced link that is no N3 of a short-cut, or whose MTU did not
+    /// change, has nothing written.
+    #[test]
+    fn a_change_of_mtu_is_for_the_short_cuts_through_its_link() {
+        let uplink = |n3, mtu| Uplink {
+            local: [127, 0, 0, 1],
+            peer: [127, 0, 0, 9],
+            teid: [0, 0, 0x10, 1],
+            n3,
+            mtu,
+            qfi: 9,
+            padding: 0,
+        };
+        let entries = HashMap::from([
+            (10, uplink(1, 1500)),
+            (11, uplink(1, 9000)),
+            (12, uplink(2, 1500)),
+        ]);
+        let mut changed = with_mtu(&entries, 1, 1500);
+        changed.sort_by_key(|(tun, _)| *tun);
+        let changed: Vec<(u32, u32, u16)> = changed
+            .into_iter()
+            .map(|(tun, uplink)| (tun, uplink.n3, uplink.mtu))
+            .collect();
+        assert_eq!(changed, [(11, 1, 1500)]);
+        assert!(with_mtu(&entries, 3, 1400).is_empty());
+        // A loopback interface has 65536, more than an entry holds.
+        let changed = with_mtu(&entries, 2, 65536);
+        assert_eq!(changed.len(), 1);
+        assert_eq!(changed[0].1.mtu, u16::MAX);
     }
 
     #[test]
