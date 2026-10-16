@@ -567,12 +567,17 @@ fn context(error: io::Error, what: &str) -> io::Error {
     io::Error::new(error.kind(), format!("{what}: {error}"))
 }
 
-/// An aya error with its causes, the kernel's among them.
+/// An aya error with its causes, the kernel's among them, each once: the
+/// text of an error of aya often has that of its cause already.
 fn other(what: &str, error: impl std::error::Error) -> io::Error {
     let mut message = format!("{what}: {error}");
     let mut cause = error.source();
     while let Some(error) = cause {
-        message.push_str(&format!(": {error}"));
+        let text = error.to_string();
+        if !message.contains(&text) {
+            message.push_str(": ");
+            message.push_str(&text);
+        }
         cause = error.source();
     }
     io::Error::other(message)
@@ -745,6 +750,35 @@ mod tests {
                 "no {name} in the object"
             );
         }
+    }
+
+    /// What a load without the rights says, as aya's errors have it: a
+    /// cause whose text is in that of its error is not said again.
+    #[test]
+    fn an_error_says_each_of_its_causes_once() {
+        #[derive(Debug)]
+        struct Error(&'static str, Option<Box<Error>>);
+        impl fmt::Display for Error {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(self.0)
+            }
+        }
+        impl std::error::Error for Error {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                self.1.as_deref().map(|error| error as _)
+            }
+        }
+        let kernel = Error("Operation not permitted (os error 1)", None);
+        let map = Error("failed to create map `UPLINKS`", Some(Box::new(kernel)));
+        let loader = Error(
+            "map error: failed to create map `UPLINKS`",
+            Some(Box::new(map)),
+        );
+        assert_eq!(
+            other("load the eBPF programs", loader).to_string(),
+            "load the eBPF programs: map error: failed to create map `UPLINKS`: \
+             Operation not permitted (os error 1)"
+        );
     }
 
     #[test]
