@@ -290,9 +290,9 @@ impl Netlink {
         )
     }
 
-    /// Whether link `index` is a veth that was set up.
+    /// Whether link `index` is a veth that was set up, with `alias`.
     #[cfg(fast_path)]
-    pub fn is_up_veth(&mut self, index: u32) -> bool {
+    pub fn is_up_veth(&mut self, index: u32, alias: &str) -> bool {
         let mut message = LinkMessage::default();
         message.header.index = index;
         self.get_link(message).is_ok_and(|link| {
@@ -301,6 +301,9 @@ impl Netlink {
                     matches!(attribute, LinkAttribute::LinkInfo(info)
                         if info.contains(&LinkInfo::Kind(InfoKind::Veth)))
                 })
+                && link.attributes.iter().any(
+                    |attribute| matches!(attribute, LinkAttribute::IfAlias(name) if name == alias),
+                )
         })
     }
 
@@ -317,6 +320,17 @@ impl Netlink {
                 _ => None,
             })
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing link MTU"))
+    }
+
+    /// Give link `index` the alias `alias` (`ip link set … alias`).
+    #[cfg(fast_path)]
+    pub fn set_alias(&mut self, index: u32, alias: &str) -> io::Result<()> {
+        let mut message = LinkMessage::default();
+        message.header.index = index;
+        message
+            .attributes
+            .push(LinkAttribute::IfAlias(alias.to_owned()));
+        self.request(RouteNetlinkMessage::SetLink(message), 0)
     }
 
     pub fn delete_link(&mut self, index: u32) -> io::Result<()> {

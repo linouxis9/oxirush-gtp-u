@@ -235,29 +235,42 @@ async fn a_tunnel_is_carried_in_the_kernel_once_its_tun_sent_through_userspace()
     isolate();
     ip(&["addr", "add", "198.18.0.1/32", "dev", "lo"]);
     // A stage whose process is gone has lost its program and goes with the
-    // next load. One that is not up yet belongs to a process still loading,
-    // and an interface of another kind with such a name is not a stage:
-    // both stay.
-    let veth = |name: &str, up: bool| {
+    // next load. One that is not up yet belongs to a process still loading;
+    // a veth with such a name and without the stage's alias, and an
+    // interface of another kind, are not stages: they stay.
+    let veth = |name: &str, up: bool, alias: bool| {
         let (near, far) = (format!("{name}a"), format!("{name}b"));
         ip(&["link", "add", &near, "type", "veth", "peer", "name", &far]);
+        if alias {
+            ip(&[
+                "link",
+                "set",
+                &far,
+                "alias",
+                "oxirush-gtp-u fast path stage",
+            ]);
+        }
         if up {
             ip(&["link", "set", &near, "up"]);
             ip(&["link", "set", &far, "up"]);
         }
     };
-    veth("oxs0000dead", true);
-    veth("oxs0000beef", false);
+    veth("oxs0000dead", true, true);
+    veth("oxs0000beef", false, true);
+    veth("oxs0000f00d", true, false);
     ip(&["tuntap", "add", "name", "oxs0000cafeb", "mode", "tun"]);
     ip(&["link", "set", "oxs0000cafeb", "up"]);
     let before = stages();
     let fast_path = FastPath::load().unwrap();
-    assert!(!exists("oxs0000deada") && exists("oxs0000beefa") && exists("oxs0000cafeb"));
+    assert!(!exists("oxs0000deada"));
+    assert!(exists("oxs0000beefa") && exists("oxs0000f00da") && exists("oxs0000cafeb"));
     let stage: Vec<String> = stages()
         .into_iter()
         .filter(|name| !before.contains(name))
         .collect();
     assert_eq!(stage.len(), 2, "{stage:?}");
+    let alias = std::fs::read_to_string(format!("/sys/class/net/{}/ifalias", stage[1])).unwrap();
+    assert_eq!(alias.trim_end(), "oxirush-gtp-u fast path stage");
     // The CPUs of this process share what the stage's far end receives.
     assert_ne!(steering(&stage[1]), 0);
     assert_eq!(steering("oxs0000cafeb"), 0);

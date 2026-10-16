@@ -125,6 +125,10 @@ First release.
   programs' object is committed next to its source
   (`src/ebpf/programs.rs`), and `ebpf/` has what rebuilds it, in the
   repository and in the published crate; CI rebuilds it and compares.
+- `FastPath::load` removes the stage that a killed process left only when
+  its far end has the stage's alias, `oxirush-gtp-u fast path stage`: it
+  removed any veth that was up, named as a stage is, and without a program
+  at the ingress of its far end.
 - The fast path's `decap` checks the outer IPv4 header of a G-PDU as Linux
   does, its checksum and its total length, and leaves to Linux one that
   Linux drops: it carried such a G-PDU to its TUN.

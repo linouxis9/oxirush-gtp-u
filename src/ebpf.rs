@@ -123,8 +123,8 @@
 //! capabilities and then leaves nothing behind. The programs' links go with
 //! the process, whatever ends it. The stage, `oxs` with eight hexadecimal
 //! digits, outlives a killed process; the next `load` in that namespace
-//! removes it, as an `oxs` veth that is up and whose far end has no program
-//! left.
+//! removes it, as an `oxs` veth that is up and whose far end has the alias
+//! `oxirush-gtp-u fast path stage` and no program left.
 //!
 //! `load` starts a thread that follows the MTU of the N3 interfaces, which
 //! Linux announces over rtnetlink, and writes it into the short-cuts: a
@@ -179,6 +179,10 @@ static OBJECT: &[u8] = aya::include_bytes_aligned!("ebpf/gtpu.o");
 /// The stage is a veth pair `oxs<8 hexadecimal digits>a` and `…b`, with
 /// random digits.
 const STAGE: &str = "oxs";
+
+/// The alias of the stage's far end: what tells a stage that a killed
+/// process left from an interface of that name that is not one.
+const STAGE_ALIAS: &str = "oxirush-gtp-u fast path stage";
 
 // SAFETY: plain data without implicit padding.
 unsafe impl Pod for Uplink {}
@@ -279,8 +283,8 @@ impl FastPath {
     /// It fails without TCX (Linux 6.6) or without the rights to load eBPF
     /// programs and create interfaces, and leaves nothing behind then. It
     /// first removes the stage a killed process left in this network
-    /// namespace: an `oxs` veth that is up and whose far end has no TCX
-    /// program. Everything else the fast path does must happen in the
+    /// namespace: an `oxs` veth that is up and whose far end has the
+    /// stage's alias and no TCX program. Everything else the fast path does must happen in the
     /// network namespace of this call.
     pub fn load() -> io::Result<Self> {
         let mut netlink = Netlink::new()?;
@@ -296,6 +300,7 @@ impl FastPath {
         let index = netlink.index_of(&near)?;
         let mut stage = Stage { netlink, index };
         let far_index = stage.netlink.index_of(&far)?;
+        stage.netlink.set_alias(far_index, STAGE_ALIAS)?;
         for end in [index, far_index] {
             // Otherwise Linux announces their IPv6 addresses to the programs.
             match stage.netlink.disable_ipv6_addresses(end) {
@@ -725,8 +730,9 @@ fn is_far_end(name: &str) -> bool {
 }
 
 /// Delete the stages of processes that ended without dropping their fast
-/// path: those that are up and whose far end has lost its program, which
-/// went with its process.
+/// path: those that are up, whose far end has the stage's alias and has
+/// lost its program, which went with its process. An interface that is
+/// named as a stage is and has not the alias is not one.
 fn remove_stale_stages(netlink: &mut Netlink) {
     // SAFETY: the array ends with a zero index and is freed below.
     let list = unsafe { libc::if_nameindex() };
@@ -739,7 +745,7 @@ fn remove_stale_stages(netlink: &mut Netlink) {
         let (index, name) = unsafe { ((*entry).if_index, CStr::from_ptr((*entry).if_name)) };
         let stale = name.to_str().is_ok_and(|name| {
             is_far_end(name)
-                && netlink.is_up_veth(index)
+                && netlink.is_up_veth(index, STAGE_ALIAS)
                 && SchedClassifier::query_tcx(name, TcAttachType::Ingress)
                     .is_ok_and(|(_, programs)| programs.is_empty())
         });
