@@ -633,11 +633,11 @@ mod tests {
              00000004 00000005 000006 00000007 07 01 2566 03e8 000000 00",
         );
 
-        // A later release's New IE Flag 3 and an extension octet.
+        // A later release's New IE Flag 5 and an extension octet.
         let mut uplink = UplinkPduSessionInformation::new(7);
         uplink.d1_ul_pdcp_delay_result_ind = Some(false);
         uplink.unknown_new_ies = Some(Box::new(UnknownNewIes {
-            flags: vec![0x88, 0x01],
+            flags: vec![0xa0, 0x01],
             // A new IE of three octets, and the padding.
             content: vec![0xaa, 0xbb, 0xcc, 0x00, 0x00],
         }));
@@ -647,9 +647,20 @@ mod tests {
         .into();
         round_trip(
             &packet,
-            "34 ff 0010 00000001 0000 00 85 03 10 47 89 01 00 aabbcc0000 00",
+            "34 ff 0010 00000001 0000 00 85 03 10 47 a1 01 00 aabbcc0000 00",
         );
-        for flags in [vec![], vec![0x00], vec![0x09], vec![0x88], vec![0x08, 0x01]] {
+        // No octet, a first octet without a flag, one with a flag that has a
+        // field of its own (0, 3 or 4), an E bit without the octet that it
+        // announces, and an octet that no E bit announces.
+        for flags in [
+            vec![],
+            vec![0x00],
+            vec![0x21],
+            vec![0x28],
+            vec![0x30],
+            vec![0xa0],
+            vec![0x20, 0x01],
+        ] {
             uplink.unknown_new_ies = Some(Box::new(UnknownNewIes {
                 flags,
                 content: vec![],
@@ -660,6 +671,66 @@ mod tests {
             .into();
             assert_eq!(packet.encode(), Err(Error::Malformed(Part::NewIeFlags)));
         }
+    }
+
+    /// The UL and DL Available Bitrate of TS 38.415 V19.1.0, which figure
+    /// 5.5.2.2-1 puts after the congestion information: New IE Flags 3 and
+    /// 4, four octets each, in kbit/s.
+    #[test]
+    fn uplink_available_bitrates_on_the_wire() {
+        let container = |uplink: &UplinkPduSessionInformation| {
+            Packet::g_pdu(1, vec![])
+                .with_pdu_session_container(PduSessionContainer::Uplink(uplink.clone()))
+        };
+        let mut uplink = UplinkPduSessionInformation::new(7);
+        uplink.ul_available_bitrate = Some(1_000_000);
+        uplink.dl_available_bitrate = Some(4_000_000_000);
+        // The New IE Flag, flags 3 and 4, the two bitrates, padding.
+        round_trip(
+            &container(&uplink),
+            "34 ff 0014 00000001 0000 00 85
+             04 10 47 18 000f4240 ee6b2800 000000 00",
+        );
+        // Each alone.
+        uplink.dl_available_bitrate = None;
+        round_trip(
+            &container(&uplink),
+            "34 ff 0010 00000001 0000 00 85  03 10 47 08 000f4240 000000 00",
+        );
+        uplink.ul_available_bitrate = None;
+        uplink.dl_available_bitrate = Some(u32::MAX);
+        round_trip(
+            &container(&uplink),
+            "34 ff 0010 00000001 0000 00 85  03 10 47 10 ffffffff 000000 00",
+        );
+        // After the three IEs of the flags before theirs, and before those
+        // of a later release.
+        uplink.d1_ul_pdcp_delay_result_ind = Some(true);
+        uplink.ul_congestion_information = Some(9574);
+        uplink.dl_congestion_information = Some(1000);
+        uplink.ul_available_bitrate = Some(0x0102_0304);
+        uplink.dl_available_bitrate = Some(0x0506_0708);
+        uplink.unknown_new_ies = Some(Box::new(UnknownNewIes {
+            flags: vec![0x20],
+            // A new IE of three octets, and the padding.
+            content: vec![0xaa, 0xbb, 0xcc, 0, 0, 0],
+        }));
+        round_trip(
+            &container(&uplink),
+            "34 ff 001c 00000001 0000 00 85
+             06 10 47 3f 01 2566 03e8 01020304 05060708 aabbcc 000000 00",
+        );
+        // Flag 4 announces a bitrate where the container has its padding.
+        assert_eq!(
+            Packet::decode(&hex(
+                "34 ff 0010 00000001 0000 00 85  03 10 47 18 000f4240 000000 00"
+            )),
+            Err(Error::Truncated {
+                what: Part::PduSessionContainer,
+                needed: 4,
+                available: 3
+            })
+        );
     }
 
     #[test]
@@ -935,7 +1006,7 @@ mod tests {
         );
         let mut uplink = UplinkPduSessionInformation::new(1);
         uplink.unknown_new_ies = Some(Box::new(UnknownNewIes {
-            flags: vec![0x08],
+            flags: vec![0x20],
             content: vec![],
         }));
         assert_eq!(

@@ -44,9 +44,10 @@ First release.
   Container with the downlink PDU Set Information of TS 38.415 §6.5.2. A
   header of another type is kept as its octets. `examples/handover.rs` has
   the headers of a handover.
-- PDU Session Container (TS 38.415 V18 §5.5.2): downlink and uplink PDU
-  Session Information with their QoS monitoring, sequence number, delay and
-  congestion fields; new IEs of later releases are kept as received. A test
+- PDU Session Container (TS 38.415 V19.1.0 §5.5.2): downlink and uplink
+  PDU Session Information with their QoS monitoring, sequence number, delay
+  and congestion fields, and the uplink UL and DL Available Bitrate; new IEs
+  of later releases are kept as received. A test
   compares the wire format with Wireshark's dissector (`tests/wireshark.rs`,
   which CI runs).
 - Downlink Burst Size and Time To Next Burst are typed and preserved with
@@ -142,8 +143,13 @@ revision `ac3a019` for a program that uses the crate:
   `Option<UnknownNewIes>` and is an `Option<Box<UnknownNewIes>>`:
   `Some(UnknownNewIes { .. })` becomes `Some(Box::new(UnknownNewIes { .. }))`,
   and reading its `flags` and `content` is written as before. An
-  `ExtensionHeader` is 88 octets where it was 128.
-- A `Packet` is 64 octets longer in memory, 128 with a `Vec<u8>` payload:
+  `ExtensionHeader` is 104 octets where it was 128.
+- `UplinkPduSessionInformation` has `ul_available_bitrate` and
+  `dl_available_bitrate`, the New IEs of Flags 3 and 4 of TS 38.415 V19:
+  a container that has them decodes to these fields, where they were in
+  `unknown_new_ies` with the flags `0x08` and `0x10`, which the encoder now
+  refuses there.
+- A `Packet` is 80 octets longer in memory, 144 with a `Vec<u8>` payload:
   the header that its list keeps.
 - The variants of `Error` named their part with a text, which a program
   could only compare. They name it with a `Part` and have their numbers:

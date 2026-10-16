@@ -175,7 +175,20 @@ impl ExtensionHeader {
     }
 
     /// Decode the content of an extension header of type `kind`.
+    #[inline(always)]
     pub(crate) fn decode(kind: u8, content: &[u8]) -> Result<Self, Error> {
+        // The usual header is made where the message is: the decoder of
+        // every other one is long, and is not paid for by this one.
+        if kind == PDU_SESSION_CONTAINER
+            && let Some(container) = PduSessionContainer::usual(content)
+        {
+            return Ok(ExtensionHeader::PduSessionContainer(container));
+        }
+        Self::decode_any(kind, content)
+    }
+
+    #[inline(never)]
+    fn decode_any(kind: u8, content: &[u8]) -> Result<Self, Error> {
         match kind {
             UDP_PORT => match *content {
                 [high, low] => Ok(ExtensionHeader::UdpPort(u16::from_be_bytes([high, low]))),
@@ -382,6 +395,28 @@ impl PduSessionContainer {
         }
     }
 
+    /// The container of a G-PDU as it usually is: downlink information
+    /// with a QFI and its RQI, or uplink information with a QFI, and none
+    /// of the fields that a flag announces.
+    #[inline(always)]
+    fn usual(content: &[u8]) -> Option<Self> {
+        let &[flags, octet, ..] = content else {
+            return None;
+        };
+        match flags {
+            // PDU type 0, whose spare bit is not evaluated.
+            0x00 | 0x01 if octet & 0x80 == 0 => Some(PduSessionContainer::Downlink(
+                DownlinkPduSessionInformation {
+                    qfi: octet & 0x3f,
+                    rqi: octet & 0x40 != 0,
+                    ..DownlinkPduSessionInformation::default()
+                },
+            )),
+            0x10 if octet & 0xc0 == 0 => Some(PduSessionContainer::uplink(octet & 0x3f)),
+            _ => None,
+        }
+    }
+
     fn decode(content: &[u8]) -> Result<Self, Error> {
         let Some(first) = content.first() else {
             return Err(truncated(Part::PduSessionContainer, 2, content));
@@ -468,15 +503,6 @@ impl DownlinkPduSessionInformation {
         let mut reader = Reader(content);
         let flags = reader.u8()?;
         let octet = reader.u8()?;
-        // The usual information is a QFI and its RQI: none of the fields
-        // that the flags below announce.
-        if flags & 0x0e == 0 && octet & 0x80 == 0 {
-            return Ok(Self {
-                qfi: octet & 0x3f,
-                rqi: octet & 0x40 != 0,
-                ..Self::default()
-            });
-        }
         let ppi_octet = if octet & 0x80 != 0 {
             Some(reader.u8()?)
         } else {
@@ -567,20 +593,26 @@ pub struct UplinkPduSessionInformation {
     /// DL Congestion Information, a percentage in hundredths, 0..=10000
     /// (New IE Flag 2), unchecked like the UL one.
     pub dl_congestion_information: Option<u16>,
-    /// New IEs of later releases than TS 38.415 V18, as received (present
-    /// when the New IE Flags announce any). They are out of the
-    /// information, which without them is short enough to be moved in
-    /// place.
+    /// UL Available Bitrate of the QoS flow in kbit/s, 0..=4 000 000 000
+    /// (New IE Flag 3, TS 38.415 V19), unchecked like the congestion
+    /// information.
+    pub ul_available_bitrate: Option<u32>,
+    /// DL Available Bitrate of the QoS flow in kbit/s (New IE Flag 4), as
+    /// the UL one.
+    pub dl_available_bitrate: Option<u32>,
+    /// New IEs of later releases than TS 38.415 V19.1.0, as received
+    /// (present when the New IE Flags announce any). They are out of the
+    /// information, which without them is shorter to move.
     pub unknown_new_ies: Option<Box<UnknownNewIes>>,
 }
 
 /// New IEs of UL PDU Session Information that this crate does not decode:
-/// those announced by New IE Flags 3 to 6 and by extension octets of the
+/// those announced by New IE Flags 5 and 6 and by extension octets of the
 /// New IE Flags (TS 38.415 Annex A).
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct UnknownNewIes {
     /// The New IE Flags octets, extension octets included, with New IE
-    /// Flags 0 to 2 clear. The first octet is not 0, and bit 7 (E) of an
+    /// Flags 0 to 4 clear. The first octet is not 0, and bit 7 (E) of an
     /// octet is set exactly when another octet follows.
     pub flags: Vec<u8>,
     /// The octets after the IEs this crate decodes, padding included: the
@@ -608,6 +640,9 @@ pub struct UplinkTimeStamps {
     pub ul_sending: u64,
 }
 
+/// The New IE Flags 0 to 4, whose IEs have a field.
+const KNOWN_NEW_IES: u8 = 0x1f;
+
 impl UplinkPduSessionInformation {
     /// Information of QoS flow `qfi` (0..=63), without optional fields.
     pub fn new(qfi: u8) -> Self {
@@ -621,11 +656,6 @@ impl UplinkPduSessionInformation {
         let mut reader = Reader(content);
         let flags = reader.u8()?;
         let octet = reader.u8()?;
-        // The usual information is a QFI: none of the fields that the
-        // flags below announce.
-        if flags & 0x0f == 0 && octet & 0xc0 == 0 {
-            return Ok(Self::new(octet & 0x3f));
-        }
         let time_stamps = if flags & 0x08 != 0 {
             Some(UplinkTimeStamps {
                 dl_sending_repeated: reader.u64()?,
@@ -641,6 +671,7 @@ impl UplinkPduSessionInformation {
         let n3_n9_delay_result = reader.u32_if(octet & 0x80 != 0)?;
         let (mut d1_ul_pdcp_delay_result_ind, mut unknown_new_ies) = (None, None);
         let (mut ul_congestion_information, mut dl_congestion_information) = (None, None);
+        let (mut ul_available_bitrate, mut dl_available_bitrate) = (None, None);
         if octet & 0x40 != 0 {
             let first = reader.u8()?;
             // The extension octets of the New IE Flags, before the IEs.
@@ -655,9 +686,11 @@ impl UplinkPduSessionInformation {
             }
             ul_congestion_information = reader.u16_if(first & 0x02 != 0)?;
             dl_congestion_information = reader.u16_if(first & 0x04 != 0)?;
+            ul_available_bitrate = reader.u32_if(first & 0x08 != 0)?;
+            dl_available_bitrate = reader.u32_if(first & 0x10 != 0)?;
             // Only flags of a later release are kept as octets: the flags
-            // of the three IEs above allocate nothing.
-            let unknown = first & !0x07;
+            // of the five IEs above allocate nothing.
+            let unknown = first & !KNOWN_NEW_IES;
             if unknown != 0 {
                 let mut flags = Vec::with_capacity(1 + extension.len());
                 flags.push(unknown);
@@ -679,6 +712,8 @@ impl UplinkPduSessionInformation {
             d1_ul_pdcp_delay_result_ind,
             ul_congestion_information,
             dl_congestion_information,
+            ul_available_bitrate,
+            dl_available_bitrate,
             unknown_new_ies,
         })
     }
@@ -689,7 +724,9 @@ impl UplinkPduSessionInformation {
         check(Part::UlQfiSequenceNumber, self.ul_qfi_sequence_number, U24)?;
         let known_new_ies = flag(self.d1_ul_pdcp_delay_result_ind.is_some(), 0x01)
             | flag(self.ul_congestion_information.is_some(), 0x02)
-            | flag(self.dl_congestion_information.is_some(), 0x04);
+            | flag(self.dl_congestion_information.is_some(), 0x04)
+            | flag(self.ul_available_bitrate.is_some(), 0x08)
+            | flag(self.dl_available_bitrate.is_some(), 0x10);
         if let Some(unknown) = &self.unknown_new_ies {
             let flags = &unknown.flags;
             let chained = flags
@@ -698,7 +735,7 @@ impl UplinkPduSessionInformation {
                 .all(|(index, flags_octet)| (flags_octet & 0x80 != 0) == (index + 1 < flags.len()));
             if flags
                 .first()
-                .is_none_or(|first| *first == 0 || first & 0x07 != 0)
+                .is_none_or(|first| *first == 0 || first & KNOWN_NEW_IES != 0)
                 || !chained
             {
                 return Err(Error::Malformed(Part::NewIeFlags));
@@ -714,7 +751,7 @@ impl UplinkPduSessionInformation {
         out.push(
             flag(self.n3_n9_delay_result.is_some(), 0x80) | flag(new_ie_flag, 0x40) | self.qfi,
         );
-        if let Some(time_stamps) = self.time_stamps {
+        if let Some(time_stamps) = &self.time_stamps {
             out.extend_from_slice(&time_stamps.dl_sending_repeated.to_be_bytes());
             out.extend_from_slice(&time_stamps.dl_received.to_be_bytes());
             out.extend_from_slice(&time_stamps.ul_sending.to_be_bytes());
@@ -751,6 +788,12 @@ impl UplinkPduSessionInformation {
             {
                 out.extend_from_slice(&congestion.to_be_bytes());
             }
+            for bitrate in [self.ul_available_bitrate, self.dl_available_bitrate]
+                .into_iter()
+                .flatten()
+            {
+                out.extend_from_slice(&bitrate.to_be_bytes());
+            }
             if let Some(unknown) = &self.unknown_new_ies {
                 out.extend_from_slice(&unknown.content);
                 // Padding added to it would decode as part of it.
@@ -770,7 +813,7 @@ fn flag(set: bool, bit: u8) -> u8 {
 /// The largest value of a field of 24 bits.
 pub(crate) const U24: u32 = 0xff_ffff;
 
-fn check_qfi(qfi: u8) -> Result<(), Error> {
+pub(crate) fn check_qfi(qfi: u8) -> Result<(), Error> {
     check(Part::Qfi, Some(u32::from(qfi)), 63)
 }
 

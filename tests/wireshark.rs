@@ -316,10 +316,34 @@ fn every_uplink_field() {
 }
 
 /// Wireshark stops after the D1 UL PDCP Delay Result Ind, but reads the
-/// New IE Flags of the congestion information.
+/// New IE Flags of the congestion information and of the available
+/// bitrates of TS 38.415 V19, and finds the end of the container that has
+/// them.
 #[test]
 #[ignore = "needs tshark"]
-fn uplink_congestion_information_flags() {
+fn uplink_congestion_information_and_available_bitrate_flags() {
+    let mut uplink = UplinkPduSessionInformation::new(7);
+    uplink.ul_available_bitrate = Some(1_000_000);
+    uplink.dl_available_bitrate = Some(4_000_000_000);
+    let mut packet = Packet::g_pdu(1, vec![0x45]);
+    packet
+        .extension_headers
+        .push(ExtensionHeader::PduSessionContainer(
+            PduSessionContainer::Uplink(uplink),
+        ));
+    check(
+        &packet,
+        &[
+            ("gtp.ext_hdr.length", "4"),
+            ("gtp.ext_hdr.next", "0x85,0x00"),
+            ("gtp.ext_hdr.pdu_ses_con.new_ie_flag", "True"),
+            ("gtp.ext_hdr.pdu_ses_cont.new_ie_flag_2", "False"),
+            ("gtp.ext_hdr.pdu_ses_cont.new_ie_flag_3", "True"),
+            ("gtp.ext_hdr.pdu_ses_cont.new_ie_flag_4", "True"),
+            ("gtp.ext_hdr.pdu_ses_cont.new_ie_flag_5", "False"),
+        ],
+    );
+
     let mut uplink = UplinkPduSessionInformation::new(7);
     uplink.ul_congestion_information = Some(9574);
     uplink.dl_congestion_information = Some(1000);

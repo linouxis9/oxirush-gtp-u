@@ -71,13 +71,14 @@
 //!
 //! Every extension header of TS 29.281 V19.2.0 §5.2.2 is a variant of
 //! [`ExtensionHeader`]. The PDU Session Container has the downlink and uplink
-//! PDU Session Information of TS 38.415 V18 §5.5.2, with the QoS monitoring,
-//! sequence number, delay and congestion fields, and the downlink Burst Size
-//! and Time To Next Burst. The PDCP PDU Number, the long one and the Service
-//! Class Indicator are their numbers. The PDU Set Information Container has
-//! the downlink PDU Set Information of TS 38.415 §6.5.2. The RAN Container,
-//! the Xw RAN Container and the NR RAN Container are the octets of a frame of
-//! TS 36.425, TS 36.465 or TS 38.425, which the crate does not read.
+//! PDU Session Information of TS 38.415 V19.1.0 §5.5.2, with the QoS
+//! monitoring, sequence number, delay and congestion fields, the downlink
+//! Burst Size and Time To Next Burst, and the uplink Available Bitrates. The
+//! PDCP PDU Number, the long one and the Service Class Indicator are their
+//! numbers. The PDU Set Information Container has the downlink PDU Set
+//! Information of TS 38.415 §6.5.2. The RAN Container, the Xw RAN Container
+//! and the NR RAN Container are the octets of a frame of TS 36.425, TS 36.465
+//! or TS 38.425, which the crate does not read.
 //!
 //! The numbers that say what a message, an extension header, an information
 //! element or a cause is are types that know the names of the specification:

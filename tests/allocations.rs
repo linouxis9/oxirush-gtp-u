@@ -89,6 +89,8 @@ fn usual_messages(payload: &[u8]) -> Vec<Packet> {
     uplink.d1_ul_pdcp_delay_result_ind = Some(true);
     uplink.ul_congestion_information = Some(9574);
     uplink.dl_congestion_information = Some(1000);
+    uplink.ul_available_bitrate = Some(1_000_000);
+    uplink.dl_available_bitrate = Some(4_000_000_000);
     let mut indication = Packet::error_indication(7, [192, 0, 2, 1].into());
     indication
         .extension_headers
@@ -160,7 +162,7 @@ fn a_chain_of_extension_headers_allocates_its_list_and_the_octets_it_keeps() {
     // flags, their octets, and where the two are kept.
     let mut uplink = UplinkPduSessionInformation::new(9);
     uplink.unknown_new_ies = Some(Box::new(UnknownNewIes {
-        flags: vec![0x88, 0x01],
+        flags: vec![0xa0, 0x01],
         content: vec![0xaa, 0xbb, 0xcc, 0x00, 0x00, 0x00],
     }));
     let message = Packet::g_pdu(1, vec![0x45; 64])

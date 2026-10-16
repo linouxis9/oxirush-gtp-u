@@ -47,10 +47,11 @@ fn uplink(valid: bool) -> impl Strategy<Value = PduSessionContainer> {
         of(0u32..1 << 24),
         of(any::<u32>()),
         (of(any::<bool>()), of(any::<u16>()), of(any::<u16>())),
-        of((0u8..16, vec(any::<u8>(), 0..8))),
+        (of(any::<u32>()), of(any::<u32>())),
+        of((0u8..4, vec(any::<u8>(), 0..8))),
     )
         .prop_map(
-            move |(qfi, time_stamps, dl, ul, sequence, n3_n9, known, unknown)| {
+            move |(qfi, time_stamps, dl, ul, sequence, n3_n9, known, bitrates, unknown)| {
                 let mut information = UplinkPduSessionInformation::new(qfi);
                 information.time_stamps =
                     time_stamps.map(|[dl_sending_repeated, dl_received, ul_sending]| {
@@ -68,12 +69,15 @@ fn uplink(valid: bool) -> impl Strategy<Value = PduSessionContainer> {
                 information.d1_ul_pdcp_delay_result_ind = d1;
                 information.ul_congestion_information = ul_congestion;
                 information.dl_congestion_information = dl_congestion;
-                // Unknown flags 3 to 6, or an extension octet; decoding keeps the
+                let (ul_bitrate, dl_bitrate) = bitrates;
+                information.ul_available_bitrate = ul_bitrate;
+                information.dl_available_bitrate = dl_bitrate;
+                // Unknown flags 5 and 6, or an extension octet; decoding keeps the
                 // padding in the content, so include it.
                 information.unknown_new_ies = unknown.map(|(flags, mut content)| {
                     let flags = match flags {
                         0 => vec![0x80, 0x01],     // an extension octet
-                        flags => vec![flags << 3], // New IE Flags 3 to 6
+                        flags => vec![flags << 5], // New IE Flags 5 and 6
                     };
                     let mut length = 2
                         + time_stamps.map_or(0, |_| 24)
@@ -85,6 +89,8 @@ fn uplink(valid: bool) -> impl Strategy<Value = PduSessionContainer> {
                         + d1.map_or(0, |_| 1)
                         + ul_congestion.map_or(0, |_| 2)
                         + dl_congestion.map_or(0, |_| 2)
+                        + ul_bitrate.map_or(0, |_| 4)
+                        + dl_bitrate.map_or(0, |_| 4)
                         + content.len();
                     while valid && (length + 2) % 4 != 0 {
                         content.push(0);

@@ -377,10 +377,10 @@ mod tests {
     #[cfg(target_pointer_width = "64")]
     #[test]
     fn a_header_and_a_message_keep_their_size() {
-        assert_eq!(size_of::<ExtensionHeader>(), 88);
-        assert_eq!(size_of::<ExtensionHeaders>(), 88);
-        assert_eq!(size_of::<crate::Packet>(), 128);
-        assert_eq!(size_of::<crate::Packet<&[u8]>>(), 120);
+        assert_eq!(size_of::<ExtensionHeader>(), 104);
+        assert_eq!(size_of::<ExtensionHeaders>(), 104);
+        assert_eq!(size_of::<crate::Packet>(), 144);
+        assert_eq!(size_of::<crate::Packet<&[u8]>>(), 136);
     }
 
     #[test]
