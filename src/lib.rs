@@ -58,8 +58,10 @@
 //!
 //! `ebpf` brings `tun`, and `tun` brings `endpoint`. The `tun` and `ebpf`
 //! modules exist on Linux only; elsewhere their features build and add nothing
-//! to `endpoint`. The reference of each part is with it: `Endpoint`, and the
-//! modules `upf_sim`, `tun` and `ebpf`.
+//! to `endpoint`. So does `ebpf` on an architecture that its loader, aya, does
+//! not build for, such as 32-bit x86: it has 64-bit x86, ARM, AArch64,
+//! RISC-V 64, LoongArch 64, MIPS, PowerPC 64 and s390x. The reference of each
+//! part is with it: `Endpoint`, and the modules `upf_sim`, `tun` and `ebpf`.
 //!
 //! # Codec
 //!
@@ -138,7 +140,7 @@
 //! | A UPF for real traffic | The test UPF serves the sessions that calls give it, with an echo service or a TUN. It has no PFCP, QoS or charging. |
 //! | Other GTP | GTP' and the versions 0 and 2 are refused, as `UnsupportedVersion`. |
 //! | IPv6 in the helpers, the TUN routing and the fast path | They are IPv4. The codec and the endpoint carry any payload, and an endpoint binds an IPv4 or an IPv6 address. |
-//! | Portability | `tun` and `ebpf` are Linux only. |
+//! | Portability | `tun` and `ebpf` are Linux only, and `ebpf` adds nothing on 32-bit x86, which aya does not build for. |
 //!
 //! # Terms
 //!
@@ -212,7 +214,9 @@ mod types;
 
 #[cfg(feature = "endpoint")]
 mod datagram;
-#[cfg(all(target_os = "linux", feature = "ebpf"))]
+// The `ebpf` feature on Linux, on an architecture of aya: see build.rs.
+#[cfg(fast_path)]
+#[cfg_attr(docsrs, doc(cfg(all(target_os = "linux", feature = "ebpf"))))]
 #[allow(unsafe_code)]
 pub mod ebpf;
 #[cfg(feature = "endpoint")]

@@ -114,7 +114,7 @@ impl Netlink {
 
     /// The interface through which Linux routes packets from the local
     /// address `source` to `destination`: loopback when both are this host's.
-    #[cfg(feature = "ebpf")]
+    #[cfg(fast_path)]
     pub fn route_interface(&mut self, source: Ipv4Addr, destination: Ipv4Addr) -> io::Result<u32> {
         let mut message = RouteMessage::default();
         message.header.address_family = AddressFamily::Inet;
@@ -220,7 +220,7 @@ impl Netlink {
 
     /// Create veth `name` with its other end `peer`, both with the largest
     /// MTU: whatever enters one end must be let through the other.
-    #[cfg(feature = "ebpf")]
+    #[cfg(fast_path)]
     pub fn add_veth(&mut self, name: &str, peer: &str) -> io::Result<()> {
         use netlink_packet_route::link::InfoVeth;
         let mtu = u32::from(u16::MAX);
@@ -243,7 +243,7 @@ impl Netlink {
     }
 
     /// Whether link `index` is a veth that was set up.
-    #[cfg(feature = "ebpf")]
+    #[cfg(fast_path)]
     pub fn is_up_veth(&mut self, index: u32) -> bool {
         let mut message = LinkMessage::default();
         message.header.index = index;
@@ -257,7 +257,7 @@ impl Netlink {
     }
 
     /// The MTU of link `index`.
-    #[cfg(feature = "ebpf")]
+    #[cfg(fast_path)]
     pub fn mtu_of(&mut self, index: u32) -> io::Result<u32> {
         let mut message = LinkMessage::default();
         message.header.index = index;

@@ -26,7 +26,7 @@ use routes::RouteTable;
 use routes::{SessionKey, TunAttachment};
 
 /// A fast path and the N3 address of the endpoint that has it.
-#[cfg(all(target_os = "linux", feature = "ebpf"))]
+#[cfg(fast_path)]
 type N3FastPath = (crate::ebpf::FastPath, std::net::Ipv4Addr);
 
 /// Messages the receiver of [`Endpoint::bind`] can lag behind by before
@@ -182,27 +182,27 @@ struct Shared {
     worker: AbortHandle,
     completion: tokio::sync::Mutex<Option<JoinHandle<io::Result<()>>>>,
     stopped: AtomicBool,
-    #[cfg(all(target_os = "linux", feature = "ebpf"))]
+    #[cfg(fast_path)]
     fast_path: std::sync::OnceLock<N3FastPath>,
 }
 
 impl Shared {
     /// Apply a tunnel's change, or its removal, to its short-cut.
-    #[cfg(all(target_os = "linux", feature = "ebpf"))]
+    #[cfg(fast_path)]
     fn sync(&self, local_teid: u32, route: Option<(RemoteTunnel, Option<u8>)>) {
         if let Some((fast_path, local)) = self.fast_path.get() {
             fast_path.refresh(*local, local_teid, route);
         }
     }
 
-    #[cfg(not(all(target_os = "linux", feature = "ebpf")))]
+    #[cfg(not(fast_path))]
     fn sync(&self, _local_teid: u32, _route: Option<(RemoteTunnel, Option<u8>)>) {}
 }
 
 impl Drop for Shared {
     fn drop(&mut self) {
         self.worker.abort();
-        #[cfg(all(target_os = "linux", feature = "ebpf"))]
+        #[cfg(fast_path)]
         for local_teid in self.routes.local_teids() {
             self.sync(local_teid, None);
         }
@@ -237,7 +237,7 @@ impl Endpoint {
             worker,
             completion: tokio::sync::Mutex::new(Some(completion)),
             stopped: AtomicBool::new(false),
-            #[cfg(all(target_os = "linux", feature = "ebpf"))]
+            #[cfg(fast_path)]
             fast_path: std::sync::OnceLock::new(),
         };
         Ok((
@@ -271,7 +271,7 @@ impl Endpoint {
     pub async fn shutdown(&self) -> io::Result<()> {
         self.shared.stopped.store(true, Ordering::Relaxed);
         self.shared.worker.abort();
-        #[cfg(all(target_os = "linux", feature = "ebpf"))]
+        #[cfg(fast_path)]
         for local_teid in self.shared.routes.local_teids() {
             self.shared.sync(local_teid, None);
         }
@@ -331,7 +331,8 @@ impl Endpoint {
     /// [`attach_tun`](Self::attach_tun) or [`shortcut`](Self::shortcut)
     /// gives a TUN from now on, until they are removed or the endpoint is
     /// shut down.
-    #[cfg(all(target_os = "linux", feature = "ebpf"))]
+    #[cfg(fast_path)]
+    #[cfg_attr(docsrs, doc(cfg(all(target_os = "linux", feature = "ebpf"))))]
     pub fn set_fast_path(&self, fast_path: crate::ebpf::FastPath) -> io::Result<()> {
         let local = match self.local_addr()? {
             SocketAddr::V4(local) if local.port() == crate::PORT => *local.ip(),
@@ -378,7 +379,8 @@ impl Endpoint {
     ///   fast path, or the peer is not IPv4 on the GTP-U port.
     /// - Another error: the route lookup or a map write failed, or the N3
     ///   interface could not get its program, which is not tried again.
-    #[cfg(all(target_os = "linux", feature = "ebpf"))]
+    #[cfg(fast_path)]
+    #[cfg_attr(docsrs, doc(cfg(all(target_os = "linux", feature = "ebpf"))))]
     pub fn shortcut(&self, ran_id: u32, session_id: u8, tun: u32) -> io::Result<()> {
         let fast_path = self.shared.fast_path.get().ok_or_else(|| {
             io::Error::new(io::ErrorKind::Unsupported, "the endpoint has no fast path")
@@ -475,9 +477,9 @@ impl Endpoint {
         let key = (ran_id, session_id);
         self.shared.routes.tun_slot(key)?;
         let port = TunPort::create(config)?;
-        #[cfg(feature = "ebpf")]
+        #[cfg(fast_path)]
         let fast_path = self.shared.fast_path.get().cloned();
-        #[cfg(feature = "ebpf")]
+        #[cfg(fast_path)]
         if let Some((fast_path, _)) = &fast_path {
             fast_path.add_tun(port.index())?;
         }
@@ -486,13 +488,13 @@ impl Endpoint {
             self.shared.socket.clone(),
             self.shared.routes.clone(),
             key,
-            #[cfg(feature = "ebpf")]
+            #[cfg(fast_path)]
             fast_path.clone(),
         ));
         let attachment = TunAttachment {
             port,
             reader,
-            #[cfg(feature = "ebpf")]
+            #[cfg(fast_path)]
             fast_path: fast_path.map(|(fast_path, _)| fast_path),
         };
         // Unless the tunnel went away or got a TUN meanwhile.
@@ -661,7 +663,7 @@ async fn forward_tun(
     socket: Arc<DatagramSocket>,
     routes: Arc<RouteTable>,
     key: SessionKey,
-    #[cfg(feature = "ebpf")] fast_path: Option<N3FastPath>,
+    #[cfg(fast_path)] fast_path: Option<N3FastPath>,
 ) {
     let mut packet = vec![0; 65535];
     loop {
@@ -669,7 +671,7 @@ async fn forward_tun(
         // kernel carry the next ones. While the tunnel's N3 interface is
         // still getting its program this fails, and the next packet asks
         // again.
-        #[cfg(feature = "ebpf")]
+        #[cfg(fast_path)]
         if let Some(Err(error)) = fast_path
             .as_ref()
             .map(|fast_path| shortcut(&routes, fast_path, key, port.index()))
@@ -691,7 +693,7 @@ async fn forward_tun(
 
 /// Short-cut tunnel `key` through TUN interface `tun`, on a route that
 /// cannot change or go away meanwhile.
-#[cfg(all(target_os = "linux", feature = "ebpf"))]
+#[cfg(fast_path)]
 fn shortcut(
     routes: &RouteTable,
     (fast_path, local): &N3FastPath,

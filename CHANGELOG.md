@@ -125,6 +125,9 @@ First release.
   Error Indication), and on Linux as root `tun` and `fast_path`. The README
   shows them: a test compares the two, and what those that need no root
   print with the text that the README shows under them.
+- `ebpf` builds and adds nothing on an architecture that aya does not
+  build for, such as 32-bit x86, as off Linux; the build failed there in
+  aya-obj. A build script tells the crate where the fast path is.
 - Features: `endpoint` (the default), `tun`, `ebpf` and `serde`. Without
   default features the crate has no dependencies. The fast path is not a
   default feature: a crate that only decodes packets would otherwise build

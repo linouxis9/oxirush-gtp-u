@@ -3,7 +3,8 @@
 //! networking alone: `CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER=sudo cargo
 //! test --features ebpf --test ebpf_linux -- --ignored`.
 
-#![cfg(target_os = "linux")]
+// Linux, on an architecture of aya: see build.rs.
+#![cfg(fast_path)]
 
 use std::ffi::{CStr, CString};
 use std::io;

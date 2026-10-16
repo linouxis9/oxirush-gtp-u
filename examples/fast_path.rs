@@ -7,7 +7,8 @@
 //! sudo unshare --net sh -c 'ip link set lo up && target/debug/examples/fast_path'
 //! ```
 
-#[cfg(target_os = "linux")]
+// Linux, on an architecture of aya: see build.rs.
+#[cfg(fast_path)]
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> std::io::Result<()> {
     use std::net::Ipv4Addr;
@@ -49,7 +50,7 @@ async fn main() -> std::io::Result<()> {
     Ok(())
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(fast_path))]
 fn main() {
-    eprintln!("this example needs Linux");
+    eprintln!("this example needs Linux, on an architecture of aya");
 }

@@ -39,7 +39,7 @@ pub(super) struct TunAttachment {
     pub(super) port: TunPort,
     pub(super) reader: tokio::task::JoinHandle<()>,
     /// The fast path the TUN is on.
-    #[cfg(feature = "ebpf")]
+    #[cfg(fast_path)]
     pub(super) fast_path: Option<crate::ebpf::FastPath>,
 }
 
@@ -48,7 +48,7 @@ impl Drop for TunAttachment {
     fn drop(&mut self) {
         self.reader.abort();
         // First: another interface may get the index of a closed TUN.
-        #[cfg(feature = "ebpf")]
+        #[cfg(fast_path)]
         if let Some(fast_path) = &self.fast_path {
             fast_path.remove_tun(self.port.index());
         }
@@ -227,12 +227,12 @@ impl RouteTable {
     }
 
     /// Run `f` on a route that cannot change or go away meanwhile.
-    #[cfg(all(target_os = "linux", feature = "ebpf"))]
+    #[cfg(fast_path)]
     pub(super) fn with_route<T>(&self, key: SessionKey, f: impl FnOnce(Route) -> T) -> Option<T> {
         lock(&self.0).by_session.get(&key).copied().map(f)
     }
 
-    #[cfg(all(target_os = "linux", feature = "ebpf"))]
+    #[cfg(fast_path)]
     pub(super) fn local_teids(&self) -> Vec<u32> {
         lock(&self.0).by_teid.keys().copied().collect()
     }
