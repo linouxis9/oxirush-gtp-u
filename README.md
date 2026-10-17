@@ -442,6 +442,33 @@ A message with one extension header at most is decoded without an
 allocation. [`benches/`](https://github.com/linouxis9/oxirush-gtp-u/blob/master/benches/README.md)
 has the benchmarks, the other figures and how to profile.
 
+### Against go-gtp
+
+[go-gtp](https://github.com/wmnsk/go-gtp) v0.8.12 on the same G-PDUs of
+1400 octets, each program on one core of the same machine, a load of 5 to
+6 from other work. Times are the lowest of three runs; cycles and
+instructions are per operation, from `perf stat`, user and kernel; peak
+memory is that of the whole program; the last column is the time of
+go-gtp against this crate's.
+
+| Operation | | ns | Cycles | Instructions | Allocations | Octets allocated | Peak memory | go-gtp / this crate |
+|---|---|---|---|---|---|---|---|---|
+| Encode, no extension header | oxirush-gtp-u | 19.6 | 86 | 305 | 0 | 0 | 2.7 MiB | |
+| | go-gtp | 18.3 | 80 | 338 | 0 | 0 | 5.3 MiB | 0.93 |
+| Encode, PDU Session Container | oxirush-gtp-u | 25.9 | 114 | 472 | 0 | 0 | 2.7 MiB | |
+| | go-gtp | 27.0 | 117 | 525 | 0 | 0 | 5.6 MiB | 1.04 |
+| Decode, no extension header | oxirush-gtp-u | 11.0 | 48 | 127 | 0 | 0 | 2.8 MiB | |
+| | go-gtp | 4.2 | 18 | 88 | 0 | 0 | 5.4 MiB | 0.38 |
+| Decode, PDU Session Container | oxirush-gtp-u | 24.5 | 104 | 251 | 0 | 0 | 2.8 MiB | |
+| | go-gtp | 46.3 | 202 | 864 | 2 | 56 | 10.0 MiB | 1.89 |
+| Endpoint to endpoint and back, loopback | oxirush-gtp-u | 12 565 | 55 762 | 39 964 | 2 | 2 807 | 3.0 MiB | |
+| | go-gtp | 25 174 | 108 217 | 85 071 | 82 | 8 736 | 10.1 MiB | 2.00 |
+
+A decoded message of this crate has room for its first extension header
+in itself, 136 octets in all, which a G-PDU without one has too.
+`benches/compare.sh 3` runs every row on core 3, and fetches go-gtp at the
+version that it pins; perf may need `PERF="sudo -n perf"`.
+
 ## Tests and fuzzing
 
 ```sh
