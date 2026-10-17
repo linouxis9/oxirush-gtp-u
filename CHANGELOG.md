@@ -21,8 +21,9 @@ First release.
   against, without PFCP.
 - `tun` (Linux): TUN devices and their routing, over rtnetlink, for the
   tunnels of an endpoint and the sessions of the test UPF.
-- `ebpf` (Linux 6.6): TCX programs that carry an endpoint's tunnels in the
-  kernel. Their object is committed with its source; CI rebuilds it.
+- `ebpf` (Linux 6.6, little-endian): TCX programs that carry an
+  endpoint's tunnels in the kernel. Their object is committed with its
+  source; CI rebuilds it.
 - Features `endpoint` (the default), `tun`, `ebpf`, `serde`, and `cli` for
   the program. Without the default features the crate has no dependency.
   Rust 1.88 or later.
@@ -34,6 +35,9 @@ revision `ac3a019` for a program that uses the crate:
 
 - The fast path is the `ebpf` feature, which was a default feature and is
   not any more: `features = ["ebpf"]` asks for it.
+- `ebpf` adds nothing on a big-endian target, such as s390x, where the
+  module `ebpf` was built and could not load its object, which is for
+  little-endian eBPF.
 - The `oxirush-upf-sim` program needs the `cli` feature, which turns on
   the `macros` and `signal` features of Tokio: the library does not use
   them, and its default features turned them on for every program.

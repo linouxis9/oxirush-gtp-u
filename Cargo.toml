@@ -24,8 +24,8 @@ tun = [
     "dep:netlink-packet-route",
     "dep:netlink-sys",
 ]
-# The eBPF fast path of the endpoint's tunnels (Linux 6.6, and an
-# architecture of aya below).
+# The eBPF fast path of the endpoint's tunnels (Linux 6.6, and a
+# little-endian architecture of aya below).
 ebpf = ["tun", "dep:aya"]
 # Serialize and Deserialize for RemoteTunnel (with endpoint).
 serde = ["dep:serde"]
@@ -43,9 +43,10 @@ netlink-packet-core = { version = "0.9", optional = true }
 netlink-packet-route = { version = "0.33", optional = true }
 netlink-sys = { version = "0.9", optional = true }
 
-# The architectures that aya-obj 0.3 has the kernel's definitions for, as
-# in build.rs: elsewhere, such as on 32-bit x86, `ebpf` adds nothing.
-[target.'cfg(all(target_os = "linux", any(target_arch = "aarch64", target_arch = "arm", target_arch = "loongarch64", target_arch = "mips", target_arch = "mips64", target_arch = "powerpc64", target_arch = "riscv64", target_arch = "s390x", target_arch = "x86_64")))'.dependencies]
+# The architectures that aya-obj 0.3 has the kernel's definitions for,
+# little-endian as the programs' object is, as in build.rs: elsewhere, such
+# as on 32-bit x86 or s390x, `ebpf` adds nothing.
+[target.'cfg(all(target_os = "linux", target_endian = "little", any(target_arch = "aarch64", target_arch = "arm", target_arch = "loongarch64", target_arch = "mips", target_arch = "mips64", target_arch = "powerpc64", target_arch = "riscv64", target_arch = "s390x", target_arch = "x86_64")))'.dependencies]
 aya = { version = "0.14", optional = true }
 
 [dev-dependencies]

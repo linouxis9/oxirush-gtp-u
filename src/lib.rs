@@ -59,9 +59,11 @@
 //!
 //! `ebpf` brings `tun`, and `tun` brings `endpoint`. The `tun` and `ebpf`
 //! modules exist on Linux only; elsewhere their features build and add nothing
-//! to `endpoint`. So does `ebpf` on an architecture that its loader, aya, does
-//! not build for, such as 32-bit x86: it has 64-bit x86, ARM, AArch64,
-//! RISC-V 64, LoongArch 64, MIPS, PowerPC 64 and s390x. The reference of each
+//! to `endpoint`. So does `ebpf` where the programs cannot run: on an
+//! architecture that their loader, aya, does not build for, such as 32-bit
+//! x86, and on a big-endian one, such as s390x, as their object is for
+//! little-endian eBPF. It runs on 64-bit x86, ARM, AArch64, RISC-V 64,
+//! LoongArch 64, and little-endian MIPS and PowerPC 64. The reference of each
 //! part is with it: `Endpoint`, and the modules `upf_sim`, `tun` and `ebpf`.
 //!
 //! # Codec
@@ -142,7 +144,7 @@
 //! | Other GTP | GTP' and the versions 0 and 2 are refused, as `UnsupportedVersion`. |
 //! | IPv6 in the helpers, the TUN routing and the fast path | They are IPv4. The codec and the endpoint carry any payload, and an endpoint binds an IPv4 or an IPv6 address. |
 //! | Transport QoS and load balancing | Every G-PDU, through the socket or the fast path, has DSCP 0 and source port 2152. TS 29.281 §4.4.1 asks for the DSCP of the QoS flow's 5QI, which a call does not give, and §4.4.2.0 for source ports that vary, which one socket cannot have. |
-//! | Portability | `tun` and `ebpf` are Linux only, and `ebpf` adds nothing on 32-bit x86, which aya does not build for. |
+//! | Portability | `tun` and `ebpf` are Linux only, and `ebpf` adds nothing on 32-bit x86, which aya does not build for, and on big-endian architectures. |
 //!
 //! # Terms
 //!
@@ -216,7 +218,8 @@ mod types;
 
 #[cfg(feature = "endpoint")]
 mod datagram;
-// The `ebpf` feature on Linux, on an architecture of aya: see build.rs.
+// The `ebpf` feature on Linux, on a little-endian architecture of aya: see
+// build.rs.
 #[cfg(fast_path)]
 #[cfg_attr(docsrs, doc(cfg(all(target_os = "linux", feature = "ebpf"))))]
 #[allow(unsafe_code)]

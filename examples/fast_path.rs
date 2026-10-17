@@ -7,7 +7,7 @@
 //! sudo unshare --net sh -c 'ip link set lo up && target/debug/examples/fast_path'
 //! ```
 
-// Linux, on an architecture of aya: see build.rs.
+// Linux, on a little-endian architecture of aya: see build.rs.
 #[cfg(fast_path)]
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> std::io::Result<()> {
@@ -52,5 +52,5 @@ async fn main() -> std::io::Result<()> {
 
 #[cfg(not(fast_path))]
 fn main() {
-    eprintln!("this example needs Linux, on an architecture of aya");
+    eprintln!("this example needs Linux, on a little-endian architecture of aya");
 }

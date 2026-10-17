@@ -394,8 +394,8 @@ oxirush-gtp-u = { git = "https://github.com/linouxis9/oxirush-gtp-u", default-fe
 ```
 
 `ebpf` brings `tun`, and `tun` brings `endpoint`. Off Linux, `tun` and
-`ebpf` build and add nothing, and so does `ebpf` on 32-bit x86 and the
-other architectures that aya does not build for. The eBPF programs are
+`ebpf` build and add nothing, and so does `ebpf` on 32-bit x86, which aya
+does not build for, and on big-endian architectures. The eBPF programs are
 committed as an object: a build with `ebpf` needs no nightly toolchain and
 no eBPF linker. The minimum supported Rust version is 1.88.
 
