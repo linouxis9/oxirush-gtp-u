@@ -4,167 +4,27 @@
 
 First release.
 
-- GTPv1-U codec (TS 29.281): every header field, extension header chains,
-  information elements, and constructors for Echo Request and Response, Error
-  Indication, Supported Extension Headers Notification, End Marker and
-  G-PDUs. Decoding follows the receiver rules of §5.1 and never panics;
-  what it produces encodes to a message that decodes to the same value.
-  Its `Error` names the part of the message that is wrong (`Part`) and has
-  the numbers that disagree, as in "truncated GTP-U message: the Length
-  field says 9 octets after the header, the datagram has 1". It converts
-  into a `std::io::Error`.
+- A GTPv1-U codec (TS 29.281): every header field, the chain of extension
+  headers with a variant for each type of V19.2.0 §5.2.2, the information
+  elements, the PDU Session Container of TS 38.415 V19.1.0 §5.5.2 and the
+  PDU Set Information Container of §6.5.2. Decoding never panics, and what
+  it decodes encodes to a message that decodes to the same value. A
+  message with one extension header at most, as a G-PDU on N3, is decoded
+  and encoded without an allocation. An `Error` names the `Part` of the
+  message and has the numbers that disagree.
 - `MessageType`, `ExtensionHeaderType`, `InformationElementType` and
-  `Cause`: the numbers that say what a message, an extension header, an
-  information element or a cause is, with a constant for each that the
-  specification names. Any number is a value; `Display` prints the name or
-  the number, and `Debug` both, as `G-PDU (255)`. `Debug` of a message
-  prints its TEID in hexadecimal and its payload as its length and all its
-  octets in hexadecimal, as it does for every TEID and for what is kept as
-  received.
-- `ExtensionHeaders`, the list of a message's extension headers
-  (`Packet::extension_headers`): a slice to read and to change, `push`,
-  `extend` and `clear`; it is made from a `Vec`, an array or one header,
-  and gives its headers back as a `Vec`. It keeps its first header in
-  itself. A message without extension header,
-  or with one, such as the PDU Session Container of a G-PDU on N3, is
-  decoded with its payload left in the datagram, and made and encoded into a
-  buffer that is used again, without an allocation
-  (`tests/allocations.rs`). A second header allocates the list; a header
-  and a PDU type that are kept as received, and the new IEs of a later
-  release, allocate their octets. A message is decoded and encoded with 16
-  extension headers at most (`ExtensionHeaders::MAX`): the specification
-  sets no limit and its types make eight at most, and a datagram that is
-  nothing but headers, of which it holds more than 16 000, is refused at
-  its seventeenth, as `Error::TooManyExtensionHeaders`.
-- Every extension header of TS 29.281 V19.2.0 §5.2.2 has a variant of
-  `ExtensionHeader`: the UDP Port, the PDU Session Container, the PDCP PDU
-  Number and the Long PDCP PDU Number of a handover, the Service Class
-  Indicator, the RAN Container, the Xw RAN Container and the NR RAN
-  Container, whose frames stay octets, and the PDU Set Information
-  Container with the downlink PDU Set Information of TS 38.415 §6.5.2. A
-  header of another type is kept as its octets. `examples/handover.rs` has
-  the headers of a handover.
-- What has a getter has a setter: `Packet::pdu_session_container_mut`,
-  `Packet::set_qfi`, `PduSessionContainer::set_qfi`,
-  `PduSetInformationContainer::set_qfi` and
-  `Packet::set_information_elements`.
-- PDU Session Container (TS 38.415 V19.1.0 §5.5.2): downlink and uplink
-  PDU Session Information with their QoS monitoring, sequence number, delay
-  and congestion fields, and the uplink UL and DL Available Bitrate; new IEs
-  of later releases are kept as received. A test
-  compares the wire format with Wireshark's dissector (`tests/wireshark.rs`,
-  which CI runs).
-- Downlink Burst Size and Time To Next Burst are typed and preserved with
-  their BSSI/TTNBI flags. Imported TS 29.060 TV IEs retain their values and
-  signaling IEs use the required order; Echo Response includes the rejection
-  Cause when mandatory Echo Request fields are missing.
-- `Endpoint`: a gNB's N3 socket and tunnels. It answers Echo Requests,
-  sends Error Indication and Supported Extension Headers Notification to
-  port 2152, and delivers G-PDUs, End Markers and the peer's Error
-  Indications with their source address; the TEID alone identifies a
-  tunnel. A G-PDU is delivered with every extension header that has a
-  variant, so with those of a handover and of the RAN protocols, and one
-  without a packet goes to the receiver of a tunnel that has a TUN.
-  `install_s1u` gives an eNB's S1-U tunnels, without a PDU Session
-  Container. `install` returns an `io::Result`: a QFI above 63 is
-  `InvalidInput`, as with `install_with_teid` and with
-  `UpfSimulator::set_session`. That error holds the codec's
-  `Error::OutOfRange` for the QFI, which encoding a G-PDU with it returns:
-  nothing panics for a QFI.
-- An endpoint finds the tunnel that an Error Indication names, and the
-  tunnels of a UE for `remove_ran`, in an index: neither walks through the
-  tunnels, so an Error Indication, which anyone who reaches the socket can
-  send, costs with 100 000 tunnels what it costs with 1 000. Of several
-  tunnels to one TEID of a peer, the Error Indication is delivered for the
-  first by RAN UE and session.
-- The local TEIDs of an endpoint are drawn at random, a keyed hash of a
-  count: whoever knows one of them cannot tell another, where they were 1,
-  2, 3 and on, and the TEID alone identifies a tunnel.
-- What a peer without a tunnel can make an endpoint or the test UPF send
-  and log has a limit. Error Indications and Supported Extension Headers
-  Notifications go out at 100 a second after a burst of 100, so that the
-  peer of a removed tunnel still gets one for its next G-PDUs, as TS 29.281
-  §7.3.1 has it, and a flood does not make the socket a reflector. A line
-  that a peer causes is logged once a second at most for each kind, with
-  the number not logged. Echo Responses are not limited. `ReceiveStats`
-  counts the G-PDUs on unknown TEIDs, the Error Indications that name no
-  tunnel, the messages that the endpoint or the test UPF does not take, and
-  the replies not sent.
-- Endpoint and test-UPF binding require a specific local IP address;
-  wildcard addresses return `InvalidInput` to preserve reply source addresses.
-  TUN attachment and session replacement check the session's identity so a
-  concurrent operation cannot attach a device to a replacement session.
-- `upf_sim::UpfSimulator` and the `oxirush-upf-sim` binary: a test UPF with
-  an IPv4 UDP and ICMP echo service, End Marker on a path switch, and an
-  optional TUN per session.
-- The test UPF's receive task waits for no session: a reply of the echo
-  service whose session's downlink a send or a switch holds is sent from a
-  task of its own, 256 at most. It waited there, and one session held up
-  the Echo Requests and the packets of all the others.
-- `tun::TunPort` (Linux, `tun` feature): TUN devices with policy, VRF or UPF
-  routing set up over rtnetlink, and without IPv6 addresses, so Linux sends
-  nothing through them unasked. A `TunPort` is `Clone`: clones share the
-  device, and the TUN goes with the last one or on `close`.
-- The rtnetlink requests of the TUN and of the fast path wait a second at
-  most for the kernel's answer, and return `TimedOut` past it: an answer
-  that did not come held the caller's thread, a thread of its runtime, for
-  ever.
-- `Endpoint::attach_tun` (Linux, `tun` feature): gives a tunnel a TUN and
-  carries its packets both ways, as `UpfSimulator::attach_tun` does for a
-  session. The tunnel's G-PDUs then go to Linux instead of the receiver.
-  The TUN closes with its tunnel, on the endpoint's `shutdown` and with its
-  last clone.
-- IPv4 UDP and ICMP Echo helpers to exercise tunnels without a TUN.
-- `ebpf::FastPath` (Linux 6.6, `ebpf` feature): three TCX programs carry an
-  endpoint's tunnels in the kernel between a TUN and N3
-  (`FastPath::load`, `add_tun`, `remove_tun`, `end_shortcut` and `stats`,
-  `Endpoint::set_fast_path`, `Endpoint::shortcut`, `TunPort::index`); on an
-  endpoint with a fast path `attach_tun` does it for the TUN it makes. The
-  tunnel's route updates and ends its short-cut, as does the endpoint's
-  `shutdown`; a tunnel has one short-cut. What the programs leave
-  alone still goes through the endpoint's socket and the TUN's reader, and
-  on to the interface's other TCX programs and tc filters. N3 is the
-  interface Linux routes the tunnel through; it gets its program when a
-  first tunnel through it is installed, off the caller's task. The
-  programs' object is committed next to its source
-  (`src/ebpf/programs.rs`), and `ebpf/` has what rebuilds it, in the
-  repository and in the published crate; CI rebuilds it and compares.
-- `FastPath::load` removes the stage that a killed process left only when
-  its far end has the stage's alias, `oxirush-gtp-u fast path stage`: it
-  removed any veth that was up, named as a stage is, and without a program
-  at the ingress of its far end.
-- The fast path's `decap` checks the outer IPv4 header of a G-PDU as Linux
-  does, its checksum and its total length, and leaves to Linux one that
-  Linux drops: it carried such a G-PDU to its TUN.
-- The fast path follows the MTU of each N3 interface, which Linux
-  announces over rtnetlink, in a thread of its own: the short-cuts kept the
-  MTU of the time they were made, and after N3's shrank a G-PDU too long
-  for it was sent all the same.
-- The reader of a TUN that `attach_tun` made asks for its tunnel's
-  short-cut when the TUN has none (`FastPath::has_shortcut`), each
-  millisecond at most while the N3 interface is getting its program and a
-  second after another failure. It asked before each packet that it
-  carried: a route lookup and an MTU lookup over rtnetlink, under the lock
-  of the endpoint's tunnels, for every packet of a tunnel that could not be
-  short-cut or whose packets were too long for N3.
-- Examples: `codec`, `extension_headers`, `endpoint`, `path` (echo and
-  Error Indication), and on Linux `tun`, which needs `CAP_NET_ADMIN` and
-  runs without root in a user namespace of its own, as the TUN tests do,
-  and as root `fast_path`. The README
-  shows them: a test compares the two, and what those that need no root
-  print with the text that the README shows under them.
-- `ebpf` builds and adds nothing on an architecture that aya does not
-  build for, such as 32-bit x86, as off Linux; the build failed there in
-  aya-obj. A build script tells the crate where the fast path is.
-- Features: `endpoint` (the default), `tun`, `ebpf` and `serde`. Without
-  default features the crate has no dependencies. The fast path is not a
-  default feature: a crate that only decodes packets would otherwise build
-  an eBPF loader and the rtnetlink crates. The minimum supported Rust
-  version is 1.88.
-- A `SECURITY.md` that says how to report a vulnerability.
-- `benches/`, a package of its own that times a G-PDU through the codec
-  and through an endpoint with criterion and profiles them with pprof. The
-  published crate does not have it.
+  `Cause`, with the names of the specification.
+- `Endpoint`: the N3 socket of a gNB, or the S1-U socket of an eNB, and its
+  tunnels, with the replies that TS 29.281 §7 asks of it, within limits
+  for what a peer without a tunnel can make it send and log.
+- `upf_sim::UpfSimulator` and the `oxirush-upf-sim` program: a UPF to test
+  against, without PFCP.
+- `tun` (Linux): TUN devices and their routing, over rtnetlink, for the
+  tunnels of an endpoint and the sessions of the test UPF.
+- `ebpf` (Linux 6.6): TCX programs that carry an endpoint's tunnels in the
+  kernel. Their object is committed with its source; CI rebuilds it.
+- Features `endpoint` (the default), `tun`, `ebpf` and `serde`. Without the
+  default features the crate has no dependency. Rust 1.88 or later.
 
 ### For a program written against this repository before the release
 
@@ -290,3 +150,9 @@ revision `ac3a019` for a program that uses the crate:
   `InformationElement`, `RemoteTunnel`, `upf_sim::Session` and
   `upf_sim::UplinkPacket`: names, TEIDs in hexadecimal, octets as
   `2 octets 0700`.
+- The rtnetlink requests of the TUN and of the fast path return `TimedOut`
+  when the kernel's answer does not come within a second, where they
+  waited for ever.
+- `FastPath::load` removes the stage that a killed process left only when
+  its far end has the alias `oxirush-gtp-u fast path stage`. A stage left
+  by an earlier revision has none: `ip link del oxsXXXXXXXXa` removes it.
