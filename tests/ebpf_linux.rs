@@ -690,6 +690,56 @@ async fn a_packet_that_no_longer_fits_n3_once_its_mtu_shrank_is_left_to_userspac
     assert_eq!((stats.uplink_packets, stats.uplink_oversized), (1, 1));
 }
 
+/// Two threads that change one tunnel at once leave its short-cut with the
+/// change that the endpoint has last: the kernel sends the tunnel's
+/// G-PDUs with the remote TEID that the endpoint's socket sends them with.
+#[tokio::test]
+#[ignore = "needs root"]
+async fn a_tunnel_changed_by_two_threads_at_once_keeps_their_last_change_in_its_short_cut() {
+    isolate();
+    let fast_path = FastPath::load().unwrap();
+    let (gnb, peer, _port, _) = short_cut_tunnel(&fast_path, 0x6001).await;
+    let address = peer.local_addr().unwrap();
+    let server = SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 9), 9);
+    let application = UdpSocket::bind((UE, 4000)).await.unwrap();
+    let mut datagram = vec![0; 4096];
+    let mut received = async || {
+        let size = timeout(SECOND, peer.recv(&mut datagram))
+            .await
+            .expect("the G-PDU did not reach the peer")
+            .unwrap();
+        Packet::decode(&datagram[..size]).unwrap().teid
+    };
+    for round in 0..500u32 {
+        // Threads of this one, in its network namespace.
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let threads: Vec<_> = [0, 1]
+            .map(|other| {
+                let (gnb, barrier) = (gnb.clone(), barrier.clone());
+                let teid = 0x7000_0000 + 2 * round + other;
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    gnb.install(1, 1, RemoteTunnel::new(address, teid), 9)
+                        .unwrap();
+                })
+            })
+            .into_iter()
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        gnb.send(1, 1, b"by the socket".as_slice()).await.unwrap();
+        let by_the_socket = received().await;
+        application.send_to(b"by the kernel", server).await.unwrap();
+        let by_the_kernel = received().await;
+        assert_eq!(
+            by_the_kernel, by_the_socket,
+            "round {round}: the short-cut kept the change that came first"
+        );
+    }
+    assert_eq!(fast_path.stats().uplink_packets, 500);
+}
+
 /// Send `frame` out of the loopback interface, which receives it as from a
 /// peer, with whatever its headers have.
 fn inject(frame: &[u8]) {

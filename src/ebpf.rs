@@ -107,7 +107,9 @@
 //!
 //! A short-cut follows its tunnel. `install` on the tunnel updates it;
 //! `remove` and the endpoint's `shutdown` end it, and so does giving the TUN
-//! another tunnel or the tunnel another TUN. [`FastPath::end_shortcut`] leaves
+//! another tunnel or the tunnel another TUN. Each change reaches it with the
+//! endpoint's tunnels locked, so that two changes that come at once reach it
+//! in the order that they reached the endpoint. [`FastPath::end_shortcut`] leaves
 //! a TUN's tunnel to userspace until the next `shortcut`, as when its UE moves
 //! to another endpoint. When `shortcut` fails the tunnel stays in userspace.
 //!

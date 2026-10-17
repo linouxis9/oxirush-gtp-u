@@ -60,8 +60,20 @@ impl Drop for TunAttachment {
 #[cfg(not(all(target_os = "linux", feature = "tun")))]
 pub(super) enum TunAttachment {}
 
+/// A fast path and the N3 address of the endpoint that has it.
+#[cfg(fast_path)]
+pub(super) type N3FastPath = (crate::ebpf::FastPath, std::net::Ipv4Addr);
+
+/// The tunnels of an endpoint, and its fast path, to which each change of a
+/// tunnel is applied with the tunnels locked: two changes of a tunnel that
+/// come at once reach its short-cut in the order that they reached the
+/// table.
 #[derive(Default)]
-pub(super) struct RouteTable(Mutex<Routes>);
+pub(super) struct RouteTable {
+    routes: Mutex<Routes>,
+    #[cfg(fast_path)]
+    fast_path: std::sync::OnceLock<N3FastPath>,
+}
 
 /// The far end of a tunnel as an Error Indication names it: the peer's TEID
 /// and its address, IPv4 rather than IPv4-mapped.
@@ -163,24 +175,54 @@ pub(super) fn no_tunnel((ran_id, session_id): SessionKey) -> io::Error {
 }
 
 impl RouteTable {
-    pub(super) fn install(&self, key: SessionKey, remote: RemoteTunnel, qfi: Option<u8>) -> u32 {
-        let routes = &mut *lock(&self.0);
-        if let Some(route) = routes.by_session.get_mut(&key) {
-            let former = std::mem::replace(&mut route.remote, remote);
-            route.qfi = qfi;
-            routes.by_remote.remove(&(remote_key(&former), key));
-            routes.by_remote.insert((remote_key(&remote), key));
-            return route.local_teid;
+    /// Give the table its fast path, unless it has one.
+    #[cfg(fast_path)]
+    pub(super) fn set_fast_path(&self, fast_path: N3FastPath) -> Result<(), N3FastPath> {
+        self.fast_path.set(fast_path)
+    }
+
+    #[cfg(fast_path)]
+    pub(super) fn fast_path(&self) -> Option<&N3FastPath> {
+        self.fast_path.get()
+    }
+
+    /// Apply a tunnel's change, or its removal, to its short-cut. The
+    /// caller holds the tunnels' lock.
+    #[cfg(fast_path)]
+    fn sync(&self, local_teid: u32, route: Option<(RemoteTunnel, Option<u8>)>) {
+        if let Some((fast_path, local)) = self.fast_path.get() {
+            fast_path.refresh(*local, local_teid, route);
         }
-        let local_teid = routes.allocate_teid();
-        routes.insert(
-            key,
-            Route {
-                local_teid,
-                remote,
-                qfi,
-            },
-        );
+    }
+
+    #[cfg(not(fast_path))]
+    fn sync(&self, _local_teid: u32, _route: Option<(RemoteTunnel, Option<u8>)>) {}
+
+    pub(super) fn install(&self, key: SessionKey, remote: RemoteTunnel, qfi: Option<u8>) -> u32 {
+        let routes = &mut *lock(&self.routes);
+        let local_teid = match routes.by_session.get_mut(&key) {
+            Some(route) => {
+                let former = std::mem::replace(&mut route.remote, remote);
+                route.qfi = qfi;
+                let local_teid = route.local_teid;
+                routes.by_remote.remove(&(remote_key(&former), key));
+                routes.by_remote.insert((remote_key(&remote), key));
+                local_teid
+            }
+            None => {
+                let local_teid = routes.allocate_teid();
+                routes.insert(
+                    key,
+                    Route {
+                        local_teid,
+                        remote,
+                        qfi,
+                    },
+                );
+                local_teid
+            }
+        };
+        self.sync(local_teid, Some((remote, qfi)));
         local_teid
     }
 
@@ -200,7 +242,7 @@ impl RouteTable {
         if let Some(qfi) = qfi {
             crate::path::qfi(qfi)?;
         }
-        let mut routes = lock(&self.0);
+        let mut routes = lock(&self.routes);
         if routes
             .by_teid
             .get(&local_teid)
@@ -211,6 +253,7 @@ impl RouteTable {
                 "local TEID belongs to another session",
             ));
         }
+        let replaced = routes.by_session.get(&key).map(|route| route.local_teid);
         routes.insert(
             key,
             Route {
@@ -219,41 +262,53 @@ impl RouteTable {
                 qfi,
             },
         );
+        if let Some(replaced) = replaced.filter(|replaced| *replaced != local_teid) {
+            self.sync(replaced, None);
+        }
+        self.sync(local_teid, Some((remote, qfi)));
         Ok(())
     }
 
     pub(super) fn route(&self, key: SessionKey) -> Option<Route> {
-        lock(&self.0).by_session.get(&key).copied()
+        lock(&self.routes).by_session.get(&key).copied()
     }
 
     /// Run `f` on a route that cannot change or go away meanwhile.
     #[cfg(fast_path)]
     pub(super) fn with_route<T>(&self, key: SessionKey, f: impl FnOnce(Route) -> T) -> Option<T> {
-        lock(&self.0).by_session.get(&key).copied().map(f)
+        lock(&self.routes).by_session.get(&key).copied().map(f)
     }
 
+    /// End the short-cut of every tunnel, when the endpoint stops.
     #[cfg(fast_path)]
-    pub(super) fn local_teids(&self) -> Vec<u32> {
-        lock(&self.0).by_teid.keys().copied().collect()
+    pub(super) fn end_shortcuts(&self) {
+        let routes = lock(&self.routes);
+        for local_teid in routes.by_teid.keys() {
+            self.sync(*local_teid, None);
+        }
     }
 
     pub(super) fn session(&self, local_teid: u32) -> Option<SessionKey> {
-        lock(&self.0).by_teid.get(&local_teid).copied()
+        lock(&self.routes).by_teid.get(&local_teid).copied()
     }
 
     /// Returns the local TEID of the removed tunnel, whose TUN closes.
     pub(super) fn remove(&self, key: SessionKey) -> Option<u32> {
         // The TUN closes once the lock is released: that is netlink I/O.
         let (route, _tun) = {
-            let mut routes = lock(&self.0);
-            (routes.remove(key), routes.tuns.remove(&key))
+            let mut routes = lock(&self.routes);
+            let route = routes.remove(key);
+            if let Some(route) = &route {
+                self.sync(route.local_teid, None);
+            }
+            (route, routes.tuns.remove(&key))
         };
         route.map(|route| route.local_teid)
     }
 
     /// Returns the local TEIDs of the removed tunnels, whose TUNs close.
     pub(super) fn remove_ran(&self, ran_id: u32) -> Vec<u32> {
-        let mut routes = lock(&self.0);
+        let mut routes = lock(&self.routes);
         let keys: Vec<_> = routes
             .by_ran
             .range((ran_id, u8::MIN)..=(ran_id, u8::MAX))
@@ -263,11 +318,14 @@ impl RouteTable {
             .iter()
             .filter_map(|key| routes.tuns.remove(key))
             .collect();
-        let teids = keys
+        let teids: Vec<u32> = keys
             .into_iter()
             .filter_map(|key| routes.remove(key))
             .map(|route| route.local_teid)
             .collect();
+        for local_teid in &teids {
+            self.sync(*local_teid, None);
+        }
         // As above: the TUNs close after it.
         drop(routes);
         teids
@@ -276,19 +334,19 @@ impl RouteTable {
     /// Close every tunnel's TUN.
     pub(super) fn close_tuns(&self) {
         // As above: the lock is released at the end of this statement.
-        let _tuns = std::mem::take(&mut lock(&self.0).tuns);
+        let _tuns = std::mem::take(&mut lock(&self.routes).tuns);
     }
 
     /// Whether tunnel `key` can get a TUN: it exists and has none.
     #[cfg(all(target_os = "linux", feature = "tun"))]
     pub(super) fn tun_slot(&self, key: SessionKey) -> io::Result<()> {
-        lock(&self.0).tun_slot(key)
+        lock(&self.routes).tun_slot(key)
     }
 
     /// Give tunnel `key` its TUN, if it still can get one.
     #[cfg(all(target_os = "linux", feature = "tun"))]
     pub(super) fn attach_tun(&self, key: SessionKey, tun: TunAttachment) -> io::Result<()> {
-        let mut routes = lock(&self.0);
+        let mut routes = lock(&self.routes);
         // On an error `tun` closes once the lock is released: a parameter
         // is dropped after the locals.
         routes.tun_slot(key)?;
@@ -299,11 +357,14 @@ impl RouteTable {
     /// The TUN of tunnel `key`.
     #[cfg(all(target_os = "linux", feature = "tun"))]
     pub(super) fn tun(&self, key: SessionKey) -> Option<TunPort> {
-        lock(&self.0).tuns.get(&key).map(|tun| tun.port.clone())
+        lock(&self.routes)
+            .tuns
+            .get(&key)
+            .map(|tun| tun.port.clone())
     }
 
     pub(super) fn len(&self) -> usize {
-        lock(&self.0).by_session.len()
+        lock(&self.routes).by_session.len()
     }
 
     /// Error Indications identify the peer's TEID and address, not our TEID.
@@ -323,7 +384,7 @@ impl RouteTable {
             _ => None,
         })?;
         let remote = (teid, peer.to_canonical());
-        lock(&self.0)
+        lock(&self.routes)
             .by_remote
             .range((remote, (u32::MIN, u8::MIN))..=(remote, (u32::MAX, u8::MAX)))
             .next()
@@ -406,7 +467,7 @@ mod tests {
 
     /// Every index has every tunnel, and nothing else.
     fn assert_indexed(table: &RouteTable, tunnels: usize) {
-        let routes = lock(&table.0);
+        let routes = lock(&table.routes);
         assert_eq!(routes.by_session.len(), tunnels);
         assert_eq!(routes.by_teid.len(), tunnels);
         assert_eq!(routes.by_remote.len(), tunnels);
