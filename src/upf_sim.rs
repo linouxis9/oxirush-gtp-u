@@ -18,7 +18,8 @@
 //!
 //! The `oxirush-upf-sim` program, of the `cli` feature, serves one session
 //! until Ctrl-C or SIGTERM. Its arguments are the UPF's N3 address, the
-//! gNB's N3 address, the uplink TEID, the downlink TEID and the QFI, then
+//! gNB's N3 address, the uplink TEID, the downlink TEID, decimal or
+//! hexadecimal after `0x`, and the QFI, then
 //! `--tun <name> <UE address>` for a TUN as N6 in the place of the echo
 //! service.
 

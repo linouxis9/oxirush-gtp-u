@@ -366,15 +366,15 @@ sudo unshare --net sh -c 'ip link set lo up && target/debug/examples/fast_path'
 ## Run the test UPF as a program
 
 The arguments are the N3 address of the UPF, that of the gNB, the uplink
-TEID, the downlink TEID and the QFI. It serves that session with an echo
-service, or as root with a TUN.
+TEID, the downlink TEID, decimal or hexadecimal, and the QFI. It serves that
+session with an echo service, or as root with a TUN.
 
 ```sh
-cargo run --features cli --bin oxirush-upf-sim -- 127.0.0.8:2152 127.0.0.1:2152 1001 2001 9
+cargo run --features cli --bin oxirush-upf-sim -- 127.0.0.8:2152 127.0.0.1:2152 0x1001 0x2001 9
 
 cargo build --features cli,tun --bin oxirush-upf-sim
 sudo ./target/debug/oxirush-upf-sim \
-  127.0.0.8:2152 127.0.0.1:2152 1001 2001 9 --tun oxupf0 10.45.0.2
+  127.0.0.8:2152 127.0.0.1:2152 0x1001 0x2001 9 --tun oxupf0 10.45.0.2
 ```
 
 ## Features
