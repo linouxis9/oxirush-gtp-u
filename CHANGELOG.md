@@ -18,7 +18,8 @@ First release.
   tunnels, with the replies that TS 29.281 §7 asks of it, within limits
   for what a peer without a tunnel can make it send and log.
 - `upf_sim::UpfSimulator` and the `oxirush-upf-sim` program: a UPF to test
-  against, without PFCP.
+  against, without PFCP, with an echo service that a program which
+  answers the UE itself turns off.
 - `tun` (Linux): TUN devices and their routing, over rtnetlink, for the
   tunnels of an endpoint and the sessions of the test UPF.
 - `ebpf` (Linux 6.6, little-endian): TCX programs that carry an

@@ -4,6 +4,8 @@
 //! [`set_session`](UpfSimulator::set_session). Uplink packets go to the echo
 //! service, which reflects IPv4 UDP and answers ICMP Echo Requests, or to the
 //! TUN that `attach_tun` gives the session.
+//! [`set_echo_service`](UpfSimulator::set_echo_service) turns the echo
+//! service off, for a program that answers the UE itself.
 //! [`send_downlink`](UpfSimulator::send_downlink) sends a packet to the UE.
 //! The receiver of [`bind`](UpfSimulator::bind) observes the uplink G-PDUs.
 //!
@@ -114,12 +116,14 @@ impl fmt::Debug for UplinkPacket {
 /// an unknown uplink TEID, within the limits of an
 /// [`Endpoint`](crate::Endpoint), and passes a session's uplink T-PDUs to
 /// N6: its TUN if it has one, else the echo service, which reflects IPv4
-/// UDP and ICMP Echo Request packets. A reply of the echo service whose
-/// session's downlink a send or a switch holds waits in a task of its own,
-/// 256 of them at most, and the task that receives goes on. The TEID alone
-/// identifies a session, whatever address the gNB sends from. Clones share the socket and sessions; the
-/// task stops and the TUNs close when the last clone is dropped. Must be
-/// used within a Tokio runtime.
+/// UDP and ICMP Echo Request packets, unless
+/// [`set_echo_service`](Self::set_echo_service) turned it off. A reply of
+/// the echo service whose session's downlink a send or a switch holds waits
+/// in a task of its own, 256 of them at most, and the task that receives
+/// goes on. The TEID alone identifies a session, whatever address the gNB
+/// sends from. Clones share the socket and sessions; the task stops and the
+/// TUNs close when the last clone is dropped. Must be used within a Tokio
+/// runtime.
 ///
 /// ```
 /// use oxirush_gtp_u::upf_sim::{Session, UpfSimulator};
@@ -381,6 +385,22 @@ impl UpfSimulator {
         Ok(())
     }
 
+    /// Whether the echo service answers the uplink T-PDUs of the sessions
+    /// that have no TUN: it does unless
+    /// [`set_echo_service`](Self::set_echo_service) turned it off.
+    pub fn echo_service(&self) -> bool {
+        self.shared.state.echo_service()
+    }
+
+    /// Turn the echo service on or off. A program that answers the UE
+    /// itself, with [`send_downlink`](Self::send_downlink) after reading
+    /// the receiver of [`bind`](Self::bind), turns it off: otherwise the UE
+    /// gets the echo of its packet too. The receiver still gets every
+    /// uplink G-PDU.
+    pub fn set_echo_service(&self, on: bool) {
+        self.shared.state.set_echo_service(on);
+    }
+
     /// Remove a session and close its TUN.
     pub fn remove_session(&self, uplink_teid: u32) {
         self.shared.state.remove(uplink_teid);
@@ -606,6 +626,7 @@ async fn receive(
             continue;
         };
         if !write_to_tun(&socket, &target, packet.payload).await
+            && state.echo_service()
             && let Some(reply) = echo_service(packet.payload)
         {
             let incarnation = &target.incarnation;

@@ -21,6 +21,8 @@ use super::Session;
 pub(super) struct SessionRegistry {
     sessions: Mutex<HashMap<u32, SessionEntry>>,
     closed: AtomicBool,
+    /// Whether a session without a TUN has no echo service.
+    no_echo: AtomicBool,
 }
 
 struct SessionEntry {
@@ -66,6 +68,14 @@ impl SessionRegistry {
 
     pub(super) fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Relaxed)
+    }
+
+    pub(super) fn echo_service(&self) -> bool {
+        !self.no_echo.load(Ordering::Relaxed)
+    }
+
+    pub(super) fn set_echo_service(&self, on: bool) {
+        self.no_echo.store(!on, Ordering::Relaxed);
     }
 
     pub(super) fn replace(&self, session: Session) -> io::Result<()> {

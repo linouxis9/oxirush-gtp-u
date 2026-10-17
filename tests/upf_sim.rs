@@ -580,3 +580,47 @@ async fn accepts_uplink_from_another_address_of_the_gnb() {
     // The echo reply still goes to the session's gNB address.
     assert_eq!(reply(&gnb).await.teid, 20);
 }
+
+/// A program that answers the UE for N6 itself turns the echo service off:
+/// the gNB then gets its answer alone, and not the echo before it.
+#[tokio::test]
+async fn a_program_that_answers_for_n6_turns_the_echo_service_off() {
+    let (upf, mut uplinks) = UpfSimulator::bind("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    assert!(upf.echo_service());
+    upf.set_echo_service(false);
+    assert!(!upf.echo_service());
+    let (gnb, mut downlinks) = Endpoint::bind("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    let teid = gnb
+        .install(
+            1,
+            5,
+            RemoteTunnel::new(upf.local_addr().unwrap(), 0x1001),
+            9,
+        )
+        .unwrap();
+    upf.set_session(Session::new(0x1001, teid, gnb.local_addr().unwrap(), 9))
+        .unwrap();
+    gnb.send(1, 5, udp(b"ping")).await.unwrap();
+    let uplink = next(&mut uplinks).await;
+    let (from, to, payload) = parse_ipv4_udp(&uplink.packet.payload).unwrap();
+    assert_eq!(payload, b"ping");
+    upf.send_downlink(0x1001, ipv4_udp(to, from, b"pong").unwrap())
+        .await
+        .unwrap();
+    let downlink = next(&mut downlinks).await;
+    assert_eq!(parse_ipv4_udp(&downlink.packet.payload).unwrap().2, b"pong");
+    assert!(
+        timeout(Duration::from_millis(200), downlinks.recv())
+            .await
+            .is_err()
+    );
+    // Turned on again, it answers.
+    upf.set_echo_service(true);
+    gnb.send(1, 5, udp(b"ping")).await.unwrap();
+    let downlink = next(&mut downlinks).await;
+    assert_eq!(parse_ipv4_udp(&downlink.packet.payload).unwrap().2, b"ping");
+}
