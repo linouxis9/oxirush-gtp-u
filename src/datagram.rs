@@ -12,6 +12,12 @@ use crate::path;
 use crate::stats::Counters;
 use crate::{Packet, ReceiveStats};
 
+thread_local! {
+    /// What a send encodes its message into: the room of the longest message
+    /// that the thread sent.
+    static ENCODED: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 /// The socket and protocol processing, without a role's registry or task owner.
 /// Receive tasks may retain this value without retaining their own join handle.
 pub(crate) struct DatagramSocket {
@@ -96,15 +102,29 @@ impl DatagramSocket {
         Ok(Some((packet, path::canonical(from))))
     }
 
+    /// Send `packet` to `to`. It is encoded into a buffer of the thread and
+    /// sent at once when the socket takes it, as it mostly does, without an
+    /// allocation; otherwise its octets are copied, for the send that waits.
     pub(crate) async fn send<P: AsRef<[u8]>>(
         &self,
         packet: &Packet<P>,
         to: SocketAddr,
     ) -> io::Result<()> {
-        let bytes = packet
-            .encode()
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-        self.socket.send_to(&bytes, self.destination(to)).await?;
+        let to = self.destination(to);
+        let waiting = ENCODED.with_borrow_mut(|buffer| {
+            buffer.clear();
+            packet
+                .encode_into(buffer)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+            match self.socket.try_send_to(buffer, to) {
+                Ok(_) => Ok(None),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(Some(buffer.clone())),
+                Err(error) => Err(error),
+            }
+        })?;
+        if let Some(bytes) = waiting {
+            self.socket.send_to(&bytes, to).await?;
+        }
         Ok(())
     }
 

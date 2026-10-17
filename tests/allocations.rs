@@ -256,3 +256,31 @@ fn a_chain_longer_than_a_message_can_have_is_refused_where_it_exceeds_it() {
         assert!(count <= 3, "{count} allocations");
     }
 }
+
+/// An endpoint sends a G-PDU without an allocation when the socket takes it
+/// at once, as it mostly does: it is encoded into a buffer of the thread.
+#[cfg(feature = "endpoint")]
+#[test]
+fn an_endpoint_sends_a_g_pdu_without_allocating() {
+    use oxirush_gtp_u::{Endpoint, RemoteTunnel};
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let (gnb, _received) = Endpoint::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let peer = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        gnb.install(1, 5, RemoteTunnel::new(peer.local_addr().unwrap(), 0x77), 9)
+            .unwrap();
+        let payload = vec![0x45; 1400];
+        // The first send learns that the socket is writable.
+        gnb.send(1, 5, payload.as_slice()).await.unwrap();
+        let before = ALLOCATIONS.with(Cell::get);
+        for _ in 0..10 {
+            gnb.send(1, 5, payload.as_slice()).await.unwrap();
+        }
+        assert_eq!(ALLOCATIONS.with(Cell::get) - before, 0);
+    });
+}

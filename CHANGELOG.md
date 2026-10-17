@@ -10,8 +10,9 @@ First release.
   PDU Set Information Container of §6.5.2. Decoding never panics, and what
   it decodes encodes to a message that decodes to the same value. A
   message with one extension header at most, as a G-PDU on N3, is decoded
-  and encoded without an allocation. An `Error` names the `Part` of the
-  message and has the numbers that disagree.
+  and encoded without an allocation, and an endpoint sends it without one.
+  An `Error` names the `Part` of the message and has the numbers that
+  disagree.
 - `MessageType`, `ExtensionHeaderType`, `InformationElementType` and
   `Cause`, with the names of the specification.
 - `Endpoint`: the N3 socket of a gNB, or the S1-U socket of an eNB, and its
