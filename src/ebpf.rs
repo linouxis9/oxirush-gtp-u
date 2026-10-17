@@ -138,7 +138,11 @@
 //! Linux announces over rtnetlink, and writes it into the short-cuts: a
 //! program cannot read it but through a helper that is for GPL programs
 //! alone, and the programs are Apache-2.0. The thread ends within a second
-//! of the last clone of the fast path.
+//! of the last clone of the fast path. When it loses the announcements it
+//! asks for the MTU of each N3 interface again, and when its socket fails it
+//! takes another, once a second at most: a second failure within the second
+//! ends it, with a warning, and [`FastPath::follows_mtus`] then has the
+//! error. From then on the short-cuts keep the MTU that they have.
 //!
 //! `load` and `add_tun` also spread what the stage's far end and the TUN
 //! receive over the CPUs the process may use (RPS), when `/sys` shows the
@@ -229,6 +233,8 @@ struct Inner {
     state: Mutex<State>,
     /// Tells the thread that follows the MTU of the N3 interfaces to end.
     stop: Arc<AtomicBool>,
+    /// The error that ended that thread, if one did.
+    mtus: Arc<Mutex<Option<(io::ErrorKind, String)>>>,
 }
 
 impl Drop for Inner {
@@ -395,9 +401,21 @@ impl FastPath {
             entries: HashMap::new(),
         }));
         let stop = Arc::new(AtomicBool::new(false));
+        let mtus = Arc::new(Mutex::new(None));
         let follow = {
-            let (uplinks, stop, requests) = (uplinks.clone(), stop.clone(), Netlink::new()?);
-            move || follow_mtus(&uplinks, &stop, events, requests)
+            let (uplinks, stop, ended) = (uplinks.clone(), stop.clone(), mtus.clone());
+            let mut links = Rtnetlink {
+                events,
+                requests: Netlink::new()?,
+            };
+            move || {
+                if let Err(error) = follow_mtus(&*uplinks, &stop, &mut links) {
+                    tracing::warn!(
+                        "the fast path no longer follows the MTU of the N3 interfaces: {error}"
+                    );
+                    *lock(&ended) = Some((error.kind(), error.to_string()));
+                }
+            }
         };
         std::thread::Builder::new()
             .name("gtp-u fast path".into())
@@ -416,8 +434,21 @@ impl FastPath {
                 programs: Mutex::new(ebpf),
                 state: Mutex::new(state),
                 stop,
+                mtus,
             }),
         })
+    }
+
+    /// Whether the thread that follows the MTU of the N3 interfaces still
+    /// does: the error that ended it otherwise. From then on the short-cuts
+    /// keep the MTU that they have, and a G-PDU that no longer fits a
+    /// smaller one is dropped where Linux would have fragmented it; a new
+    /// `load` has a thread of its own.
+    pub fn follows_mtus(&self) -> io::Result<()> {
+        match &*lock(&self.inner.mtus) {
+            None => Ok(()),
+            Some((kind, text)) => Err(io::Error::new(*kind, text.clone())),
+        }
     }
 
     /// The packet counters.
@@ -666,43 +697,103 @@ impl State {
     }
 }
 
-/// Keep the MTU of each short-cut's N3 interface as Linux announces it,
-/// until `stop`: `encap` leaves a G-PDU too long for it to userspace,
-/// whose socket fragments it. A program reads no MTU of its own but
-/// through a helper that is for GPL programs alone, `bpf_check_mtu`.
-fn follow_mtus(
-    uplinks: &Mutex<Uplinks>,
-    stop: &AtomicBool,
-    mut events: LinkEvents,
-    mut requests: Netlink,
-) {
-    while !stop.load(Ordering::Relaxed) {
-        let changed = match events.next() {
-            Ok(changed) => changed,
-            Err(error) if error.kind() == io::ErrorKind::TimedOut => continue,
-            // Announcements were lost: the MTU of every N3 interface is
-            // asked for again.
-            Err(error) if error.raw_os_error() == Some(libc::ENOBUFS) => {
-                let n3s: BTreeSet<u32> = lock(uplinks)
-                    .entries
-                    .values()
-                    .map(|uplink| uplink.n3)
-                    .collect();
-                n3s.into_iter()
-                    .filter_map(|n3| requests.mtu_of(n3).ok().map(|mtu| (n3, mtu)))
-                    .collect()
-            }
-            Err(_) => {
-                // Not one the socket can recover from: the next load has
-                // another.
-                return;
-            }
-        };
-        let mut uplinks = lock(uplinks);
+/// What the thread that follows the MTUs reads: the announcements of the
+/// links, and the answers to its requests.
+trait Links {
+    /// The links of the next announcement, with their MTU.
+    fn next(&mut self) -> io::Result<Vec<(u32, u32)>>;
+    /// Listen to the announcements on a new socket.
+    fn listen_again(&mut self) -> io::Result<()>;
+    /// The MTU of link `index`.
+    fn mtu_of(&mut self, index: u32) -> io::Result<u32>;
+}
+
+/// What it writes: the short-cuts through each N3 interface.
+trait N3Mtus {
+    /// The N3 interfaces of the short-cuts.
+    fn n3s(&self) -> BTreeSet<u32>;
+    /// Give the short-cuts through each interface of `changed` its MTU.
+    fn apply(&self, changed: Vec<(u32, u32)>);
+}
+
+struct Rtnetlink {
+    events: LinkEvents,
+    requests: Netlink,
+}
+
+impl Links for Rtnetlink {
+    fn next(&mut self) -> io::Result<Vec<(u32, u32)>> {
+        self.events.next()
+    }
+
+    fn listen_again(&mut self) -> io::Result<()> {
+        self.events = LinkEvents::new()?;
+        Ok(())
+    }
+
+    fn mtu_of(&mut self, index: u32) -> io::Result<u32> {
+        self.requests.mtu_of(index)
+    }
+}
+
+impl N3Mtus for Mutex<Uplinks> {
+    fn n3s(&self) -> BTreeSet<u32> {
+        lock(self)
+            .entries
+            .values()
+            .map(|uplink| uplink.n3)
+            .collect()
+    }
+
+    fn apply(&self, changed: Vec<(u32, u32)>) {
+        let mut uplinks = lock(self);
         for (n3, mtu) in changed {
             uplinks.apply_mtu(n3, mtu);
         }
     }
+}
+
+/// Keep the MTU of each short-cut's N3 interface as Linux announces it,
+/// until `stop`: `encap` leaves a G-PDU too long for it to userspace,
+/// whose socket fragments it. A program reads no MTU of its own but
+/// through a helper that is for GPL programs alone, `bpf_check_mtu`.
+///
+/// When announcements were lost it asks for every MTU again. An error that
+/// the socket does not recover from gives it another, after which it asks
+/// again too; a second such error within a second ends it, with that
+/// error.
+fn follow_mtus(uplinks: &impl N3Mtus, stop: &AtomicBool, links: &mut impl Links) -> io::Result<()> {
+    let mut listened_again: Option<std::time::Instant> = None;
+    while !stop.load(Ordering::Relaxed) {
+        let changed = match links.next() {
+            Ok(changed) => changed,
+            Err(error) if error.kind() == io::ErrorKind::TimedOut => continue,
+            Err(error) if error.raw_os_error() == Some(libc::ENOBUFS) => ask(uplinks, links),
+            Err(error) => {
+                if listened_again.is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(1))
+                {
+                    return Err(error);
+                }
+                tracing::warn!(
+                    "the fast path lost the announcements of the links ({error}): it listens again"
+                );
+                links.listen_again()?;
+                listened_again = Some(std::time::Instant::now());
+                ask(uplinks, links)
+            }
+        };
+        uplinks.apply(changed);
+    }
+    Ok(())
+}
+
+/// The MTU of each N3 interface of the short-cuts, asked again.
+fn ask(uplinks: &impl N3Mtus, links: &mut impl Links) -> Vec<(u32, u32)> {
+    uplinks
+        .n3s()
+        .into_iter()
+        .filter_map(|n3| links.mtu_of(n3).ok().map(|mtu| (n3, mtu)))
+        .collect()
 }
 
 fn key(local: Ipv4Addr, teid: u32) -> DownlinkKey {
@@ -876,6 +967,117 @@ fn disable_tx_checksum(name: &str) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Links whose announcements are scripted: once they have none left,
+    /// the thread is told to stop.
+    struct Scripted {
+        next: std::collections::VecDeque<io::Result<Vec<(u32, u32)>>>,
+        listen_again: std::collections::VecDeque<io::Result<()>>,
+        mtus: HashMap<u32, u32>,
+        stop: Arc<AtomicBool>,
+        listened_again: usize,
+    }
+
+    impl Links for Scripted {
+        fn next(&mut self) -> io::Result<Vec<(u32, u32)>> {
+            self.next.pop_front().unwrap_or_else(|| {
+                self.stop.store(true, Ordering::Relaxed);
+                Err(io::ErrorKind::TimedOut.into())
+            })
+        }
+
+        fn listen_again(&mut self) -> io::Result<()> {
+            self.listened_again += 1;
+            self.listen_again.pop_front().unwrap_or(Ok(()))
+        }
+
+        fn mtu_of(&mut self, index: u32) -> io::Result<u32> {
+            self.mtus
+                .get(&index)
+                .copied()
+                .ok_or_else(|| io::ErrorKind::NotFound.into())
+        }
+    }
+
+    /// The short-cuts through N3 interfaces 3 and 7, and what was applied.
+    struct Applied(Mutex<Vec<(u32, u32)>>);
+
+    impl N3Mtus for Applied {
+        fn n3s(&self) -> BTreeSet<u32> {
+            BTreeSet::from([3, 7])
+        }
+
+        fn apply(&self, changed: Vec<(u32, u32)>) {
+            lock(&self.0).extend(changed);
+        }
+    }
+
+    fn scripted(
+        next: Vec<io::Result<Vec<(u32, u32)>>>,
+        listen_again: Vec<io::Result<()>>,
+    ) -> Scripted {
+        Scripted {
+            next: next.into(),
+            listen_again: listen_again.into(),
+            mtus: HashMap::from([(3, 1500), (7, 9000)]),
+            stop: Arc::new(AtomicBool::new(false)),
+            listened_again: 0,
+        }
+    }
+
+    fn os(code: i32) -> io::Result<Vec<(u32, u32)>> {
+        Err(io::Error::from_raw_os_error(code))
+    }
+
+    /// Lost announcements, and a socket that fails once: the thread asks for
+    /// every MTU again, and goes on.
+    #[test]
+    fn the_thread_that_follows_the_mtus_recovers_what_it_can() {
+        let applied = Applied(Mutex::new(Vec::new()));
+        let mut links = scripted(
+            vec![
+                Ok(vec![(3, 1400)]),
+                os(libc::ENOBUFS),
+                os(libc::EBADF),
+                Ok(vec![(7, 1280)]),
+            ],
+            vec![],
+        );
+        let stop = links.stop.clone();
+        follow_mtus(&applied, &stop, &mut links).unwrap();
+        assert_eq!(links.listened_again, 1);
+        assert_eq!(
+            *lock(&applied.0),
+            [
+                (3, 1400),
+                (3, 1500),
+                (7, 9000),
+                (3, 1500),
+                (7, 9000),
+                (7, 1280)
+            ]
+        );
+    }
+
+    /// A socket that fails again at once, or that cannot be had again, ends
+    /// the thread with its error.
+    #[test]
+    fn the_thread_that_follows_the_mtus_ends_with_an_error_it_cannot_recover_from() {
+        let applied = Applied(Mutex::new(Vec::new()));
+        let mut links = scripted(vec![os(libc::EBADF), os(libc::EIO)], vec![]);
+        let stop = links.stop.clone();
+        let error = follow_mtus(&applied, &stop, &mut links).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::EIO));
+        assert_eq!(links.listened_again, 1);
+
+        let mut links = scripted(
+            vec![os(libc::EBADF)],
+            vec![Err(io::ErrorKind::PermissionDenied.into())],
+        );
+        let stop = links.stop.clone();
+        let error = follow_mtus(&applied, &stop, &mut links).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    }
 
     #[test]
     fn the_embedded_object_holds_what_the_loader_names() {

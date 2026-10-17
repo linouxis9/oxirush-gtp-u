@@ -688,6 +688,7 @@ async fn a_packet_that_no_longer_fits_n3_once_its_mtu_shrank_is_left_to_userspac
     assert_eq!(parse_ipv4_udp(&datagram[..size]).unwrap().2, [8; 1472]);
     let stats = fast_path.stats();
     assert_eq!((stats.uplink_packets, stats.uplink_oversized), (1, 1));
+    fast_path.follows_mtus().unwrap();
 }
 
 /// Two threads that change one tunnel at once leave its short-cut with the
