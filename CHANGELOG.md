@@ -168,6 +168,13 @@ revision `ac3a019` for a program that uses the crate:
   `Unsupported`, a message with an extension header that the peer must
   understand and said it does not support. A Tunnel Status on the TEID of a
   tunnel goes to the receiver of `bind`, as an End Marker does.
+- `Packet::information_elements` and `set_information_elements` refuse a
+  G-PDU with `Error::NoInformationElements`: the first read its packet as
+  elements, as in "unknown TV information element type 69".
+- `FastPath::load` and the other calls of the fast path return
+  `PermissionDenied`, where it was `Other`, when Linux refuses them for
+  want of a right, and their errors and those of the TUN name the
+  capabilities that they need.
 - `Packet` is `Debug` for a payload that is `AsRef<[u8]>`, where it was for
   one that is `Debug`. What `Debug` prints changed for `Packet`,
   `ExtensionHeader`, `PduSessionContainer`, `UnknownNewIes`,

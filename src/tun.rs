@@ -213,7 +213,11 @@ mod tests {
     fn context_preserves_the_original_io_error() {
         let error = context(io::Error::from_raw_os_error(libc::EPERM), "remove TUN");
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
-        assert!(error.to_string().starts_with("remove TUN: "));
+        assert_eq!(
+            error.to_string(),
+            "remove TUN: Operation not permitted (os error 1) \
+             (TUN devices and their routing need CAP_NET_ADMIN)"
+        );
         let source = error.get_ref().unwrap().source().unwrap();
         assert_eq!(
             source.downcast_ref::<io::Error>().unwrap().raw_os_error(),

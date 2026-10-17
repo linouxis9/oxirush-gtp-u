@@ -103,3 +103,18 @@ fn an_information_element_and_an_inner_packet_are_reported_with_their_octets() {
         "truncated IPv4 packet: 28 octets needed, 21 left"
     );
 }
+
+/// The information elements of a G-PDU, whose payload is its packet: the
+/// error says so, where it read the packet as elements.
+#[test]
+fn a_g_pdu_has_no_information_elements() {
+    let mut packet = Packet::g_pdu(0x1001, vec![0x45, 0, 0, 20]);
+    let error = packet.information_elements().unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "a G-PDU has no information elements: its payload is the packet it carries"
+    );
+    let elements = [InformationElement::Recovery(0)];
+    assert_eq!(packet.set_information_elements(&elements), Err(error));
+    assert_eq!(packet.payload, [0x45, 0, 0, 20]);
+}

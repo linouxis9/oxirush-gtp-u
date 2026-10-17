@@ -237,11 +237,15 @@ impl Packet {
 
     /// Make `elements` the payload, as the content of a signalling message,
     /// which [`information_elements`](Packet::information_elements) reads.
-    /// On an error the payload stays as it was.
+    /// A G-PDU has none: [`Error::NoInformationElements`]. On an error the
+    /// payload stays as it was.
     pub fn set_information_elements(
         &mut self,
         elements: &[InformationElement],
     ) -> Result<(), Error> {
+        if self.message_type == MessageType::G_PDU {
+            return Err(Error::NoInformationElements(self.message_type));
+        }
         self.payload = InformationElement::encode_all(elements)?;
         Ok(())
     }
@@ -380,8 +384,12 @@ impl Packet<&[u8]> {
 
 impl<P: AsRef<[u8]>> Packet<P> {
     /// Decode the payload as information elements, the content of every
-    /// message type except G-PDU.
+    /// message type except G-PDU, for which it is
+    /// [`Error::NoInformationElements`].
     pub fn information_elements(&self) -> Result<Vec<InformationElement>, Error> {
+        if self.message_type == MessageType::G_PDU {
+            return Err(Error::NoInformationElements(self.message_type));
+        }
         InformationElement::decode_all(self.payload.as_ref())
     }
 

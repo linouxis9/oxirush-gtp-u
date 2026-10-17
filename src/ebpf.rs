@@ -803,14 +803,24 @@ fn key(local: Ipv4Addr, teid: u32) -> DownlinkKey {
     }
 }
 
+/// What a fast path that Linux refuses lacks.
+const RIGHTS: &str = " (the fast path needs CAP_BPF and CAP_NET_ADMIN)";
+
 fn context(error: io::Error, what: &str) -> io::Error {
-    io::Error::new(error.kind(), format!("{what}: {error}"))
+    let rights = match error.kind() {
+        io::ErrorKind::PermissionDenied => RIGHTS,
+        _ => "",
+    };
+    io::Error::new(error.kind(), format!("{what}: {error}{rights}"))
 }
 
 /// An aya error with its causes, the kernel's among them, each once: the
-/// text of an error of aya often has that of its cause already.
+/// text of an error of aya often has that of its cause already. One that
+/// Linux refused for want of a right is `PermissionDenied`, and says which
+/// rights the fast path needs.
 fn other(what: &str, error: impl std::error::Error) -> io::Error {
     let mut message = format!("{what}: {error}");
+    let mut kind = io::ErrorKind::Other;
     let mut cause = error.source();
     while let Some(error) = cause {
         let text = error.to_string();
@@ -818,9 +828,17 @@ fn other(what: &str, error: impl std::error::Error) -> io::Error {
             message.push_str(": ");
             message.push_str(&text);
         }
+        if let Some(error) = error.downcast_ref::<io::Error>()
+            && error.kind() == io::ErrorKind::PermissionDenied
+        {
+            kind = io::ErrorKind::PermissionDenied;
+        }
         cause = error.source();
     }
-    io::Error::other(message)
+    if kind == io::ErrorKind::PermissionDenied {
+        message.push_str(RIGHTS);
+    }
+    io::Error::new(kind, message)
 }
 
 fn program<'a>(ebpf: &'a mut Ebpf, name: &str) -> io::Result<&'a mut SchedClassifier> {
@@ -1130,6 +1148,43 @@ mod tests {
             other("load the eBPF programs", loader).to_string(),
             "load the eBPF programs: map error: failed to create map `UPLINKS`: \
              Operation not permitted (os error 1)"
+        );
+    }
+
+    /// Linux refuses a load without the rights: the error says which.
+    #[test]
+    fn an_error_for_want_of_a_right_says_which_rights() {
+        #[derive(Debug)]
+        struct Error(io::Error);
+        impl fmt::Display for Error {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("failed to create map `UPLINKS`")
+            }
+        }
+        impl std::error::Error for Error {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+        let error = other(
+            "load the eBPF programs",
+            Error(io::Error::from_raw_os_error(libc::EPERM)),
+        );
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            error.to_string(),
+            "load the eBPF programs: failed to create map `UPLINKS`: \
+             Operation not permitted (os error 1) \
+             (the fast path needs CAP_BPF and CAP_NET_ADMIN)"
+        );
+        let error = context(
+            io::Error::from_raw_os_error(libc::EPERM),
+            "create the stage",
+        );
+        assert_eq!(
+            error.to_string(),
+            "create the stage: Operation not permitted (os error 1) \
+             (the fast path needs CAP_BPF and CAP_NET_ADMIN)"
         );
     }
 

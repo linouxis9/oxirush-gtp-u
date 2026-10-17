@@ -236,7 +236,8 @@ impl RouteTable {
         if local_teid == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "a local TEID is not 0",
+                "local TEID 0: a GTP-U entity does not give TEID 0 to its own end of a \
+                 tunnel (TS 29.281 §5.1)",
             ));
         }
         if let Some(qfi) = qfi {

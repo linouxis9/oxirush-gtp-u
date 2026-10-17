@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::InformationElementType;
+use crate::{InformationElementType, MessageType};
 
 /// Why a GTP-U message, or an inner IPv4 packet, cannot be decoded or encoded.
 ///
@@ -84,6 +84,9 @@ pub enum Error {
     /// A TV information element of unknown type. Its length is not
     /// encoded, so the rest of the message cannot be parsed.
     UnknownInformationElement(InformationElementType),
+    /// A message of this type has no information elements: a G-PDU
+    /// carries a T-PDU, and nothing else (TS 29.281 §7.1).
+    NoInformationElements(MessageType),
     /// An IPv4 packet that is not what the helper handles.
     UnexpectedPacket(Expected),
     /// A checksum does not match.
@@ -308,6 +311,10 @@ impl fmt::Display for Error {
             Error::UnknownInformationElement(kind) => {
                 write!(f, "unknown TV information element type {}", kind.0)
             }
+            Error::NoInformationElements(message) => write!(
+                f,
+                "a {message} has no information elements: its payload is the packet it carries"
+            ),
             Error::UnexpectedPacket(expected) => write!(f, "unexpected IPv4 packet: {expected}"),
             Error::InvalidChecksum {
                 what,
@@ -418,6 +425,10 @@ mod tests {
             (
                 Error::UnknownInformationElement(InformationElementType(6)),
                 "unknown TV information element type 6",
+            ),
+            (
+                Error::NoInformationElements(MessageType::G_PDU),
+                "a G-PDU has no information elements: its payload is the packet it carries",
             ),
             (
                 Error::UnexpectedPacket(Expected::Udp),
