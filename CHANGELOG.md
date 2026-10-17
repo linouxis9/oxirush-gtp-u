@@ -23,8 +23,9 @@ First release.
   tunnels of an endpoint and the sessions of the test UPF.
 - `ebpf` (Linux 6.6): TCX programs that carry an endpoint's tunnels in the
   kernel. Their object is committed with its source; CI rebuilds it.
-- Features `endpoint` (the default), `tun`, `ebpf` and `serde`. Without the
-  default features the crate has no dependency. Rust 1.88 or later.
+- Features `endpoint` (the default), `tun`, `ebpf`, `serde`, and `cli` for
+  the program. Without the default features the crate has no dependency.
+  Rust 1.88 or later.
 
 ### For a program written against this repository before the release
 
@@ -33,6 +34,10 @@ revision `ac3a019` for a program that uses the crate:
 
 - The fast path is the `ebpf` feature, which was a default feature and is
   not any more: `features = ["ebpf"]` asks for it.
+- The `oxirush-upf-sim` program needs the `cli` feature, which turns on
+  the `macros` and `signal` features of Tokio: the library does not use
+  them, and its default features turned them on for every program.
+  `cargo install --features cli` installs it.
 - `Packet::extension_headers` was a `Vec<ExtensionHeader>` and is an
   `ExtensionHeaders`:
   - reading it is written as before: `iter`, `len`, `is_empty`, `first`,

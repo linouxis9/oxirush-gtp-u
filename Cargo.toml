@@ -29,10 +29,12 @@ tun = [
 ebpf = ["tun", "dep:aya"]
 # Serialize and Deserialize for RemoteTunnel (with endpoint).
 serde = ["dep:serde"]
+# The oxirush-upf-sim program, which needs Tokio's macros and signals.
+cli = ["endpoint", "tokio/macros", "tokio/signal"]
 
 [dependencies]
 serde = { version = "1.0.110", features = ["derive"], optional = true }
-tokio = { version = "1.38", features = ["macros", "net", "rt", "sync", "signal"], optional = true }
+tokio = { version = "1.38", features = ["net", "rt", "sync"], optional = true }
 tracing = { version = "0.1.40", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -56,7 +58,7 @@ libc = "0.2.164"
 
 [[bin]]
 name = "oxirush-upf-sim"
-required-features = ["endpoint"]
+required-features = ["cli"]
 
 [[example]]
 name = "endpoint"

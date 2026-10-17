@@ -55,6 +55,7 @@
 //! | `tun`, and `attach_tun` of `Endpoint` and `UpfSimulator` | `tun` | Linux, `CAP_NET_ADMIN` |
 //! | `ebpf` | `ebpf` | Linux 6.6, `CAP_BPF` and `CAP_NET_ADMIN` |
 //! | `Serialize` and `Deserialize` for `RemoteTunnel` | `serde` | |
+//! | The `oxirush-upf-sim` program | `cli` | |
 //!
 //! `ebpf` brings `tun`, and `tun` brings `endpoint`. The `tun` and `ebpf`
 //! modules exist on Linux only; elsewhere their features build and add nothing

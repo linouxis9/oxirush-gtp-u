@@ -16,10 +16,11 @@
 //! [`shutdown`](UpfSimulator::shutdown) also closes the attached TUNs and
 //! returns what could not be cleaned up; call it again to retry.
 //!
-//! The `oxirush-upf-sim` program serves one session until Ctrl-C or SIGTERM.
-//! Its arguments are the UPF's N3 address, the gNB's N3 address, the uplink
-//! TEID, the downlink TEID and the QFI, then `--tun <name> <UE address>` for a
-//! TUN as N6 in the place of the echo service.
+//! The `oxirush-upf-sim` program, of the `cli` feature, serves one session
+//! until Ctrl-C or SIGTERM. Its arguments are the UPF's N3 address, the
+//! gNB's N3 address, the uplink TEID, the downlink TEID and the QFI, then
+//! `--tun <name> <UE address>` for a TUN as N6 in the place of the echo
+//! service.
 
 use std::fmt;
 use std::io;

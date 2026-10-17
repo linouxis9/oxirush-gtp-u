@@ -370,9 +370,9 @@ TEID, the downlink TEID and the QFI. It serves that session with an echo
 service, or as root with a TUN.
 
 ```sh
-cargo run --bin oxirush-upf-sim -- 127.0.0.8:2152 127.0.0.1:2152 1001 2001 9
+cargo run --features cli --bin oxirush-upf-sim -- 127.0.0.8:2152 127.0.0.1:2152 1001 2001 9
 
-cargo build --features tun --bin oxirush-upf-sim
+cargo build --features cli,tun --bin oxirush-upf-sim
 sudo ./target/debug/oxirush-upf-sim \
   127.0.0.8:2152 127.0.0.1:2152 1001 2001 9 --tun oxupf0 10.45.0.2
 ```
@@ -386,6 +386,7 @@ sudo ./target/debug/oxirush-upf-sim \
 | `tun` | `tun`, and `attach_tun` of `Endpoint` and `UpfSimulator` | Linux, `CAP_NET_ADMIN` |
 | `ebpf` | `ebpf` | Linux 6.6, `CAP_BPF` and `CAP_NET_ADMIN` |
 | `serde` | `Serialize` and `Deserialize` for `RemoteTunnel` | |
+| `cli` | the `oxirush-upf-sim` program | |
 
 ```toml
 # The codec alone
