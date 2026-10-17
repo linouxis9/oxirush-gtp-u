@@ -1134,7 +1134,7 @@ mod tests {
         };
         assert_eq!(packet.encode(), Err(kept(0)));
         // A type that has a variant of its own is not kept as octets.
-        for kind in ExtensionHeader::TYPES {
+        for &kind in ExtensionHeader::TYPES {
             packet.extension_headers = vec![ExtensionHeader::Other {
                 kind,
                 content: vec![0, 0],

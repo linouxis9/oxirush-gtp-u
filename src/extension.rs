@@ -129,8 +129,9 @@ const U18: u32 = 0x3_ffff;
 impl ExtensionHeader {
     /// The types that have a variant of their own: those of TS 29.281
     /// V19.2.0, in the order of their numbers. An endpoint understands
-    /// them, and [`Other`](Self::Other) cannot have them.
-    pub const TYPES: [ExtensionHeaderType; 11] = [
+    /// them, and [`Other`](Self::Other) cannot have them. A later version
+    /// may add to them.
+    pub const TYPES: &'static [ExtensionHeaderType] = &[
         ExtensionHeaderType::LONG_PDCP_PDU_NUMBER,
         ExtensionHeaderType::PDU_SET_INFORMATION_CONTAINER,
         ExtensionHeaderType::SERVICE_CLASS_INDICATOR,

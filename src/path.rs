@@ -89,7 +89,7 @@ fn classify<P: AsRef<[u8]>>(packet: &Packet<P>, from: SocketAddr) -> PathAction 
             // The types that the codec has a variant for: a message with
             // one of them is delivered with it.
             let notification =
-                Packet::supported_extension_headers_notification(&ExtensionHeader::TYPES);
+                Packet::supported_extension_headers_notification(ExtensionHeader::TYPES);
             return PathAction::Notify {
                 packet: notification,
                 to: user_plane_port(from),
