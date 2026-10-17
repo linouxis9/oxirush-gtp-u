@@ -1,6 +1,8 @@
 # oxirush-gtp-u
 
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](https://github.com/linouxis9/oxirush-gtp-u/blob/master/LICENSE)
+[![Crates.io](https://img.shields.io/crates/v/oxirush-gtp-u.svg)](https://crates.io/crates/oxirush-gtp-u)
+[![Documentation](https://docs.rs/oxirush-gtp-u/badge.svg)](https://docs.rs/oxirush-gtp-u)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 GTP-U, the protocol that tunnels user traffic in 5G and 4G networks, in
 Rust, per 3GPP TS 29.281: a codec, an endpoint for the tunnels of a base
@@ -41,18 +43,39 @@ TEID 0x12345678, QFI Some(9)
 QFI 9, RQI true
 ```
 
-> This crate is not on crates.io yet.
+## Installation
 
-## Install
+```toml
+[dependencies]
+oxirush-gtp-u = "0.1"
+tokio = { version = "1", features = ["macros", "rt", "net"] } # for the endpoint
+# The codec alone, without a dependency:
+# oxirush-gtp-u = { version = "0.1", default-features = false }
+```
+
+| Feature | Adds | Needs |
+| ------- | ---- | ----- |
+| none | the codec and the IPv4 helpers | no dependency |
+| `endpoint`, the default | `Endpoint`, `upf_sim` | a Tokio runtime |
+| `tun` | `tun`, and `attach_tun` of `Endpoint` and `UpfSimulator` | Linux, `CAP_NET_ADMIN` |
+| `ebpf` | `ebpf` | Linux 6.6, `CAP_BPF` and `CAP_NET_ADMIN` |
+| `serde` | `Serialize` and `Deserialize` for `RemoteTunnel` | |
+| `cli` | the `oxirush-upf-sim` program | |
+
+`ebpf` brings `tun`, and `tun` brings `endpoint`. Off Linux, `tun` and
+`ebpf` build and add nothing, and so does `ebpf` on 32-bit x86, which aya
+does not build for, and on big-endian architectures. The eBPF programs are
+committed as an object: a build with `ebpf` needs no nightly toolchain and
+no eBPF linker.
+
+Until 0.1.0 is on crates.io, a program takes the crate from its repository:
 
 ```toml
 [dependencies]
 oxirush-gtp-u = { git = "https://github.com/linouxis9/oxirush-gtp-u" }
-tokio = { version = "1", features = ["macros", "rt", "net"] } # for the endpoint
 ```
 
-Tokio is for the endpoint. The codec alone, without a dependency, is
-`default-features = false`: [Features](#features) has the others.
+The minimum supported Rust version is 1.88.
 
 ## Carry a tunnel between an endpoint and the test UPF
 
@@ -393,29 +416,7 @@ sudo ./target/debug/oxirush-upf-sim \
   127.0.0.8:2152 127.0.0.1:2152 0x1001 0x2001 9 --tun oxupf0 10.45.0.2
 ```
 
-## Features
-
-| Feature | Adds | Needs |
-| ------- | ---- | ----- |
-| none | the codec and the IPv4 helpers | no dependency |
-| `endpoint`, the default | `Endpoint`, `upf_sim` | a Tokio runtime |
-| `tun` | `tun`, and `attach_tun` of `Endpoint` and `UpfSimulator` | Linux, `CAP_NET_ADMIN` |
-| `ebpf` | `ebpf` | Linux 6.6, `CAP_BPF` and `CAP_NET_ADMIN` |
-| `serde` | `Serialize` and `Deserialize` for `RemoteTunnel` | |
-| `cli` | the `oxirush-upf-sim` program | |
-
-```toml
-# The codec alone
-oxirush-gtp-u = { git = "https://github.com/linouxis9/oxirush-gtp-u", default-features = false }
-```
-
-`ebpf` brings `tun`, and `tun` brings `endpoint`. Off Linux, `tun` and
-`ebpf` build and add nothing, and so does `ebpf` on 32-bit x86, which aya
-does not build for, and on big-endian architectures. The eBPF programs are
-committed as an object: a build with `ebpf` needs no nightly toolchain and
-no eBPF linker. The minimum supported Rust version is 1.88.
-
-## What it does not do
+## Limits
 
 - Control plane: it has no NGAP, S1AP or PFCP.
 - Untrusted peers: the endpoint and the test UPF are for labs and test
@@ -439,7 +440,7 @@ and 1400 octets of payload:
 | From an endpoint to the test UPF and back, over the loopback interface | 13.3 µs |
 
 A message with one extension header at most is decoded without an
-allocation. [`benches/`](https://github.com/linouxis9/oxirush-gtp-u/blob/master/benches/README.md)
+allocation. [`benches/`](benches/README.md)
 has the benchmarks, the other figures and how to profile.
 
 ### Against go-gtp
@@ -488,35 +489,22 @@ Property tests and a `cargo fuzz` target check that decoding never panics
 and that what decodes encodes to a message that decodes to the same value.
 CI rebuilds the eBPF object from its source and compares.
 
-[The documentation](https://github.com/linouxis9/oxirush-gtp-u/blob/master/src/lib.rs)
-has the terms, what the codec covers, and the reference of the endpoint,
-the test UPF, the TUN routings and the fast path: `cargo doc --all-features
---open` builds it.
+[The documentation](https://docs.rs/oxirush-gtp-u) has the terms, what the
+codec covers, and the reference of the endpoint, the test UPF, the TUN
+routings and the fast path.
 
 ## The OxiRush family
 
-[oxirush-nas](https://github.com/linouxis9/oxirush-nas) (NAS messages),
-[oxirush-security](https://github.com/linouxis9/oxirush-security) (NAS
-security), [oxirush-ngap](https://github.com/linouxis9/oxirush-ngap)
-(NGAP), [oxirush-s1ap](https://github.com/linouxis9/oxirush-s1ap) (S1AP)
-and [oxirush-sctp](https://github.com/linouxis9/oxirush-sctp) (SCTP).
-
-## Contributing
-
-Open a pull request with a test for what it changes. The programs of this
-page are those of `examples/`, and
-[`tests/readme.rs`](https://github.com/linouxis9/oxirush-gtp-u/blob/master/tests/readme.rs)
-checks what they print. A change to `src/ebpf/gtpu.o` comes with the change
-of its source that produces it. Sign off your commits (`git commit -s`): by
-contributing you agree to the
-[Developer Certificate of Origin](https://developercertificate.org/).
-[SECURITY.md](https://github.com/linouxis9/oxirush-gtp-u/blob/master/SECURITY.md)
-says how to report a vulnerability.
+- [oxirush-utils](https://github.com/linouxis9/oxirush-utils): the 3GPP identities, and the JSON tree with its paths that the others share.
+- [oxirush-aper](https://github.com/linouxis9/oxirush-aper): aligned PER, the runtime of the NGAP and S1AP codecs.
+- [oxirush-nas](https://github.com/linouxis9/oxirush-nas): the NAS messages of 5GS and EPS.
+- [oxirush-security](https://github.com/linouxis9/oxirush-security): NAS security, AKA and the derivation of keys.
+- [oxirush-ngap](https://github.com/linouxis9/oxirush-ngap): NGAP, between a gNB and an AMF.
+- [oxirush-s1ap](https://github.com/linouxis9/oxirush-s1ap): S1AP, between an eNB and an MME.
+- [oxirush-gtp-u](https://github.com/linouxis9/oxirush-gtp-u): GTP-U tunnels, with a test UPF.
+- [oxirush-sctp](https://github.com/linouxis9/oxirush-sctp): SCTP sockets, which carry NGAP and S1AP.
 
 ## License
 
-Copyright 2025-2026 Valentin D'Emmanuele
-
-Licensed under the Apache License, Version 2.0. See
-[LICENSE](https://github.com/linouxis9/oxirush-gtp-u/blob/master/LICENSE)
-for details.
+Copyright 2025-2026 Valentin D'Emmanuele. Licensed under the Apache License,
+Version 2.0: see [LICENSE](LICENSE).
