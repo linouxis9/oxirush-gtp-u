@@ -40,10 +40,6 @@ impl DatagramSocket {
         })
     }
 
-    pub(crate) fn udp(&self) -> &UdpSocket {
-        &self.socket
-    }
-
     pub(crate) fn notices(&self) -> &Notices {
         &self.notices
     }
@@ -139,13 +135,25 @@ impl DatagramSocket {
     }
 
     /// Send a reply that a peer causes without a tunnel, unless it is past
-    /// the limit of such replies, where it is counted.
+    /// the limits of such replies, where it is counted.
     pub(crate) async fn send_limited(&self, packet: &Packet, to: SocketAddr) {
-        if self.notices.replies.allow(self.notices.now()) {
+        if self.notices.reply(to.ip()) {
             path::send(&self.socket, packet, to).await;
         } else {
             self.counters
                 .suppressed_replies
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Send an Echo Response, unless it is past the limit of those to its
+    /// address, where it is counted.
+    pub(crate) async fn send_echo_response(&self, packet: &Packet, to: SocketAddr) {
+        if self.notices.echo_response(to.ip()) {
+            path::send(&self.socket, packet, to).await;
+        } else {
+            self.counters
+                .suppressed_echo_responses
                 .fetch_add(1, Ordering::Relaxed);
         }
     }

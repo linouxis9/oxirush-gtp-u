@@ -148,11 +148,13 @@ revision `ac3a019` for a program that uses the crate:
   1, 2, 3 and on, and are drawn at random: a program that expected the
   first to be 1 no longer finds it.
 - An `Endpoint` and the test UPF answered every G-PDU on a TEID without a
-  tunnel with an Error Indication, and every message with an unknown header
-  that must be understood with a notification, and logged a line for each
-  at DEBUG or WARN. Past 100 replies a second they send none and count them
-  in `ReceiveStats::suppressed_replies`, and they log a line once a second
-  for each kind.
+  tunnel with an Error Indication, every message with an unknown header
+  that must be understood with a notification, and every Echo Request, and
+  logged a line for each at DEBUG or WARN. They send an address 100 of the
+  first two a second at most, after a burst of 100, and all addresses 1000,
+  and an address 10 Echo Responses a second, after a burst of 10; they
+  count the others in `ReceiveStats::suppressed_replies` and
+  `suppressed_echo_responses`, and log a line once a second for each kind.
 - `Packet` is `Debug` for a payload that is `AsRef<[u8]>`, where it was for
   one that is `Debug`. What `Debug` prints changed for `Packet`,
   `ExtensionHeader`, `PduSessionContainer`, `UnknownNewIes`,

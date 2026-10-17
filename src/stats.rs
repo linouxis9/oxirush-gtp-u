@@ -24,8 +24,12 @@ pub struct ReceiveStats {
     /// and End Markers, and messages of other types.
     pub ignored_messages: u64,
     /// Error Indications and Supported Extension Headers Notifications not
-    /// sent: past 100 a second, after a burst of 100.
+    /// sent: past 100 a second to an address after a burst of 100, or past
+    /// 1000 a second from the socket after a burst of 1000.
     pub suppressed_replies: u64,
+    /// Echo Responses not sent: past 10 a second to an address, after a
+    /// burst of 10.
+    pub suppressed_echo_responses: u64,
 }
 
 #[derive(Default)]
@@ -39,6 +43,7 @@ pub(crate) struct Counters {
     pub(crate) unmatched_error_indications: AtomicU64,
     pub(crate) ignored_messages: AtomicU64,
     pub(crate) suppressed_replies: AtomicU64,
+    pub(crate) suppressed_echo_responses: AtomicU64,
 }
 
 impl Counters {
@@ -53,6 +58,7 @@ impl Counters {
             unmatched_error_indications: self.unmatched_error_indications.load(Ordering::Relaxed),
             ignored_messages: self.ignored_messages.load(Ordering::Relaxed),
             suppressed_replies: self.suppressed_replies.load(Ordering::Relaxed),
+            suppressed_echo_responses: self.suppressed_echo_responses.load(Ordering::Relaxed),
         }
     }
 }

@@ -1,9 +1,11 @@
 //! What a peer without a tunnel can make an endpoint or the test UPF send
 //! and log. Error Indications and Supported Extension Headers Notifications
-//! go out within a rate, 100 a second after a burst of 100; a line that a
-//! peer causes is logged once a second at most for each kind; and the
-//! counters have every message. These tests take addresses 127.0.0.60 to
-//! 127.0.0.69, which macOS does not have.
+//! go out within a rate, 100 a second to an address after a burst of 100
+//! and 1000 a second from a socket after a burst of 1000; Echo Responses
+//! 10 a second to an address after a burst of 10; a line that a peer causes
+//! is logged once a second at most for each kind; and the counters have
+//! every message. These tests take addresses 127.0.0.60 to 127.0.0.69 and
+//! 127.0.1.1 to 127.0.1.59, which macOS does not have.
 #![cfg(not(target_os = "macos"))]
 
 use std::net::SocketAddr;
@@ -72,10 +74,20 @@ async fn flood(
     count: u64,
     stats: impl Fn() -> ReceiveStats,
 ) {
-    let datagram = packet.encode().unwrap();
+    flood_datagram(peer, to, &packet.encode().unwrap(), count, stats).await;
+}
+
+/// As [`flood`], with a datagram that need not be a message.
+async fn flood_datagram(
+    peer: &UdpSocket,
+    to: SocketAddr,
+    datagram: &[u8],
+    count: u64,
+    stats: impl Fn() -> ReceiveStats,
+) {
     let start = stats().received_datagrams;
     for sent in 1..=count {
-        peer.send_to(&datagram, to).await.unwrap();
+        peer.send_to(datagram, to).await.unwrap();
         if sent % 20 == 0 || sent == count {
             let caught_up = async {
                 while stats().received_datagrams < start + sent {
@@ -100,7 +112,7 @@ async fn replies(socket: &UdpSocket) -> Vec<MessageType> {
     types
 }
 
-/// The most replies that a socket may send in `elapsed`.
+/// The most replies that a socket may send to one address in `elapsed`.
 fn at_most(elapsed: Duration) -> usize {
     100 + (elapsed.as_secs_f64() * 100.0).ceil() as usize + 1
 }
@@ -247,4 +259,99 @@ async fn each_socket_has_its_own_limit() {
         assert_eq!(endpoint.stats().suppressed_replies, 0);
     }
     assert_eq!(sent, [100, 100]);
+}
+
+/// A flood from one address uses the replies of that address: the peer of
+/// a removed tunnel, at another address, still gets an Error Indication for
+/// each of its G-PDUs.
+#[tokio::test]
+async fn a_flood_from_one_address_leaves_their_error_indications_to_the_others() {
+    let (endpoint, _received) = Endpoint::bind("127.0.1.1:2152".parse().unwrap())
+        .await
+        .unwrap();
+    let attacker = UdpSocket::bind("127.0.1.2:2152").await.unwrap();
+    let peer = UdpSocket::bind("127.0.1.3:2152").await.unwrap();
+    let to = endpoint.local_addr().unwrap();
+    let removed = endpoint
+        .install(1, 5, RemoteTunnel::new(peer.local_addr().unwrap(), 9), 9)
+        .unwrap();
+    endpoint.remove(1, 5);
+    let stats = || endpoint.stats();
+    let unknown = Packet::g_pdu(0x99, vec![0x45]);
+    flood(&attacker, to, &unknown, 300, stats).await;
+    for _ in 0..20 {
+        flood(&peer, to, &Packet::g_pdu(removed, vec![0x45]), 1, stats).await;
+        flood(&attacker, to, &unknown, 20, stats).await;
+    }
+    let indications = replies(&peer).await;
+    assert_eq!(indications, [MessageType::ERROR_INDICATION; 20]);
+    assert!(endpoint.stats().suppressed_replies >= 600 - 200);
+}
+
+/// Echo Responses to one address have a limit: whoever sends Echo Requests
+/// with the address of another cannot have the socket flood it. Another
+/// address is still answered.
+#[tokio::test]
+async fn echo_responses_to_one_address_have_a_limit() {
+    let (endpoint, _received) = Endpoint::bind("127.0.1.4:2152".parse().unwrap())
+        .await
+        .unwrap();
+    let flooder = UdpSocket::bind("127.0.1.5:0").await.unwrap();
+    let peer = UdpSocket::bind("127.0.1.6:0").await.unwrap();
+    let to = endpoint.local_addr().unwrap();
+    let stats = || endpoint.stats();
+    let start = Instant::now();
+    flood(&flooder, to, &Packet::echo_request(1), 500, stats).await;
+    // An Echo Request whose Length is wrong gets an Echo Response with a
+    // Cause: within the same limit.
+    let mut wrong = Packet::echo_request(2).encode().unwrap();
+    wrong[3] += 1;
+    flood_datagram(&flooder, to, &wrong, 100, stats).await;
+    let elapsed = start.elapsed();
+    let answered = replies(&flooder).await.len();
+    let at_most = 10 + (elapsed.as_secs_f64() * 10.0).ceil() as usize + 1;
+    assert!(
+        (10..=at_most).contains(&answered),
+        "{answered} Echo Responses in {elapsed:?}"
+    );
+    flood(&peer, to, &Packet::echo_request(3), 5, stats).await;
+    assert_eq!(replies(&peer).await, [MessageType::ECHO_RESPONSE; 5]);
+    let stats = endpoint.stats();
+    assert_eq!(stats.suppressed_echo_responses, 600 - answered as u64);
+    assert_eq!(stats.suppressed_replies, 0);
+}
+
+/// What a socket sends to all the addresses together has a limit too.
+#[tokio::test]
+async fn a_socket_sends_a_thousand_replies_a_second_at_most() {
+    let (endpoint, _received) = Endpoint::bind("127.0.1.7:2152".parse().unwrap())
+        .await
+        .unwrap();
+    let to = endpoint.local_addr().unwrap();
+    let mut peers = Vec::new();
+    for host in 10..35 {
+        peers.push(
+            UdpSocket::bind(format!("127.0.1.{host}:2152"))
+                .await
+                .unwrap(),
+        );
+    }
+    let start = Instant::now();
+    for peer in &peers {
+        flood(peer, to, &Packet::g_pdu(0x99, vec![0x45]), 100, || {
+            endpoint.stats()
+        })
+        .await;
+    }
+    let elapsed = start.elapsed();
+    let mut sent = 0;
+    for peer in &peers {
+        sent += replies(peer).await.len();
+    }
+    let at_most = 1000 + (elapsed.as_secs_f64() * 1000.0).ceil() as usize + 1;
+    assert!(
+        (1000..=at_most.min(2499)).contains(&sent),
+        "{sent} replies in {elapsed:?}"
+    );
+    assert_eq!(endpoint.stats().suppressed_replies, 2500 - sent as u64);
 }

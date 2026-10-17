@@ -14,8 +14,7 @@ use crate::{Cause, ExtensionHeader, InformationElement, MessageType, PORT, Packe
 enum PathAction {
     Forward,
     Discard(&'static str),
-    /// An Echo Response, which a peer's path management depends on: it is
-    /// not limited, and is no longer than the request.
+    /// An Echo Response, within the limit of those to its address.
     Reply {
         packet: Packet,
         to: SocketAddr,
@@ -61,7 +60,7 @@ pub(crate) async fn answer<P: AsRef<[u8]>>(
             if let Some(reason) = discard_reason {
                 discarded(reason);
             }
-            send(socket.udp(), &packet, to).await;
+            socket.send_echo_response(&packet, to).await;
             true
         }
         PathAction::Notify {
@@ -138,7 +137,7 @@ fn classify<P: AsRef<[u8]>>(packet: &Packet<P>, from: SocketAddr) -> PathAction 
 /// Truncated headers and unsupported versions are silently discarded.
 pub(crate) async fn answer_length_error(socket: &DatagramSocket, bytes: &[u8], from: SocketAddr) {
     if let Some(response) = length_error_response(bytes) {
-        send(socket.udp(), &response, from).await;
+        socket.send_echo_response(&response, from).await;
     }
 }
 

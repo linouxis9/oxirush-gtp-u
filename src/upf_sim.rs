@@ -111,7 +111,7 @@ impl fmt::Debug for UplinkPacket {
 /// A test UPF on one N3 socket.
 ///
 /// A task answers Echo Requests, sends an Error Indication for a G-PDU on
-/// an unknown uplink TEID, within the limit of an
+/// an unknown uplink TEID, within the limits of an
 /// [`Endpoint`](crate::Endpoint), and passes a session's uplink T-PDUs to
 /// N6: its TUN if it has one, else the echo service, which reflects IPv4
 /// UDP and ICMP Echo Request packets. A reply of the echo service whose

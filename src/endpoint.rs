@@ -149,18 +149,27 @@ pub struct ReceivedPacket {
 /// messages new ones are dropped and counted, and a dropped receiver changes
 /// nothing else.
 ///
-/// A peer needs no tunnel to cause the last two replies, so the socket sends
-/// 100 of them a second at most, after a burst of 100; past that a reply is
-/// not sent and is counted in
-/// [`suppressed_replies`](ReceiveStats::suppressed_replies). The peer of a
-/// removed tunnel still gets an Error Indication for its next G-PDUs, which
-/// is what TS 29.281 §7.3.1 has it for: the clause expects such a defence
-/// against denial of service, for which it gives the Error Indication its
-/// UDP Port header. Echo Responses are not limited: a peer's path
-/// management depends on them, and each is no longer than its request. A
-/// line that a peer causes, such as for a G-PDU on an unknown TEID, is
-/// logged once a second at most for each kind, with the number of those
-/// that were not.
+/// A peer needs no tunnel to cause these replies, and GTP-U has no
+/// authentication: whoever can send from an address can have them sent to
+/// it. The socket sends an address 100 Error Indications and Supported
+/// Extension Headers Notifications a second at most, after a burst of 100,
+/// and all addresses together 1000 a second, after a burst of 1000; past
+/// that a reply is not sent and is counted in
+/// [`suppressed_replies`](ReceiveStats::suppressed_replies). A flood from
+/// one address uses up the replies of that address: the peer of a removed
+/// tunnel still gets an Error Indication for its next G-PDUs, which is what
+/// TS 29.281 §7.3.1 has it for. The clause expects such a defence against
+/// denial of service, for which it gives the Error Indication its UDP Port
+/// header. An address gets 10 Echo Responses a second at most, after a
+/// burst of 10, and the others are counted in
+/// [`suppressed_echo_responses`](ReceiveStats::suppressed_echo_responses):
+/// a peer sends an Echo Request on a path every 60 s at most (§7.2.1), and
+/// an Echo Response, with its sequence number and Recovery, can be longer
+/// than its request. The limit of an address is one of 1024 cells, chosen
+/// by a hash of the address under a key of the socket's own; the addresses
+/// of a cell share it. A line that a peer causes, such as for a G-PDU on an
+/// unknown TEID, is logged once a second at most for each kind, with the
+/// number of those that were not.
 ///
 /// Bind a specific address: a wildcard is refused with `InvalidInput`, so that
 /// replies leave from the address the request reached. Bind port 2152 to
