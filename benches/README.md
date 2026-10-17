@@ -45,8 +45,9 @@ received.
 
 An endpoint with many tunnels, on the same core, the machine busy with
 other work (a load of 6 to 8). The first row is an Error Indication that
-names none of its tunnels, then an Echo Request, until the Echo Response;
-the second is the tunnel of one more UE and its removal with `remove_ran`:
+names none of its tunnels, then a G-PDU of one of them, until the endpoint
+delivers it; the second is the tunnel of one more UE and its removal with
+`remove_ran`:
 
 | | 1 000 tunnels | 100 000 tunnels |
 |---|---|---|

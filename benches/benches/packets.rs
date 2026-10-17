@@ -152,7 +152,9 @@ fn endpoint(criterion: &mut Criterion) {
 /// tunnels: the time must not grow with it.
 ///
 /// - `unmatched-error-indication`: an Error Indication that names no tunnel
-///   of the endpoint, then an Echo Request, until the Echo Response.
+///   of the endpoint, then a G-PDU of one of its tunnels, until the endpoint
+///   delivers it. (An Echo Request would do, but an endpoint answers 10 a
+///   second to one address.)
 /// - `install-remove-ran`: the tunnel of one more UE, and its removal.
 fn tunnels(criterion: &mut Criterion) {
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -161,34 +163,36 @@ fn tunnels(criterion: &mut Criterion) {
         .expect("a runtime");
     let mut group = criterion.benchmark_group("tunnels");
     for tunnels in [1_000u32, 100_000] {
-        let (gnb, peer) = runtime.block_on(async {
-            let (gnb, _received) = Endpoint::bind("127.0.0.1:0".parse().unwrap())
+        let (gnb, mut received, peer) = runtime.block_on(async {
+            let (gnb, received) = Endpoint::bind("127.0.0.1:0".parse().unwrap())
                 .await
                 .expect("the endpoint binds");
             let peer = tokio::net::UdpSocket::bind("127.0.0.1:0")
                 .await
                 .expect("the peer binds");
-            (gnb, peer)
+            (gnb, received, peer)
         });
         let upf = "127.0.0.2:2152".parse().unwrap();
+        let mut local_teid = 0;
         for ran_id in 0..tunnels {
             let remote = RemoteTunnel::new(upf, 0x1000_0000 + ran_id);
-            gnb.install(ran_id, 5, remote, QFI).expect("the tunnel");
+            local_teid = gnb.install(ran_id, 5, remote, QFI).expect("the tunnel");
         }
         let to = gnb.local_addr().unwrap();
         let indication = Packet::error_indication(0x0bad_f00d, upf.ip())
             .encode()
             .expect("the message encodes");
-        let request = Packet::echo_request(1).encode().expect("it encodes");
+        let g_pdu = Packet::downlink(local_teid, QFI, payload(64))
+            .encode()
+            .expect("it encodes");
         group.bench_function(
             BenchmarkId::new("unmatched-error-indication", tunnels),
             |bencher| {
-                let mut response = [0; 64];
                 bencher.iter(|| {
                     runtime.block_on(async {
                         peer.send_to(&indication, to).await.expect("sent");
-                        peer.send_to(&request, to).await.expect("sent");
-                        peer.recv(&mut response).await.expect("the response")
+                        peer.send_to(&g_pdu, to).await.expect("sent");
+                        received.recv().await.expect("the G-PDU")
                     })
                 })
             },
