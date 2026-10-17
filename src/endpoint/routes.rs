@@ -64,15 +64,31 @@ pub(super) enum TunAttachment {}
 #[cfg(fast_path)]
 pub(super) type N3FastPath = (crate::ebpf::FastPath, std::net::Ipv4Addr);
 
-/// The tunnels of an endpoint, and its fast path, to which each change of a
-/// tunnel is applied with the tunnels locked: two changes of a tunnel that
-/// come at once reach its short-cut in the order that they reached the
-/// table.
+/// The fast path whose short-cuts the changes of the tunnels go to, if the
+/// endpoint has one. The endpoint owns it: the table, which the endpoint's
+/// tasks hold until the runtime drops them, does not.
+#[cfg(fast_path)]
+pub(super) type Shortcuts<'a> = Option<&'a N3FastPath>;
+#[cfg(not(fast_path))]
+pub(super) type Shortcuts<'a> = std::marker::PhantomData<&'a ()>;
+
+/// Apply a tunnel's change, or its removal, to its short-cut. The caller holds
+/// the tunnels' lock: two changes of a tunnel that come at once reach its
+/// short-cut in the order that they reached the table.
+#[cfg(fast_path)]
+fn sync(shortcuts: Shortcuts<'_>, local_teid: u32, route: Option<(RemoteTunnel, Option<u8>)>) {
+    if let Some((fast_path, local)) = shortcuts {
+        fast_path.refresh(*local, local_teid, route);
+    }
+}
+
+#[cfg(not(fast_path))]
+fn sync(_: Shortcuts<'_>, _local_teid: u32, _route: Option<(RemoteTunnel, Option<u8>)>) {}
+
+/// The tunnels of an endpoint.
 #[derive(Default)]
 pub(super) struct RouteTable {
     routes: Mutex<Routes>,
-    #[cfg(fast_path)]
-    fast_path: std::sync::OnceLock<N3FastPath>,
 }
 
 /// The far end of a tunnel as an Error Indication names it: the peer's TEID
@@ -175,30 +191,13 @@ pub(super) fn no_tunnel((ran_id, session_id): SessionKey) -> io::Error {
 }
 
 impl RouteTable {
-    /// Give the table its fast path, unless it has one.
-    #[cfg(fast_path)]
-    pub(super) fn set_fast_path(&self, fast_path: N3FastPath) -> Result<(), N3FastPath> {
-        self.fast_path.set(fast_path)
-    }
-
-    #[cfg(fast_path)]
-    pub(super) fn fast_path(&self) -> Option<&N3FastPath> {
-        self.fast_path.get()
-    }
-
-    /// Apply a tunnel's change, or its removal, to its short-cut. The
-    /// caller holds the tunnels' lock.
-    #[cfg(fast_path)]
-    fn sync(&self, local_teid: u32, route: Option<(RemoteTunnel, Option<u8>)>) {
-        if let Some((fast_path, local)) = self.fast_path.get() {
-            fast_path.refresh(*local, local_teid, route);
-        }
-    }
-
-    #[cfg(not(fast_path))]
-    fn sync(&self, _local_teid: u32, _route: Option<(RemoteTunnel, Option<u8>)>) {}
-
-    pub(super) fn install(&self, key: SessionKey, remote: RemoteTunnel, qfi: Option<u8>) -> u32 {
+    pub(super) fn install(
+        &self,
+        key: SessionKey,
+        remote: RemoteTunnel,
+        qfi: Option<u8>,
+        shortcuts: Shortcuts<'_>,
+    ) -> u32 {
         let routes = &mut *lock(&self.routes);
         let local_teid = match routes.by_session.get_mut(&key) {
             Some(route) => {
@@ -222,7 +221,7 @@ impl RouteTable {
                 local_teid
             }
         };
-        self.sync(local_teid, Some((remote, qfi)));
+        sync(shortcuts, local_teid, Some((remote, qfi)));
         local_teid
     }
 
@@ -232,6 +231,7 @@ impl RouteTable {
         local_teid: u32,
         remote: RemoteTunnel,
         qfi: Option<u8>,
+        shortcuts: Shortcuts<'_>,
     ) -> io::Result<()> {
         if local_teid == 0 {
             return Err(io::Error::new(
@@ -264,9 +264,9 @@ impl RouteTable {
             },
         );
         if let Some(replaced) = replaced.filter(|replaced| *replaced != local_teid) {
-            self.sync(replaced, None);
+            sync(shortcuts, replaced, None);
         }
-        self.sync(local_teid, Some((remote, qfi)));
+        sync(shortcuts, local_teid, Some((remote, qfi)));
         Ok(())
     }
 
@@ -282,10 +282,10 @@ impl RouteTable {
 
     /// End the short-cut of every tunnel, when the endpoint stops.
     #[cfg(fast_path)]
-    pub(super) fn end_shortcuts(&self) {
+    pub(super) fn end_shortcuts(&self, shortcuts: Shortcuts<'_>) {
         let routes = lock(&self.routes);
         for local_teid in routes.by_teid.keys() {
-            self.sync(*local_teid, None);
+            sync(shortcuts, *local_teid, None);
         }
     }
 
@@ -294,13 +294,13 @@ impl RouteTable {
     }
 
     /// Returns the local TEID of the removed tunnel, whose TUN closes.
-    pub(super) fn remove(&self, key: SessionKey) -> Option<u32> {
+    pub(super) fn remove(&self, key: SessionKey, shortcuts: Shortcuts<'_>) -> Option<u32> {
         // The TUN closes once the lock is released: that is netlink I/O.
         let (route, _tun) = {
             let mut routes = lock(&self.routes);
             let route = routes.remove(key);
             if let Some(route) = &route {
-                self.sync(route.local_teid, None);
+                sync(shortcuts, route.local_teid, None);
             }
             (route, routes.tuns.remove(&key))
         };
@@ -308,7 +308,7 @@ impl RouteTable {
     }
 
     /// Returns the local TEIDs of the removed tunnels, whose TUNs close.
-    pub(super) fn remove_ran(&self, ran_id: u32) -> Vec<u32> {
+    pub(super) fn remove_ran(&self, ran_id: u32, shortcuts: Shortcuts<'_>) -> Vec<u32> {
         let mut routes = lock(&self.routes);
         let keys: Vec<_> = routes
             .by_ran
@@ -325,7 +325,7 @@ impl RouteTable {
             .map(|route| route.local_teid)
             .collect();
         for local_teid in &teids {
-            self.sync(*local_teid, None);
+            sync(shortcuts, *local_teid, None);
         }
         // As above: the TUNs close after it.
         drop(routes);
@@ -421,7 +421,14 @@ mod tests {
     fn local_teids_cannot_be_told_from_one_another() {
         let teids = |table: &RouteTable| -> Vec<u32> {
             (0..100)
-                .map(|session| table.install((1, session), remote("192.0.2.1:2152", 44), None))
+                .map(|session| {
+                    table.install(
+                        (1, session),
+                        remote("192.0.2.1:2152", 44),
+                        None,
+                        Default::default(),
+                    )
+                })
                 .collect()
         };
         let (first, second) = (teids(&RouteTable::default()), teids(&RouteTable::default()));
@@ -445,13 +452,20 @@ mod tests {
             address: "127.0.0.1:2152".parse().unwrap(),
             teid: 42,
         };
-        table.install_with_teid((1, 5), 7, remote, Some(9)).unwrap();
-        table.install_with_teid((1, 5), 8, remote, None).unwrap();
+        table
+            .install_with_teid((1, 5), 7, remote, Some(9), Default::default())
+            .unwrap();
+        table
+            .install_with_teid((1, 5), 8, remote, None, Default::default())
+            .unwrap();
         assert_eq!(table.session(7), None);
         assert_eq!(table.session(8), Some((1, 5)));
-        assert_eq!(table.install((1, 5), remote, Some(10)), 8);
+        assert_eq!(
+            table.install((1, 5), remote, Some(10), Default::default()),
+            8
+        );
         assert_eq!(table.route((1, 5)).unwrap().qfi, Some(10));
-        table.remove_ran(1);
+        table.remove_ran(1, Default::default());
         assert_eq!(table.session(8), None);
         assert_eq!(table.len(), 0);
     }
@@ -487,10 +501,25 @@ mod tests {
     #[test]
     fn an_error_indication_finds_the_tunnel_to_the_far_end_it_names() {
         let table = RouteTable::default();
-        table.install((1, 5), remote("192.0.2.1:2152", 44), Some(9));
+        table.install(
+            (1, 5),
+            remote("192.0.2.1:2152", 44),
+            Some(9),
+            Default::default(),
+        );
         // A dual-stack socket reports an IPv4 peer as IPv4-mapped.
-        table.install((2, 5), remote("[::ffff:192.0.2.2]:2152", 44), Some(9));
-        table.install((3, 5), remote("[2001:db8::3]:2152", 44), None);
+        table.install(
+            (2, 5),
+            remote("[::ffff:192.0.2.2]:2152", 44),
+            Some(9),
+            Default::default(),
+        );
+        table.install(
+            (3, 5),
+            remote("[2001:db8::3]:2152", 44),
+            None,
+            Default::default(),
+        );
         assert_indexed(&table, 3);
         for (peer, key) in [
             ("192.0.2.1", (1, 5)),
@@ -510,43 +539,80 @@ mod tests {
     #[test]
     fn a_tunnel_is_found_by_its_current_far_end_only() {
         let table = RouteTable::default();
-        let local_teid = table.install((1, 5), remote("192.0.2.1:2152", 44), Some(9));
+        let local_teid = table.install(
+            (1, 5),
+            remote("192.0.2.1:2152", 44),
+            Some(9),
+            Default::default(),
+        );
         // The same call on an existing tunnel changes its far end in place.
         assert_eq!(
-            table.install((1, 5), remote("192.0.2.1:2152", 45), Some(9)),
+            table.install(
+                (1, 5),
+                remote("192.0.2.1:2152", 45),
+                Some(9),
+                Default::default()
+            ),
             local_teid
         );
         assert_eq!(indicated(&table, 44, "192.0.2.1"), None);
         assert_eq!(indicated(&table, 45, "192.0.2.1"), Some((1, 5)));
         assert_indexed(&table, 1);
         // Another address with the same TEID, then the same far end again.
-        table.install((1, 5), remote("192.0.2.9:2152", 45), None);
+        table.install(
+            (1, 5),
+            remote("192.0.2.9:2152", 45),
+            None,
+            Default::default(),
+        );
         assert_eq!(indicated(&table, 45, "192.0.2.1"), None);
         assert_eq!(indicated(&table, 45, "192.0.2.9"), Some((1, 5)));
-        table.install((1, 5), remote("192.0.2.9:2152", 45), None);
+        table.install(
+            (1, 5),
+            remote("192.0.2.9:2152", 45),
+            None,
+            Default::default(),
+        );
         assert_eq!(indicated(&table, 45, "192.0.2.9"), Some((1, 5)));
         assert_indexed(&table, 1);
         // A local TEID that something else assigned replaces the tunnel.
         table
-            .install_with_teid((1, 5), 77, remote("192.0.2.9:2152", 46), None)
+            .install_with_teid(
+                (1, 5),
+                77,
+                remote("192.0.2.9:2152", 46),
+                None,
+                Default::default(),
+            )
             .unwrap();
         assert_eq!(indicated(&table, 45, "192.0.2.9"), None);
         assert_eq!(indicated(&table, 46, "192.0.2.9"), Some((1, 5)));
         assert_indexed(&table, 1);
         // A refused one leaves it as it was.
-        table.install((2, 5), remote("192.0.2.9:2152", 47), None);
+        table.install(
+            (2, 5),
+            remote("192.0.2.9:2152", 47),
+            None,
+            Default::default(),
+        );
         let local_teid = table.route((2, 5)).unwrap().local_teid;
         assert!(
             table
-                .install_with_teid((1, 5), local_teid, remote("192.0.2.9:2152", 48), None)
+                .install_with_teid(
+                    (1, 5),
+                    local_teid,
+                    remote("192.0.2.9:2152", 48),
+                    None,
+                    Default::default()
+                )
                 .is_err()
         );
         assert_eq!(indicated(&table, 46, "192.0.2.9"), Some((1, 5)));
         assert_eq!(indicated(&table, 48, "192.0.2.9"), None);
         assert_indexed(&table, 2);
-        assert_eq!(table.remove((1, 5)), Some(77));
+        assert_eq!(table.remove((1, 5), Default::default()), Some(77));
         assert_eq!(indicated(&table, 46, "192.0.2.9"), None);
-        assert_eq!(table.remove((1, 5)), None);
+        assert_eq!(table.remove((1, 5), Default::default()), None);
         assert_indexed(&table, 1);
     }
 
@@ -555,12 +621,17 @@ mod tests {
         let table = RouteTable::default();
         // As while a peer has not said its TEID yet.
         for key in [(2, 1), (1, 9), (1, 5), (3, 0)] {
-            table.install(key, remote("192.0.2.1:2152", 0), Some(9));
+            table.install(
+                key,
+                remote("192.0.2.1:2152", 0),
+                Some(9),
+                Default::default(),
+            );
         }
         assert_indexed(&table, 4);
         for key in [(1, 5), (1, 9), (2, 1), (3, 0)] {
             assert_eq!(indicated(&table, 0, "192.0.2.1"), Some(key));
-            table.remove(key);
+            table.remove(key, Default::default());
         }
         assert_eq!(indicated(&table, 0, "192.0.2.1"), None);
         assert_indexed(&table, 0);
@@ -571,22 +642,37 @@ mod tests {
         let table = RouteTable::default();
         let mut teids = Vec::new();
         for session in [0, 5, 255] {
-            teids.push(table.install((7, session), remote("192.0.2.1:2152", 44), Some(9)));
+            teids.push(table.install(
+                (7, session),
+                remote("192.0.2.1:2152", 44),
+                Some(9),
+                Default::default(),
+            ));
         }
-        table.install((6, 255), remote("192.0.2.1:2152", 44), Some(9));
-        table.install((8, 0), remote("192.0.2.1:2152", 44), Some(9));
-        let mut removed = table.remove_ran(7);
+        table.install(
+            (6, 255),
+            remote("192.0.2.1:2152", 44),
+            Some(9),
+            Default::default(),
+        );
+        table.install(
+            (8, 0),
+            remote("192.0.2.1:2152", 44),
+            Some(9),
+            Default::default(),
+        );
+        let mut removed = table.remove_ran(7, Default::default());
         removed.sort_unstable();
         teids.sort_unstable();
         assert_eq!(removed, teids);
-        assert_eq!(table.remove_ran(7), []);
+        assert_eq!(table.remove_ran(7, Default::default()), []);
         assert_indexed(&table, 2);
         assert!(table.route((6, 255)).is_some());
         assert!(table.route((8, 0)).is_some());
         assert_eq!(indicated(&table, 44, "192.0.2.1"), Some((6, 255)));
-        assert_eq!(table.remove_ran(u32::MAX), []);
-        assert_eq!(table.remove_ran(6).len(), 1);
-        assert_eq!(table.remove_ran(8).len(), 1);
+        assert_eq!(table.remove_ran(u32::MAX, Default::default()), []);
+        assert_eq!(table.remove_ran(6, Default::default()).len(), 1);
+        assert_eq!(table.remove_ran(8, Default::default()).len(), 1);
         assert_indexed(&table, 0);
     }
 
@@ -601,7 +687,7 @@ mod tests {
         let table = RouteTable::default();
         for ran_id in 0..TUNNELS {
             let far_end = remote("192.0.2.1:2152", 0x1000_0000 + ran_id);
-            table.install((ran_id, 5), far_end, Some(9));
+            table.install((ran_id, 5), far_end, Some(9), Default::default());
         }
         let unmatched = Packet::error_indication(0x0bad_f00d, "192.0.2.1".parse().unwrap());
         let start = std::time::Instant::now();
@@ -609,7 +695,7 @@ mod tests {
             assert_eq!(table.error_indication_session(&unmatched), None);
         }
         for ran_id in 0..CALLS {
-            assert_eq!(table.remove_ran(ran_id).len(), 1);
+            assert_eq!(table.remove_ran(ran_id, Default::default()).len(), 1);
         }
         let elapsed = start.elapsed();
         assert!(
