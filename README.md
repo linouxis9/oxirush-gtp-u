@@ -51,8 +51,8 @@ oxirush-gtp-u = { git = "https://github.com/linouxis9/oxirush-gtp-u" }
 tokio = { version = "1", features = ["macros", "rt", "net"] } # for the endpoint
 ```
 
-The codec needs no dependency and no feature: [Features](#features) has
-the others.
+Tokio is for the endpoint. The codec alone, without a dependency, is
+`default-features = false`: [Features](#features) has the others.
 
 ## Carry a tunnel between an endpoint and the test UPF
 
@@ -304,6 +304,10 @@ async fn main() -> std::io::Result<()> {
     println!("{from} answered {reply:?}");
     Ok(())
 }
+```
+
+```text
+192.0.2.1:7 answered "hello"
 ```
 
 It creates an interface and a routing rule, which needs `CAP_NET_ADMIN`.
