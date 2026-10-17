@@ -114,7 +114,7 @@ fn block_2() {
 /// The Rust block 3 of README.md.
 fn block_3() {
     use oxirush_gtp_u::upf_sim::UpfSimulator;
-    use oxirush_gtp_u::{Endpoint, Packet, RemoteTunnel};
+    use oxirush_gtp_u::{Endpoint, Packet, PathEvent, RemoteTunnel};
 
     #[tokio::main(flavor = "current_thread")]
     async fn main() -> std::io::Result<()> {
@@ -135,6 +135,16 @@ fn block_3() {
             response.sequence,
             response.information_elements()?
         );
+
+        // The gNB asks whether its path to the UPF is alive, and supervises it
+        // from now on: `path_state` and `path_events` say when it is down
+        let mut events = gnb.path_events();
+        gnb.echo(upf.local_addr()?).await?;
+        if let Ok(PathEvent::EchoResponse { from, packet, .. }) = events.recv().await {
+            let elements = packet.information_elements()?;
+            println!("Echo Response from {from}: {elements:?}");
+        }
+        gnb.supervise(upf.local_addr()?)?;
 
         // The UPF has no session with TEID 0x1001. It answers the G-PDU with an
         // Error Indication, which the receiver gets with its tunnel

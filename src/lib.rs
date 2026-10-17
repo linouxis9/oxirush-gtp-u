@@ -39,8 +39,9 @@
 //! ```
 //!
 //! The [README](https://github.com/linouxis9/oxirush-gtp-u#readme) has a
-//! program for each task: a tunnel between an endpoint and the test UPF, echo
-//! and Error Indication, the extension headers, a TUN, the fast path.
+//! program for each task: a tunnel between an endpoint and the test UPF, echo,
+//! path supervision and Error Indication, the extension headers, a TUN, the
+//! fast path.
 //!
 //! It is made for simulators and test tools. It has no control plane: tunnels
 //! are set up by calls, with the identifiers and addresses that NGAP, S1AP or
@@ -128,7 +129,7 @@
 //! | Extension headers | `ExtensionHeader`: the UDP Port, the PDCP PDU Number and the long one, the Service Class Indicator, the RAN, Xw RAN and NR RAN containers as octets, and the two below; a header of another type is kept as octets | TS 29.281 §5.2 |
 //! | PDU Session Container | `PduSessionContainer`: the downlink and the uplink PDU Session Information, with their QoS monitoring, sequence number, delay and congestion fields | TS 38.415 §5.5.2 |
 //! | PDU Set Information Container | `PduSetInformationContainer`: the downlink PDU Set Information | TS 38.415 §6.5.2 |
-//! | Tunnels of a gNB or an eNB | `Endpoint`: tunnels by UE and PDU session or E-RAB, and the replies that a node owes its peer | TS 29.281 §4.4 and §7 |
+//! | Tunnels of a gNB or an eNB | `Endpoint`: tunnels by UE and PDU session or E-RAB, the replies that a node owes its peer, Echo Requests and the supervision of a path | TS 29.281 §4.4, §7 and §11, TS 23.007 §20.3 |
 //! | A UPF to test against | `upf_sim::UpfSimulator` and the `oxirush-upf-sim` program: sessions, an echo service, an End Marker on a path switch | |
 //! | Linux as the device or as N6 | `tun::TunPort`, `Endpoint::attach_tun`, `UpfSimulator::attach_tun` | |
 //! | The tunnels in the kernel | `ebpf::FastPath` | |
@@ -169,6 +170,7 @@
 //! - 3GPP TS 38.415: NG-RAN PDU Session User Plane protocol (PDU Session
 //!   Container, PDU Set Information Container)
 //! - 3GPP TS 29.060: imported TV information elements and receive rules
+//! - 3GPP TS 23.007: the supervision of a path (§20.3)
 //!
 //! # Source layout
 //!
@@ -184,6 +186,7 @@
 //! ├── datagram.rs, path.rs    shared UDP receive and path management (endpoint)
 //! ├── limit.rs               the limits of replies and log lines (endpoint)
 //! ├── endpoint.rs            gNB endpoint and forwarding (endpoint)
+//! ├── endpoint/paths.rs      Echo Requests, path supervision, peers' notifications (endpoint)
 //! ├── endpoint/routes.rs     tunnel identity, route indexes and TUNs (endpoint)
 //! ├── stats.rs               receive/drop counters (endpoint)
 //! ├── upf_sim.rs             test UPF and forwarding (endpoint)
@@ -242,7 +245,7 @@ pub mod tun;
 pub mod upf_sim;
 
 #[cfg(feature = "endpoint")]
-pub use endpoint::{Endpoint, ReceivedPacket, RemoteTunnel};
+pub use endpoint::{Endpoint, PathEvent, PathState, PathTimers, ReceivedPacket, RemoteTunnel};
 pub use error::{Error, Expected, Part};
 pub use extension::{
     DownlinkPduSessionInformation, ExtensionHeader, PduSessionContainer, UnknownNewIes,

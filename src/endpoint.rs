@@ -2,11 +2,12 @@
 
 use std::fmt;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tokio::task::{AbortHandle, JoinHandle};
 #[cfg(all(target_os = "linux", feature = "tun"))]
 use tracing::debug;
@@ -18,8 +19,11 @@ use crate::limit::limited;
 #[cfg(all(target_os = "linux", feature = "tun"))]
 use crate::tun::{TunConfig, TunPort};
 use crate::types::Teid;
-use crate::{MessageType, Packet};
+use crate::{ExtensionHeaderType, MessageType, Packet};
 
+mod paths;
+use paths::Paths;
+pub use paths::{PathEvent, PathState, PathTimers};
 mod routes;
 use routes::RouteTable;
 #[cfg(all(target_os = "linux", feature = "tun"))]
@@ -68,9 +72,9 @@ pub struct ReceivedPacket {
     pub ran_id: u32,
     /// The tunnel's PDU session ID.
     pub session_id: u8,
-    /// A G-PDU or End Marker on the tunnel's local TEID, or an Error
-    /// Indication by which the peer reports that it no longer knows the
-    /// tunnel's remote TEID.
+    /// A G-PDU, an End Marker or a Tunnel Status on the tunnel's local
+    /// TEID, or an Error Indication by which the peer reports that it no
+    /// longer knows the tunnel's remote TEID.
     pub packet: Packet,
     /// The address it came from, IPv4 rather than IPv4-mapped. It need not
     /// be the tunnel's remote address: the TEID, or for an Error
@@ -87,12 +91,14 @@ pub struct ReceivedPacket {
 /// unsupported comprehension-required extension header, and delivers the
 /// tunnels' messages, with every extension header that
 /// [`ExtensionHeader`](crate::ExtensionHeader) has a variant for: those of
-/// a handover and of the RAN protocols among them. As in TS 29.281, the TEID alone identifies a tunnel:
-/// peers may send from another address than their F-TEID's. GTP-U has no
+/// a handover and of the RAN protocols among them. It sends Echo Requests
+/// and supervises paths when asked, and delivers what its peers send on
+/// the paths. As in TS 29.281, the TEID alone identifies a tunnel: peers
+/// may send from another address than their F-TEID's. GTP-U has no
 /// authentication, so whoever reaches the socket can send on a tunnel or
-/// report an Error Indication for it. Clones share
-/// the socket and tunnels; the task stops when the last clone is dropped.
-/// Must be used within a Tokio runtime.
+/// report an Error Indication for it. Clones share the socket and tunnels;
+/// the task stops when the last clone is dropped. Must be used within a
+/// Tokio runtime.
 ///
 /// ```
 /// use oxirush_gtp_u::{Endpoint, RemoteTunnel};
@@ -117,9 +123,11 @@ pub struct ReceivedPacket {
 /// # Tunnels
 ///
 /// [`bind`](Self::bind) opens the socket and returns the receiver of the
-/// tunnels' messages: G-PDUs, End Markers and the peer's Error Indications,
-/// each with its tunnel and source address. The TEID alone identifies a
-/// tunnel, so a peer may send from another address than its F-TEID's.
+/// tunnels' messages: G-PDUs, End Markers, Tunnel Status messages and the
+/// peer's Error Indications, each with its tunnel and source address. The
+/// TEID alone identifies a tunnel, so a peer may send from another address
+/// than its F-TEID's. An End Marker or a Tunnel Status on a TEID without a
+/// tunnel is ignored (TS 29.281 §7.3.2.1, §7.3.3).
 ///
 /// - [`install`](Self::install) sets up the tunnel of a RAN UE and PDU session
 ///   toward a remote TEID and returns the local TEID to give the peer; on an
@@ -141,13 +149,34 @@ pub struct ReceivedPacket {
 ///
 /// # Path management
 ///
-/// The endpoint does the path management of TS 29.281 §7 by itself. It answers
-/// Echo Requests, sends an Error Indication for a G-PDU on an unknown TEID and
-/// a Supported Extension Headers Notification for an extension header it must
-/// understand and does not. The last two go to port 2152, as the specification
-/// requires. A slow receiver never delays these replies: past 256 queued
-/// messages new ones are dropped and counted, and a dropped receiver changes
-/// nothing else.
+/// The endpoint sends by itself the replies that TS 29.281 §7 asks of every
+/// GTP-U node: it answers Echo Requests, sends an Error Indication for a
+/// G-PDU on an unknown TEID and a Supported Extension Headers Notification
+/// for an extension header it must understand and does not. The last two go
+/// to port 2152, as the specification requires. A slow receiver never
+/// delays these replies: past 256 queued messages new ones are dropped and
+/// counted, and a dropped receiver changes nothing else.
+///
+/// The rest is the program's to ask for:
+///
+/// - [`echo`](Self::echo) sends an Echo Request to a peer and waits for its
+///   response, which it repeats each T3-RESPONSE, N3-REQUESTS times at most
+///   (§11, [`PathTimers`]).
+/// - [`supervise`](Self::supervise) sends one on a path each interval and
+///   follows its state, which [`path_state`](Self::path_state) reads: the
+///   path is down once more than N3-REQUESTS of its requests' timers expired
+///   since its last response (TS 29.281 §9.2, TS 23.007 §20.3.1).
+/// - [`path_events`](Self::path_events) gives the Echo Responses, the
+///   peers' Supported Extension Headers Notifications and the changes of the
+///   supervised paths. An Echo Response that answers no request of the
+///   endpoint is a duplicate, which §11 discards.
+/// - After a peer's notification, [`send_to`](Self::send_to) refuses to send
+///   it a message with an extension header that it must understand and does
+///   not support (§7.2.3), until
+///   [`forget_supported_extension_headers`](Self::forget_supported_extension_headers).
+///   The tunnels' own G-PDUs keep their PDU Session Container, which N3
+///   needs: a notification, which anyone can send with the peer's address,
+///   does not stop a tunnel.
 ///
 /// A peer needs no tunnel to cause these replies, and GTP-U has no
 /// authentication: whoever can send from an address can have them sent to
@@ -188,6 +217,7 @@ pub struct Endpoint {
 struct Shared {
     socket: Arc<DatagramSocket>,
     routes: Arc<RouteTable>,
+    paths: Arc<Paths>,
     worker: AbortHandle,
     completion: tokio::sync::Mutex<Option<JoinHandle<io::Result<()>>>>,
     stopped: AtomicBool,
@@ -211,6 +241,7 @@ impl Shared {
 impl Drop for Shared {
     fn drop(&mut self) {
         self.worker.abort();
+        self.paths.end_supervisions();
         #[cfg(fast_path)]
         for local_teid in self.routes.local_teids() {
             self.sync(local_teid, None);
@@ -237,12 +268,14 @@ impl Endpoint {
     pub async fn bind(address: SocketAddr) -> io::Result<(Self, mpsc::Receiver<ReceivedPacket>)> {
         let socket = Arc::new(DatagramSocket::bind(address).await?);
         let routes = Arc::new(RouteTable::default());
+        let paths = Arc::new(Paths::new());
         let (tx, rx) = mpsc::channel(QUEUE);
-        let completion = tokio::spawn(receive(socket.clone(), routes.clone(), tx));
+        let completion = tokio::spawn(receive(socket.clone(), routes.clone(), paths.clone(), tx));
         let worker = completion.abort_handle();
         let shared = Shared {
             socket,
             routes,
+            paths,
             worker,
             completion: tokio::sync::Mutex::new(Some(completion)),
             stopped: AtomicBool::new(false),
@@ -280,6 +313,7 @@ impl Endpoint {
     pub async fn shutdown(&self) -> io::Result<()> {
         self.shared.stopped.store(true, Ordering::Relaxed);
         self.shared.worker.abort();
+        self.shared.paths.end_supervisions();
         #[cfg(fast_path)]
         for local_teid in self.shared.routes.local_teids() {
             self.shared.sync(local_teid, None);
@@ -300,7 +334,46 @@ impl Endpoint {
 
     /// Send a custom message from this endpoint's bound socket. This preserves
     /// its sequence number and extension headers and does not require a route.
+    ///
+    /// The response to an Echo Request with a sequence number comes on
+    /// [`path_events`](Self::path_events), unless one of the endpoint's
+    /// Echo Requests has that number.
+    ///
+    /// # Errors
+    ///
+    /// [`Unsupported`](io::ErrorKind::Unsupported) for a message with an
+    /// extension header that `to` must understand and that, in its last
+    /// Supported Extension Headers Notification, it said it does not
+    /// support: TS 29.281 §7.2.3 asks to avoid such repeated attempts.
+    /// [`forget_supported_extension_headers`](Self::forget_supported_extension_headers)
+    /// tries the peer again. [`BrokenPipe`](io::ErrorKind::BrokenPipe) once
+    /// the endpoint is shut down.
     pub async fn send_to<P: AsRef<[u8]>>(
+        &self,
+        packet: &Packet<P>,
+        to: SocketAddr,
+    ) -> io::Result<()> {
+        if let Some(kind) = self.shared.paths.refused(packet, to.ip()) {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "{} said that it does not support extension header {kind}, \
+                     which it must understand",
+                    to.ip().to_canonical()
+                ),
+            ));
+        }
+        if packet.message_type == MessageType::ECHO_REQUEST
+            && let Some(sequence) = packet.sequence
+        {
+            self.shared
+                .paths
+                .sent_request(to.ip().to_canonical(), sequence);
+        }
+        self.send_packet(packet, to).await
+    }
+
+    async fn send_packet<P: AsRef<[u8]>>(
         &self,
         packet: &Packet<P>,
         to: SocketAddr,
@@ -309,6 +382,110 @@ impl Endpoint {
             return Err(io::ErrorKind::BrokenPipe.into());
         }
         self.shared.socket.send(packet, to).await
+    }
+
+    /// Send an Echo Request to `peer`, and again each T3-RESPONSE with the
+    /// same sequence number until its Echo Response comes, N3-REQUESTS times
+    /// at most ([`path_timers`](Self::path_timers), TS 29.281 §11): the
+    /// round trip from the last time that it was sent. The response also
+    /// comes on [`path_events`](Self::path_events).
+    ///
+    /// # Errors
+    ///
+    /// [`TimedOut`](io::ErrorKind::TimedOut) if no response came,
+    /// [`BrokenPipe`](io::ErrorKind::BrokenPipe) once the endpoint is shut
+    /// down, and the error of a send that failed.
+    pub async fn echo(&self, peer: SocketAddr) -> io::Result<Duration> {
+        if !self.is_running() {
+            return Err(io::ErrorKind::BrokenPipe.into());
+        }
+        paths::exchange(&self.shared.socket, &self.shared.paths, peer, true).await
+    }
+
+    /// Supervise the path to `peer`, as TS 23.007 §20.3.1 has it: an Echo
+    /// Request each interval of [`path_timers`](Self::path_timers), sent
+    /// again each T3-RESPONSE until its response comes, N3-REQUESTS times at
+    /// most. The path counter counts the times that T3-RESPONSE expired
+    /// since the last Echo Response from the peer, and the path is down
+    /// once it exceeds N3-REQUESTS: with the default timers, from the first
+    /// expiry of the second request that is not answered, 63 s after the
+    /// first. An Echo Response brings it up again.
+    /// [`path_state`](Self::path_state) has the state, and
+    /// [`path_events`](Self::path_events) its changes. Nothing more happens
+    /// to the tunnels: TS 23.007 leaves it to the node.
+    ///
+    /// A path is supervised until
+    /// [`end_supervision`](Self::end_supervision), the endpoint's
+    /// [`shutdown`](Self::shutdown) or its last clone. Supervising it again
+    /// changes nothing.
+    ///
+    /// # Errors
+    ///
+    /// [`BrokenPipe`](io::ErrorKind::BrokenPipe) once the endpoint is shut
+    /// down.
+    ///
+    /// # Panics
+    ///
+    /// Outside a Tokio runtime.
+    pub fn supervise(&self, peer: SocketAddr) -> io::Result<()> {
+        if !self.is_running() {
+            return Err(io::ErrorKind::BrokenPipe.into());
+        }
+        let (socket, paths) = (self.shared.socket.clone(), self.shared.paths.clone());
+        self.shared.paths.supervise(peer, || {
+            tokio::spawn(paths::supervise(socket, paths, peer)).abort_handle()
+        });
+        Ok(())
+    }
+
+    /// Stop supervising the path to `peer`.
+    pub fn end_supervision(&self, peer: SocketAddr) {
+        self.shared.paths.end_supervision(peer);
+    }
+
+    /// The state of the supervised path to `peer`, as it was given to
+    /// [`supervise`](Self::supervise).
+    pub fn path_state(&self, peer: SocketAddr) -> Option<PathState> {
+        self.shared.paths.path_state(peer)
+    }
+
+    /// The timers of the endpoint's Echo Requests.
+    pub fn path_timers(&self) -> PathTimers {
+        self.shared.paths.timers()
+    }
+
+    /// Set the timers of the endpoint's Echo Requests, for the requests that
+    /// it sends from now on.
+    ///
+    /// # Errors
+    ///
+    /// [`InvalidInput`](io::ErrorKind::InvalidInput) for N3-REQUESTS 0, or
+    /// a T3-RESPONSE or an interval of 0.
+    pub fn set_path_timers(&self, timers: PathTimers) -> io::Result<()> {
+        self.shared.paths.set_timers(timers)
+    }
+
+    /// The events of the endpoint's paths: the Echo Responses to its
+    /// requests, its peers' Supported Extension Headers Notifications, and
+    /// the changes of the paths that it supervises. A receiver gets those
+    /// that come after it is made; one that lags 64 events behind loses the
+    /// oldest, and its `recv` says how many.
+    pub fn path_events(&self) -> broadcast::Receiver<PathEvent> {
+        self.shared.paths.events()
+    }
+
+    /// The extension header types that `peer` said it supports, in the
+    /// last Supported Extension Headers Notification that it sent. The
+    /// endpoint keeps those of 256 peers at most.
+    pub fn supported_extension_headers(&self, peer: IpAddr) -> Option<Vec<ExtensionHeaderType>> {
+        self.shared.paths.supported_extension_headers(peer)
+    }
+
+    /// Forget what `peer` said of the extension headers it supports:
+    /// [`send_to`](Self::send_to) sends it every one again, as TS 29.281
+    /// §7.2.3 allows to find out whether it was upgraded.
+    pub fn forget_supported_extension_headers(&self, peer: IpAddr) {
+        self.shared.paths.forget_supported_extension_headers(peer);
     }
 
     /// Provision an explicitly assigned, nonzero local TEID. `qfi=None` selects
@@ -548,7 +725,7 @@ impl Endpoint {
             .routes
             .route(key)
             .ok_or_else(|| routes::no_tunnel(key))?;
-        self.send_to(&route.uplink(payload), route.remote.address)
+        self.send_packet(&route.uplink(payload), route.remote.address)
             .await
     }
 }
@@ -565,6 +742,7 @@ impl fmt::Debug for Endpoint {
 async fn receive(
     socket: Arc<DatagramSocket>,
     routes: Arc<RouteTable>,
+    paths: Arc<Paths>,
     tx: mpsc::Sender<ReceivedPacket>,
 ) -> io::Result<()> {
     let mut buffer = vec![0; 65536];
@@ -580,7 +758,7 @@ async fn receive(
         );
         let (notices, counters) = (socket.notices(), socket.counters());
         let key = match packet.message_type {
-            MessageType::G_PDU | MessageType::END_MARKER => {
+            MessageType::G_PDU | MessageType::END_MARKER | MessageType::TUNNEL_STATUS => {
                 let found = routes.session(packet.teid);
                 match found {
                     Some(key) => key,
@@ -595,13 +773,15 @@ async fn receive(
                         socket.unknown_teid(packet.teid, from).await;
                         continue;
                     }
+                    // TS 29.281 §7.3.2.1 and §7.3.3: ignored.
                     None => {
                         counters.ignored_messages.fetch_add(1, Ordering::Relaxed);
                         limited!(
                             DEBUG,
                             notices,
                             ignored,
-                            "N3 End Marker for unknown TEID {:#010x} from {from}",
+                            "N3 {} for unknown TEID {:#010x} from {from}",
+                            packet.message_type,
                             packet.teid
                         );
                         continue;
@@ -623,6 +803,14 @@ async fn receive(
                     continue;
                 }
             },
+            MessageType::ECHO_RESPONSE if paths.echo_response(&packet, from) => continue,
+            MessageType::SUPPORTED_EXTENSION_HEADERS_NOTIFICATION
+                if paths.notification(&packet, from) =>
+            {
+                continue;
+            }
+            // An Echo Response that answers no request is a duplicate,
+            // which TS 29.281 §11 discards.
             message_type => {
                 counters.ignored_messages.fetch_add(1, Ordering::Relaxed);
                 limited!(

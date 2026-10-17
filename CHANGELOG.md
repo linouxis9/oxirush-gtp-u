@@ -16,7 +16,10 @@ First release.
   `Cause`, with the names of the specification.
 - `Endpoint`: the N3 socket of a gNB, or the S1-U socket of an eNB, and its
   tunnels, with the replies that TS 29.281 §7 asks of it, within limits
-  for what a peer without a tunnel can make it send and log.
+  for what a peer without a tunnel can make it send and log. It sends Echo
+  Requests with T3-RESPONSE and N3-REQUESTS, supervises paths as TS 23.007
+  §20.3.1 has it, and delivers its peers' path messages (`echo`,
+  `supervise`, `path_events`).
 - `upf_sim::UpfSimulator` and the `oxirush-upf-sim` program: a UPF to test
   against, without PFCP, with an echo service that a program which
   answers the UE itself turns off.
@@ -156,6 +159,15 @@ revision `ac3a019` for a program that uses the crate:
   and an address 10 Echo Responses a second, after a burst of 10; they
   count the others in `ReceiveStats::suppressed_replies` and
   `suppressed_echo_responses`, and log a line once a second for each kind.
+- An `Endpoint` dropped the Echo Responses and Supported Extension Headers
+  Notifications that it received, and counted them in
+  `ReceiveStats::ignored_messages`. They come on `Endpoint::path_events`,
+  an Echo Response when it answers a request of the endpoint (`echo`,
+  `supervise`, or `send_to` of an Echo Request), and a duplicate is still
+  counted there. After a peer's notification `send_to` refuses, with
+  `Unsupported`, a message with an extension header that the peer must
+  understand and said it does not support. A Tunnel Status on the TEID of a
+  tunnel goes to the receiver of `bind`, as an End Marker does.
 - `Packet` is `Debug` for a payload that is `AsRef<[u8]>`, where it was for
   one that is `Debug`. What `Debug` prints changed for `Packet`,
   `ExtensionHeader`, `PduSessionContainer`, `UnknownNewIes`,

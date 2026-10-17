@@ -105,11 +105,11 @@ UPF: TEID 0x1001, QFI Some(9)
 gNB: RAN UE 1 session 5, QFI Some(9): 192.0.2.1:7 to 10.45.0.2:4000
 ```
 
-## Echo and Error Indication
+## Echo, path supervision and Error Indication
 
 ```rust
 use oxirush_gtp_u::upf_sim::UpfSimulator;
-use oxirush_gtp_u::{Endpoint, Packet, RemoteTunnel};
+use oxirush_gtp_u::{Endpoint, Packet, PathEvent, RemoteTunnel};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> std::io::Result<()> {
@@ -131,6 +131,16 @@ async fn main() -> std::io::Result<()> {
         response.information_elements()?
     );
 
+    // The gNB asks whether its path to the UPF is alive, and supervises it
+    // from now on: `path_state` and `path_events` say when it is down
+    let mut events = gnb.path_events();
+    gnb.echo(upf.local_addr()?).await?;
+    if let Ok(PathEvent::EchoResponse { from, packet, .. }) = events.recv().await {
+        let elements = packet.information_elements()?;
+        println!("Echo Response from {from}: {elements:?}");
+    }
+    gnb.supervise(upf.local_addr()?)?;
+
     // The UPF has no session with TEID 0x1001. It answers the G-PDU with an
     // Error Indication, which the receiver gets with its tunnel
     gnb.install(1, 5, RemoteTunnel::new(upf.local_addr()?, 0x1001), 9)?;
@@ -149,6 +159,7 @@ async fn main() -> std::io::Result<()> {
 
 ```text
 Echo Response, sequence number Some(7), [Recovery(0)]
+Echo Response from 127.0.0.10:2152: [Recovery(0)]
 Error Indication for RAN UE 1 session 5: [TeidDataI(0x00001001), GtpUPeerAddress(127.0.0.10)]
 ```
 
