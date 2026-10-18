@@ -50,6 +50,24 @@ use sessions::TunAttachment;
 use sessions::{Incarnation, SessionRegistry, UplinkTarget, stopped};
 
 /// The tunnels of one PDU session. `Debug` prints the TEIDs in hexadecimal.
+///
+/// ```
+/// # #[tokio::main(flavor = "current_thread")]
+/// # async fn main() -> std::io::Result<()> {
+/// use oxirush_gtp_u::upf_sim::{Session, UpfSimulator};
+///
+/// let (upf, _observed) = UpfSimulator::bind("127.0.0.1:0".parse().unwrap()).await?;
+///
+/// // The UPF receives the uplink on TEID 0x1001, and sends the downlink to the
+/// // gNB at its N3 address on TEID 0x2002, in QoS flow 9
+/// let gnb = "127.0.0.1:2152".parse().unwrap();
+/// upf.set_session(Session::new(0x1001, 0x2002, gnb, 9))?;
+///
+/// // A QFI has six bits
+/// assert!(upf.set_session(Session::new(0x1001, 0x2002, gnb, 64)).is_err());
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Clone, Copy, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct Session {

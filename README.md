@@ -43,6 +43,8 @@ TEID 0x12345678, QFI Some(9)
 QFI 9, RQI true
 ```
 
+The text under a block is what the block prints.
+
 ## Installation
 
 ```toml
@@ -77,15 +79,16 @@ oxirush-gtp-u = { git = "https://github.com/linouxis9/oxirush-gtp-u" }
 
 The minimum supported Rust version is 1.88.
 
-## Carry a tunnel between an endpoint and the test UPF
+## Carry a PDU session between a gNB and the test UPF
 
 `Endpoint` is the N3 socket of a gNB, or the S1-U socket of an eNB, for
 labs and test tools. A call gives a tunnel the TEIDs (Tunnel Endpoint
-Identifiers) and addresses that NGAP, S1AP or PFCP would negotiate.
+Identifiers), the addresses and the QoS flow that NGAP, S1AP or PFCP
+would negotiate.
 
 ```rust
 use oxirush_gtp_u::upf_sim::{Session, UpfSimulator};
-use oxirush_gtp_u::{Endpoint, RemoteTunnel, ipv4_udp, parse_ipv4_udp};
+use oxirush_gtp_u::{Endpoint, PathEvent, RemoteTunnel, ipv4_udp, parse_ipv4_udp};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> std::io::Result<()> {
@@ -94,7 +97,7 @@ async fn main() -> std::io::Result<()> {
 
     // What the control plane negotiates: the UPF receives the session's
     // uplink on TEID 0x1001, the gNB its downlink on the TEID it assigns
-    // to RAN UE 1, PDU session 5
+    // to RAN UE 1, PDU session 5, whose QoS flow is 9
     let teid = gnb.install(1, 5, RemoteTunnel::new(upf.local_addr()?, 0x1001), 9)?;
     upf.set_session(Session::new(0x1001, teid, gnb.local_addr()?, 9))?;
 
@@ -119,6 +122,17 @@ async fn main() -> std::io::Result<()> {
         downlink.packet.qfi()
     );
     assert_eq!((from, to, payload), (server, ue, b"hello".as_slice()));
+
+    // The gNB asks whether its path to the UPF is alive, then supervises it:
+    // `path_state` and `path_events` say when it goes down, and up again
+    let mut events = gnb.path_events();
+    gnb.echo(upf.local_addr()?).await?;
+    if let Ok(PathEvent::EchoResponse { packet, .. }) = events.recv().await {
+        println!("Echo Response: {:?}", packet.information_elements()?);
+    }
+    gnb.supervise(upf.local_addr()?)?;
+    let state = gnb.path_state(upf.local_addr()?).expect("supervised");
+    println!("path up: {}, unanswered: {}", state.up, state.unanswered);
     Ok(())
 }
 ```
@@ -126,13 +140,121 @@ async fn main() -> std::io::Result<()> {
 ```text
 UPF: TEID 0x1001, QFI Some(9)
 gNB: RAN UE 1 session 5, QFI Some(9): 192.0.2.1:7 to 10.45.0.2:4000
+Echo Response: [Recovery(0)]
+path up: true, unanswered: 0
 ```
 
-## Echo, path supervision and Error Indication
+## Take the tunnel from NGAP
+
+The TEIDs and the QoS flow of a tunnel come from the PDU SESSION RESOURCE
+SETUP of NGAP, which
+[oxirush-ngap](https://github.com/linouxis9/oxirush-ngap) decodes: the
+request has the UPF's end of the tunnel in its transfer, and the response
+gives the AMF the gNB's.
+
+```rust,ignore
+use oxirush_gtp_u::upf_sim::{Session, UpfSimulator};
+use oxirush_gtp_u::{Endpoint, RemoteTunnel, ipv4_udp};
+use oxirush_ngap::ngap::*;
+use oxirush_ngap::{extract_ngap_ies, tree};
+use std::net::SocketAddr;
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let (upf, mut observed) = UpfSimulator::bind("127.0.0.12:2152".parse()?).await?;
+    let (gnb, mut received) = Endpoint::bind("127.0.0.11:2152".parse()?).await?;
+
+    // The AMF: a PDU SESSION RESOURCE SETUP REQUEST, whose transfer has the
+    // UPF's end of the tunnel and the QoS flow of the session
+    let qos = tree!({
+        "qosCharacteristics": {"nonDynamic5QI": {"fiveQI": 9}},
+        "allocationAndRetentionPriority": {
+            "priorityLevelARP": 8,
+            "pre-emptionCapability": "shall-not-trigger-pre-emption",
+            "pre-emptionVulnerability": "not-pre-emptable",
+        },
+    });
+    let request = NGAP_PDU::from_tree(&tree!({"message": "PDUSessionResourceSetupRequest", "ies": [
+        {"AMF-UE-NGAP-ID": 1},
+        {"RAN-UE-NGAP-ID": 7},
+        {"PDUSessionResourceSetupListSUReq": [{
+            "pDUSessionID": 5,
+            "s-NSSAI": {"sST": 1},
+            "pDUSessionResourceSetupRequestTransfer": {"protocolIEs": [
+                {"UL-NGU-UP-TNLInformation": {
+                    "gTPTunnel": {"transportLayerAddress": "127.0.0.12", "gTP-TEID": 4097},
+                }, "criticality": "reject"},
+                {"PDUSessionType": "ipv4", "criticality": "reject"},
+                {"QosFlowSetupRequestList": [
+                    {"qosFlowIdentifier": 9, "qosFlowLevelQosParameters": qos},
+                ], "criticality": "reject"},
+            ]},
+        }]},
+    ]}))?;
+
+    // The gNB: the session, then the tunnel and the QoS flow in its transfer
+    extract_ngap_ies!(request, PDUSessionResourceSetupRequest,
+        req ran_id: u32 = RAN_UE_NGAP_ID(id),
+        req sessions: PDUSessionResourceSetupListSUReq = PDUSessionResourceSetupListSUReq(list) => list,
+    );
+    let item = &sessions.0[0];
+    let session = item.pdu_session_id.0;
+    let transfer: PDUSessionResourceSetupRequestTransfer =
+        decode_open_type(&item.pdu_session_resource_setup_request_transfer)?;
+    extract_ngap_ies!(transfer, PDUSessionResourceSetupRequestTransfer,
+        req uplink: UPTransportLayerInformation = UL_NGU_UP_TNLInformation(tunnel) => tunnel,
+        req flows: QosFlowSetupRequestList = QosFlowSetupRequestList(flows) => flows,
+    );
+    let UPTransportLayerInformation::gTPTunnel(tunnel) = uplink else {
+        unreachable!()
+    };
+    let address: [u8; 4] = tunnel.transport_layer_address.0.as_octets().try_into()?;
+    let remote = RemoteTunnel::new(SocketAddr::from((address, 2152)), u32::from_be_bytes(tunnel.gtp_teid.0));
+    let qfi = u8::try_from(flows.0[0].qos_flow_identifier.0)?;
+    let teid = gnb.install(ran_id, session, remote, qfi)?;
+    println!("RAN UE {ran_id} session {session}: to {} TEID {:#x}, QFI {qfi}", remote.address, remote.teid);
+
+    // The gNB's end of the tunnel, in the PDU SESSION RESOURCE SETUP RESPONSE
+    let response = NGAP_PDU::from_tree(&tree!({"message": "PDUSessionResourceSetupResponse", "ies": [
+        {"AMF-UE-NGAP-ID": 1},
+        {"RAN-UE-NGAP-ID": ran_id},
+        {"PDUSessionResourceSetupListSURes": [{
+            "pDUSessionID": session,
+            "pDUSessionResourceSetupResponseTransfer": {"dLQosFlowPerTNLInformation": {
+                "uPTransportLayerInformation": {
+                    "gTPTunnel": {"transportLayerAddress": "127.0.0.11", "gTP-TEID": teid},
+                },
+                "associatedQosFlowList": [{"qosFlowIdentifier": qfi}],
+            }},
+        }]},
+    ]}))?;
+    println!("PDU SESSION RESOURCE SETUP RESPONSE, {} deviations", response.check()?.len());
+
+    // The UPF has the session from its control plane, and a packet of the UE
+    // goes up the tunnel and back
+    upf.set_session(Session::new(remote.teid, teid, gnb.local_addr()?, qfi))?;
+    let packet = ipv4_udp("10.45.0.2:4000".parse()?, "192.0.2.1:7".parse()?, b"hello")?;
+    gnb.send(ran_id, session, packet).await?;
+    let uplink = observed.recv().await.expect("the UPF is running");
+    let downlink = received.recv().await.expect("the endpoint is running");
+    println!("UPF: TEID {:#x}, QFI {:?}", uplink.uplink_teid, uplink.packet.qfi());
+    println!("gNB: RAN UE {} session {}", downlink.ran_id, downlink.session_id);
+    Ok(())
+}
+```
+
+```text
+RAN UE 7 session 5: to 127.0.0.12:2152 TEID 0x1001, QFI 9
+PDU SESSION RESOURCE SETUP RESPONSE, 0 deviations
+UPF: TEID 0x1001, QFI Some(9)
+gNB: RAN UE 7 session 5
+```
+
+## Answer a peer: Echo and Error Indication
 
 ```rust
 use oxirush_gtp_u::upf_sim::UpfSimulator;
-use oxirush_gtp_u::{Endpoint, Packet, PathEvent, RemoteTunnel};
+use oxirush_gtp_u::{Endpoint, Packet, RemoteTunnel};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> std::io::Result<()> {
@@ -154,16 +276,6 @@ async fn main() -> std::io::Result<()> {
         response.information_elements()?
     );
 
-    // The gNB asks whether its path to the UPF is alive, and supervises it
-    // from now on: `path_state` and `path_events` say when it is down
-    let mut events = gnb.path_events();
-    gnb.echo(upf.local_addr()?).await?;
-    if let Ok(PathEvent::EchoResponse { from, packet, .. }) = events.recv().await {
-        let elements = packet.information_elements()?;
-        println!("Echo Response from {from}: {elements:?}");
-    }
-    gnb.supervise(upf.local_addr()?)?;
-
     // The UPF has no session with TEID 0x1001. It answers the G-PDU with an
     // Error Indication, which the receiver gets with its tunnel
     gnb.install(1, 5, RemoteTunnel::new(upf.local_addr()?, 0x1001), 9)?;
@@ -182,7 +294,6 @@ async fn main() -> std::io::Result<()> {
 
 ```text
 Echo Response, sequence number Some(7), [Recovery(0)]
-Echo Response from 127.0.0.10:2152: [Recovery(0)]
 Error Indication for RAN UE 1 session 5: [TeidDataI(0x00001001), GtpUPeerAddress(127.0.0.10)]
 ```
 
@@ -236,55 +347,9 @@ type is kept as its octets, `Other`. An endpoint delivers a message with
 the headers that have a variant. It refuses one with a header that is kept
 as octets and that a receiver must understand, as the specification
 requires, and answers a G-PDU or an Echo Request that has one with the
-list of the types that it knows.
-
-## The headers of a handover
-
-```rust
-use oxirush_gtp_u::{ExtensionHeader, Packet, PduSessionContainer};
-
-fn main() -> Result<(), oxirush_gtp_u::Error> {
-    // A downlink packet that the source gNB forwards to the target, with
-    // the PDCP sequence number that it had given it
-    let mut forwarded = Packet::downlink(0x2001, 9, b"an IP packet".to_vec());
-    let number = ExtensionHeader::PdcpPduNumber(0x0abc);
-    forwarded.extension_headers.push(number);
-    println!("{:02x?}", &forwarded.encode()?[8..20]);
-
-    // A sequence number of 18 bits has the long header
-    let mut long = Packet::downlink(0x2001, 9, b"an IP packet".to_vec());
-    long.extension_headers
-        .push(ExtensionHeader::LongPdcpPduNumber {
-            number: 0x2_abcd,
-            legacy_type: false,
-        });
-    println!("{:02x?}", &long.encode()?[8..24]);
-
-    // The End Marker of a forwarding tunnel between 5GS and EPS has the PDU
-    // Session Container
-    let container = PduSessionContainer::downlink(9);
-    let marker = Packet::end_marker(0x2001).with_pdu_session_container(container);
-    println!("{:02x?}", marker.encode()?);
-
-    // The target reads the headers of what it receives
-    let decoded = Packet::decode(&forwarded.encode()?)?;
-    for header in &decoded.extension_headers {
-        match header {
-            ExtensionHeader::PdcpPduNumber(number) => println!("PDCP PDU Number {number:#x}"),
-            other => println!("{}", other.kind()),
-        }
-    }
-    Ok(())
-}
-```
-
-```text
-[00, 00, 00, 85, 01, 00, 09, c0, 01, 0a, bc, 00]
-[00, 00, 00, 85, 01, 00, 09, 03, 02, 02, ab, cd, 00, 00, 00, 00]
-[34, fe, 00, 08, 00, 00, 20, 01, 00, 00, 00, 85, 01, 00, 09, 00]
-PDU Session Container
-PDCP PDU Number 0xabc
-```
+list of the types that it knows. `examples/handover.rs` writes the headers
+of a handover: the PDCP PDU Number of a forwarded packet, the long one, and
+the End Marker of a forwarding tunnel.
 
 ## Give a tunnel a TUN
 
@@ -488,7 +553,11 @@ cargo test --test wireshark -- --ignored
 
 Property tests and a `cargo fuzz` target check that decoding never panics
 and that what decodes encodes to a message that decodes to the same value.
-CI rebuilds the eBPF object from its source and compares.
+CI rebuilds the eBPF object from its source and compares. The Rust blocks of
+this page are checked with what they print
+([`tests/readme.rs`](tests/readme.rs)). The blocks that use other crates of
+the family run in the package of [`family/`](family/), which takes those
+crates at the revisions that its manifest names.
 
 [The documentation](https://docs.rs/oxirush-gtp-u) has the terms, what the
 codec covers, and the reference of the endpoint, the test UPF, the TUN

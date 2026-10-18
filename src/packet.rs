@@ -96,6 +96,18 @@ impl<P: AsRef<[u8]>> fmt::Debug for Packet<P> {
 
 impl<P: AsRef<[u8]>> Packet<P> {
     /// A message without optional header fields.
+    ///
+    /// ```
+    /// use oxirush_gtp_u::{MessageType, Packet};
+    ///
+    /// // A G-PDU of the tunnel 0x1001: the flags of version 1, its type, the
+    /// // length of what follows the TEID, the TEID, then the IP packet
+    /// let packet = Packet::new(MessageType::G_PDU, 0x1001, b"an IP packet".as_slice());
+    /// let octets = packet.encode()?;
+    /// assert_eq!(octets[..8], [0x30, 0xff, 0x00, 0x0c, 0x00, 0x00, 0x10, 0x01]);
+    /// assert_eq!(&octets[8..], b"an IP packet");
+    /// # Ok::<(), oxirush_gtp_u::Error>(())
+    /// ```
     pub fn new(message_type: MessageType, teid: u32, payload: P) -> Self {
         Self {
             message_type,
@@ -108,18 +120,50 @@ impl<P: AsRef<[u8]>> Packet<P> {
     }
 
     /// A G-PDU without extension headers, as on S1-U.
+    ///
+    /// ```
+    /// use oxirush_gtp_u::Packet;
+    ///
+    /// // The header of eight octets, with the TEID, then the IP packet
+    /// let bytes = Packet::g_pdu(0x1234_5678, b"an IP packet".as_slice()).encode()?;
+    /// assert_eq!(bytes[..8], [0x30, 0xff, 0x00, 0x0c, 0x12, 0x34, 0x56, 0x78]);
+    /// # Ok::<(), oxirush_gtp_u::Error>(())
+    /// ```
     pub fn g_pdu(teid: u32, payload: P) -> Self {
         Self::new(MessageType::G_PDU, teid, payload)
     }
 
     /// An uplink G-PDU on N3 or N9: its PDU Session Container holds UL PDU
     /// Session Information of QoS flow `qfi`.
+    ///
+    /// ```
+    /// use oxirush_gtp_u::Packet;
+    ///
+    /// // The header, the sequence number and the next extension header type, then
+    /// // the PDU Session Container of QFI 9 and the IP packet
+    /// let uplink = Packet::uplink(0x1234_5678, 9, b"an IP packet".as_slice());
+    /// let bytes = uplink.encode()?;
+    /// assert_eq!(bytes[..8], [0x34, 0xff, 0x00, 0x14, 0x12, 0x34, 0x56, 0x78]);
+    /// assert_eq!(bytes[8..16], [0x00, 0x00, 0x00, 0x85, 0x01, 0x10, 0x09, 0x00]);
+    /// assert_eq!(uplink.qfi(), Some(9));
+    /// # Ok::<(), oxirush_gtp_u::Error>(())
+    /// ```
     pub fn uplink(teid: u32, qfi: u8, payload: P) -> Self {
         Self::g_pdu(teid, payload).with_pdu_session_container(PduSessionContainer::uplink(qfi))
     }
 
     /// A downlink G-PDU on N3 or N9: its PDU Session Container holds DL PDU
     /// Session Information of QoS flow `qfi`.
+    ///
+    /// ```
+    /// use oxirush_gtp_u::{Packet, PduSessionContainer};
+    ///
+    /// let downlink = Packet::decode(&Packet::downlink(0x2001, 9, vec![0x45]).encode()?)?;
+    /// let container = downlink.pdu_session_container();
+    /// assert!(matches!(container, Some(PduSessionContainer::Downlink(_))));
+    /// assert_eq!(downlink.qfi(), Some(9));
+    /// # Ok::<(), oxirush_gtp_u::Error>(())
+    /// ```
     pub fn downlink(teid: u32, qfi: u8, payload: P) -> Self {
         Self::g_pdu(teid, payload).with_pdu_session_container(PduSessionContainer::downlink(qfi))
     }
@@ -162,6 +206,18 @@ impl<P: AsRef<[u8]>> Packet<P> {
     /// one, as [`PduSessionContainer::set_qfi`] does: `None`, and nothing
     /// changes, if the message has no container with a QFI. The encoder
     /// refuses a QFI above 63.
+    ///
+    /// ```
+    /// use oxirush_gtp_u::Packet;
+    ///
+    /// // A G-PDU forwarded on another QoS flow
+    /// let mut packet = Packet::uplink(0x1234_5678, 9, vec![0x45]);
+    /// assert_eq!(packet.set_qfi(5), Some(9));
+    /// assert_eq!(packet.qfi(), Some(5));
+    ///
+    /// // A G-PDU of S1-U has no container, and no QFI
+    /// assert_eq!(Packet::g_pdu(0x1234_5678, vec![0x45]).set_qfi(5), None);
+    /// ```
     pub fn set_qfi(&mut self, qfi: u8) -> Option<u8> {
         self.pdu_session_container_mut()?.set_qfi(qfi)
     }
@@ -169,6 +225,16 @@ impl<P: AsRef<[u8]>> Packet<P> {
 
 impl Packet {
     /// An Echo Request. Echo messages always carry a sequence number.
+    ///
+    /// ```
+    /// use oxirush_gtp_u::{MessageType, Packet};
+    ///
+    /// // TEID 0, the S flag and the sequence number, and no information element
+    /// let bytes = Packet::echo_request(7).encode()?;
+    /// assert_eq!(bytes, [0x32, 0x01, 0x00, 0x04, 0, 0, 0, 0, 0x00, 0x07, 0, 0]);
+    /// assert_eq!(Packet::decode(&bytes)?.message_type, MessageType::ECHO_REQUEST);
+    /// # Ok::<(), oxirush_gtp_u::Error>(())
+    /// ```
     pub fn echo_request(sequence: u16) -> Self {
         Self::signalling(MessageType::ECHO_REQUEST, sequence, &[])
     }
@@ -217,6 +283,15 @@ impl Packet {
 
     /// An End Marker, the last message on the tunnel with TEID `teid` before
     /// its downlink moves to another path.
+    ///
+    /// ```
+    /// use oxirush_gtp_u::{MessageType, Packet};
+    ///
+    /// let bytes = Packet::end_marker(0x2001).encode()?;
+    /// assert_eq!(bytes, [0x30, 0xfe, 0x00, 0x00, 0x00, 0x00, 0x20, 0x01]);
+    /// assert_eq!(Packet::decode(&bytes)?.message_type, MessageType::END_MARKER);
+    /// # Ok::<(), oxirush_gtp_u::Error>(())
+    /// ```
     pub fn end_marker(teid: u32) -> Self {
         Self::new(MessageType::END_MARKER, teid, Vec::new())
     }
@@ -251,6 +326,19 @@ impl Packet {
     }
 
     /// Decode one GTP-U message, the whole payload of a UDP datagram.
+    ///
+    /// ```
+    /// use oxirush_gtp_u::{Error, Packet};
+    ///
+    /// let bytes = Packet::uplink(0x1234_5678, 9, b"an IP packet".to_vec()).encode()?;
+    /// let packet = Packet::decode(&bytes)?;
+    /// assert_eq!((packet.teid, packet.qfi()), (0x1234_5678, Some(9)));
+    /// assert_eq!(packet.payload, b"an IP packet");
+    ///
+    /// // A datagram cut short in its header
+    /// assert!(Packet::decode(&bytes[..6]).is_err());
+    /// # Ok::<(), Error>(())
+    /// ```
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
         decode(bytes, <[u8]>::to_vec)
     }
@@ -266,6 +354,16 @@ impl Packet {
     /// header or a PDU type that is kept as received allocates its octets.
     /// A chain of more than [`ExtensionHeaders::MAX`] headers is refused
     /// where it exceeds it.
+    ///
+    /// ```
+    /// use oxirush_gtp_u::Packet;
+    ///
+    /// // The payload is a slice of the datagram
+    /// let bytes = Packet::uplink(0x1234_5678, 9, b"an IP packet".as_slice()).encode()?;
+    /// let packet = Packet::decode_borrowed(&bytes)?;
+    /// assert_eq!(packet.payload, &bytes[16..]);
+    /// # Ok::<(), oxirush_gtp_u::Error>(())
+    /// ```
     pub fn decode_borrowed(bytes: &[u8]) -> Result<Packet<&[u8]>, Error> {
         decode(bytes, |payload| payload)
     }
@@ -386,6 +484,16 @@ impl<P: AsRef<[u8]>> Packet<P> {
     /// Decode the payload as information elements, the content of every
     /// message type except G-PDU, for which it is
     /// [`Error::NoInformationElements`].
+    ///
+    /// ```
+    /// use oxirush_gtp_u::{InformationElement, Packet};
+    ///
+    /// // An Echo Response has its Recovery restart counter
+    /// let response = Packet::echo_response(7);
+    /// assert_eq!(response.information_elements()?, [InformationElement::Recovery(0)]);
+    /// assert!(Packet::g_pdu(1, vec![0x45]).information_elements().is_err());
+    /// # Ok::<(), oxirush_gtp_u::Error>(())
+    /// ```
     pub fn information_elements(&self) -> Result<Vec<InformationElement>, Error> {
         if self.message_type == MessageType::G_PDU {
             return Err(Error::NoInformationElements(self.message_type));
@@ -437,6 +545,19 @@ impl<P: AsRef<[u8]>> Packet<P> {
 
     /// Append the message to a reusable buffer. On validation error its contents
     /// and capacity remain unchanged. Call `clear()` first to replace old output.
+    ///
+    /// ```
+    /// use oxirush_gtp_u::Packet;
+    ///
+    /// // One buffer for each message of a tunnel
+    /// let mut buffer = Vec::with_capacity(1500);
+    /// for payload in [b"one".as_slice(), b"two"] {
+    ///     buffer.clear();
+    ///     Packet::uplink(0x1234_5678, 9, payload).encode_into(&mut buffer)?;
+    ///     assert_eq!(buffer.len(), 16 + 3);
+    /// }
+    /// # Ok::<(), oxirush_gtp_u::Error>(())
+    /// ```
     pub fn encode_into(&self, out: &mut Vec<u8>) -> Result<(), Error> {
         let payload = self.payload.as_ref();
         let length = self.encoded_len_for_payload(payload.len())?;

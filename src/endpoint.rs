@@ -49,6 +49,14 @@ pub struct RemoteTunnel {
 
 impl RemoteTunnel {
     /// The tunnel that the peer at `address` receives on `teid`.
+    ///
+    /// ```
+    /// use oxirush_gtp_u::RemoteTunnel;
+    ///
+    /// // The UPF's end of a PDU session, as NGAP gives it to the gNB
+    /// let upf = RemoteTunnel::new("192.0.2.8:2152".parse().unwrap(), 0x1001);
+    /// assert_eq!(format!("{upf:?}"), "RemoteTunnel { address: 192.0.2.8:2152, teid: 0x00001001 }");
+    /// ```
     pub fn new(address: SocketAddr, teid: u32) -> Self {
         Self { address, teid }
     }
@@ -386,6 +394,25 @@ impl Endpoint {
     /// round trip from the last time that it was sent. The response also
     /// comes on [`path_events`](Self::path_events).
     ///
+    /// ```
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() -> std::io::Result<()> {
+    /// use oxirush_gtp_u::upf_sim::UpfSimulator;
+    /// use oxirush_gtp_u::{Endpoint, PathEvent};
+    ///
+    /// let (upf, _observed) = UpfSimulator::bind("127.0.0.1:0".parse().unwrap()).await?;
+    /// let (gnb, _received) = Endpoint::bind("127.0.0.1:0".parse().unwrap()).await?;
+    ///
+    /// // Whether the UPF answers, and the response among the events of the paths
+    /// let mut events = gnb.path_events();
+    /// let round_trip = gnb.echo(upf.local_addr()?).await?;
+    /// let Ok(PathEvent::EchoResponse { from, .. }) = events.recv().await else { unreachable!() };
+    /// assert_eq!(from, upf.local_addr()?);
+    /// assert!(round_trip < std::time::Duration::from_secs(3));
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
     /// # Errors
     ///
     /// [`TimedOut`](io::ErrorKind::TimedOut) if no response came,
@@ -414,6 +441,27 @@ impl Endpoint {
     /// [`end_supervision`](Self::end_supervision), the endpoint's
     /// [`shutdown`](Self::shutdown) or its last clone. Supervising it again
     /// changes nothing.
+    ///
+    /// ```
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() -> std::io::Result<()> {
+    /// use oxirush_gtp_u::Endpoint;
+    /// use oxirush_gtp_u::upf_sim::UpfSimulator;
+    ///
+    /// let (upf, _observed) = UpfSimulator::bind("127.0.0.1:0".parse().unwrap()).await?;
+    /// let (gnb, _received) = Endpoint::bind("127.0.0.1:0".parse().unwrap()).await?;
+    ///
+    /// // The path to the UPF, supervised: up until Echo Requests go unanswered
+    /// gnb.supervise(upf.local_addr()?)?;
+    /// let state = gnb.path_state(upf.local_addr()?).unwrap();
+    /// assert!(state.up);
+    /// assert_eq!(state.unanswered, 0);
+    ///
+    /// // A path that is not supervised has no state
+    /// assert!(gnb.path_state("127.0.0.1:9".parse().unwrap()).is_none());
+    /// # Ok(())
+    /// # }
+    /// ```
     ///
     /// # Errors
     ///
@@ -573,6 +621,28 @@ impl Endpoint {
     /// local TEID. For an existing tunnel this updates the remote end and
     /// QFI and keeps the TEID.
     ///
+    /// ```
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() -> std::io::Result<()> {
+    /// use oxirush_gtp_u::{Endpoint, RemoteTunnel};
+    ///
+    /// let (gnb, _received) = Endpoint::bind("127.0.0.1:0".parse().unwrap()).await?;
+    /// let upf = "127.0.0.1:2152".parse().unwrap();
+    ///
+    /// // RAN UE 1, PDU session 5: the uplink goes to TEID 0x1001 of the UPF, in QoS
+    /// // flow 9, and the downlink comes on the TEID that the endpoint chose
+    /// let teid = gnb.install(1, 5, RemoteTunnel::new(upf, 0x1001), 9)?;
+    ///
+    /// // The UPF moves the session to another TEID: the local one stays
+    /// assert_eq!(gnb.install(1, 5, RemoteTunnel::new(upf, 0x2002), 9)?, teid);
+    ///
+    /// // A QFI has six bits
+    /// let refused = gnb.install(1, 5, RemoteTunnel::new(upf, 0x2002), 64).unwrap_err();
+    /// assert_eq!(refused.kind(), std::io::ErrorKind::InvalidInput);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
     /// # Errors
     ///
     /// [`InvalidInput`](io::ErrorKind::InvalidInput) if `qfi` is above 63:
@@ -704,6 +774,30 @@ impl Endpoint {
     }
 
     /// Send an owned or borrowed IP packet as an uplink G-PDU in a tunnel.
+    ///
+    /// ```
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() -> std::io::Result<()> {
+    /// use oxirush_gtp_u::upf_sim::{Session, UpfSimulator};
+    /// use oxirush_gtp_u::{Endpoint, RemoteTunnel, ipv4_udp};
+    ///
+    /// let (upf, mut observed) = UpfSimulator::bind("127.0.0.1:0".parse().unwrap()).await?;
+    /// let (gnb, _received) = Endpoint::bind("127.0.0.1:0".parse().unwrap()).await?;
+    /// let teid = gnb.install(1, 5, RemoteTunnel::new(upf.local_addr()?, 0x1001), 9)?;
+    /// upf.set_session(Session::new(0x1001, teid, gnb.local_addr()?, 9))?;
+    ///
+    /// // An IP packet of the UE in the tunnel of RAN UE 1, PDU session 5
+    /// let (ue, server) = ("10.45.0.2:4000".parse().unwrap(), "192.0.2.1:7".parse().unwrap());
+    /// gnb.send(1, 5, ipv4_udp(ue, server, b"hello")?).await?;
+    /// let uplink = observed.recv().await.unwrap();
+    /// assert_eq!((uplink.uplink_teid, uplink.packet.qfi()), (0x1001, Some(9)));
+    ///
+    /// // A session without a tunnel
+    /// let missing = gnb.send(2, 1, ipv4_udp(ue, server, b"hello")?).await.unwrap_err();
+    /// assert_eq!(missing.kind(), std::io::ErrorKind::NotFound);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn send<P: AsRef<[u8]>>(
         &self,
         ran_id: u32,

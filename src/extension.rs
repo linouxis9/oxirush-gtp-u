@@ -51,6 +51,22 @@ impl EncodeBuffer for EncodedLength {
 ///
 /// `Debug` prints the octets of a header that is kept as received in
 /// hexadecimal, after their number.
+///
+/// ```
+/// use oxirush_gtp_u::{ExtensionHeader, ExtensionHeaderType, Packet};
+///
+/// // The container of an uplink G-PDU, then a header of a type that the crate keeps as octets
+/// let mut packet = Packet::uplink(0x1234_5678, 9, vec![0x45]);
+/// packet.extension_headers.push(ExtensionHeader::Other {
+///     kind: ExtensionHeaderType(0x21),
+///     content: vec![7, 0],
+/// });
+/// let decoded = Packet::decode(&packet.encode()?)?;
+/// let kinds: Vec<_> = decoded.extension_headers.iter().map(|header| header.kind()).collect();
+/// assert_eq!(kinds, [ExtensionHeaderType::PDU_SESSION_CONTAINER, ExtensionHeaderType(0x21)]);
+/// assert!(!decoded.extension_headers[1].comprehension_required());
+/// # Ok::<(), oxirush_gtp_u::Error>(())
+/// ```
 #[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ExtensionHeader {
@@ -404,6 +420,22 @@ impl fmt::Debug for ExtensionHeader {
 }
 
 /// The content of a PDU Session Container (TS 38.415 §5.5.2).
+///
+/// ```
+/// use oxirush_gtp_u::{DownlinkPduSessionInformation, Packet, PduSessionContainer};
+///
+/// // Downlink information with more than a QFI: the RQI of reflective QoS
+/// let mut information = DownlinkPduSessionInformation::new(9);
+/// information.rqi = true;
+/// let packet = Packet::g_pdu(0x2001, vec![0x45])
+///     .with_pdu_session_container(PduSessionContainer::Downlink(information));
+/// let decoded = Packet::decode(&packet.encode()?)?;
+/// let Some(PduSessionContainer::Downlink(read)) = decoded.pdu_session_container() else {
+///     unreachable!()
+/// };
+/// assert_eq!((read.qfi, read.rqi), (9, true));
+/// # Ok::<(), oxirush_gtp_u::Error>(())
+/// ```
 #[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PduSessionContainer {

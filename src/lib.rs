@@ -38,10 +38,28 @@
 //! QFI 9, RQI true
 //! ```
 //!
+//! # Tasks
+//!
 //! The [README](https://github.com/linouxis9/oxirush-gtp-u#readme) has a
-//! program for each task: a tunnel between an endpoint and the test UPF, echo,
-//! path supervision and Error Indication, the extension headers, a TUN, the
-//! fast path.
+//! program for each, with what it prints.
+//!
+//! | Task | Items |
+//! |------|-------|
+//! | Encode and decode a G-PDU | [`Packet`], [`Packet::uplink`], [`Packet::decode_borrowed`], [`PduSessionContainer`] |
+//! | Carry a PDU session between a gNB and the test UPF | [`Endpoint`], [`Endpoint::install`], [`Endpoint::send`], [`upf_sim::UpfSimulator`], [`upf_sim::Session`], [`ipv4_udp`] |
+//! | Supervise the path to a peer | [`Endpoint::echo`], [`Endpoint::supervise`], [`Endpoint::path_state`], [`Endpoint::path_events`], [`PathEvent`] |
+//! | Answer a peer: Echo and Error Indication | [`Packet::echo_request`], [`InformationElement`] |
+//! | Read and write extension headers | [`ExtensionHeader`], [`ExtensionHeaders`], [`ExtensionHeaderType`] |
+//! | The headers of a handover | [`ExtensionHeader::PdcpPduNumber`], [`Packet::end_marker`] |
+//! | Give a tunnel a TUN, on Linux | [`tun::TunConfig`], [`tun::Routing`], [`Endpoint::attach_tun`] |
+//! | Carry the tunnel in the kernel, on Linux | [`ebpf::FastPath`], [`Endpoint::set_fast_path`] |
+//!
+// Without its feature an item of the tasks is plain text: the links are checked in the
+// build of every feature on Linux, which docs.rs makes.
+#![cfg_attr(
+    not(all(target_os = "linux", feature = "ebpf")),
+    allow(rustdoc::broken_intra_doc_links)
+)]
 //!
 //! It is made for simulators and test tools. It has no control plane: tunnels
 //! are set up by calls, with the identifiers and addresses that NGAP, S1AP or
@@ -52,10 +70,10 @@
 //! | Part | Feature | Needs |
 //! | ---- | ------- | ----- |
 //! | The codec ([`Packet`], [`ExtensionHeader`], [`InformationElement`]) and the IPv4 helpers | none | no dependency |
-//! | `Endpoint`, `upf_sim` | `endpoint`, the default | a Tokio runtime |
-//! | `tun`, and `attach_tun` of `Endpoint` and `UpfSimulator` | `tun` | Linux, `CAP_NET_ADMIN` |
-//! | `ebpf` | `ebpf` | Linux 6.6, `CAP_BPF` and `CAP_NET_ADMIN` |
-//! | `Serialize` and `Deserialize` for `RemoteTunnel` | `serde` | |
+//! | [`Endpoint`], [`upf_sim`] | `endpoint`, the default | a Tokio runtime |
+//! | [`tun`], and `attach_tun` of [`Endpoint`] and [`UpfSimulator`](upf_sim::UpfSimulator) | `tun` | Linux, `CAP_NET_ADMIN` |
+//! | [`ebpf`] | `ebpf` | Linux 6.6, `CAP_BPF` and `CAP_NET_ADMIN` |
+//! | `Serialize` and `Deserialize` for [`RemoteTunnel`] | `serde` | |
 //! | The `oxirush-upf-sim` program | `cli` | |
 //!
 //! `ebpf` brings `tun`, and `tun` brings `endpoint`. The `tun` and `ebpf`
@@ -65,7 +83,7 @@
 //! x86, and on a big-endian one, such as s390x, as their object is for
 //! little-endian eBPF. It runs on 64-bit x86, ARM, AArch64, RISC-V 64,
 //! LoongArch 64, and little-endian MIPS and PowerPC 64. The reference of each
-//! part is with it: `Endpoint`, and the modules `upf_sim`, `tun` and `ebpf`.
+//! part is with it: [`Endpoint`], and the modules [`upf_sim`], [`tun`] and [`ebpf`].
 //!
 //! # Codec
 //!
@@ -205,6 +223,17 @@
 //! examples/                  the programs of the README
 //! benches/                   the benchmarks, a package of their own
 //! ```
+//!
+//! # The OxiRush family
+//!
+//! - [oxirush-utils](https://docs.rs/oxirush-utils): the 3GPP identities, and the JSON tree with its paths that the others share.
+//! - [oxirush-aper](https://docs.rs/oxirush-aper): aligned PER, the runtime of the NGAP and S1AP codecs.
+//! - [oxirush-nas](https://docs.rs/oxirush-nas): the NAS messages of 5GS and EPS.
+//! - [oxirush-security](https://docs.rs/oxirush-security): NAS security, AKA and the derivation of keys.
+//! - [oxirush-ngap](https://docs.rs/oxirush-ngap): NGAP, between a gNB and an AMF.
+//! - [oxirush-s1ap](https://docs.rs/oxirush-s1ap): S1AP, between an eNB and an MME.
+//! - [oxirush-gtp-u](https://docs.rs/oxirush-gtp-u): GTP-U tunnels, with a test UPF.
+//! - [oxirush-sctp](https://docs.rs/oxirush-sctp): SCTP sockets, which carry NGAP and S1AP.
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![deny(unsafe_code)]
 #![warn(missing_docs)]

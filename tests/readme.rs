@@ -12,9 +12,10 @@
 //! of `src/lib.rs`. A block that is run opens with ` ```rust `, and a block
 //! that defines `main` is run through it. One that opens with
 //! ` ```rust,no_run ` needs privileges: it is compared with its example and not
-//! run. The output of a block is the `text` blocks that follow it with
-//! nothing but blank lines between them. A block that shows no output
-//! prints none.
+//! run. One that opens with ` ```rust,ignore ` uses other crates of the
+//! family: the package of `family/` runs it, and these tests skip it. The
+//! output of a block is the `text` blocks that follow it with nothing but
+//! blank lines between them. A block that shows no output prints none.
 //!
 //! After a change of the code of a Rust block of a page, write the file
 //! again and run the tests once more:
@@ -48,6 +49,9 @@ const EXAMPLES: [&str; 7] = [
     include_str!("../examples/tun.rs"),
     include_str!("../examples/fast_path.rs"),
 ];
+/// The rest of the fence of a block that uses other crates of the family:
+/// this test skips it, as the documentation tests do, and `family/` runs it.
+const FAMILY: &str = ",ignore";
 const BLOCKS: &str = include_str!("readme/blocks.rs");
 const BLOCKS_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/readme/blocks.rs");
 
@@ -234,9 +238,11 @@ fn the_rust_blocks_of_the_readme_are_parts_of_the_examples() {
         .split("\n```")
         .filter_map(|block| block.strip_prefix("rust"))
         .filter_map(|block| block.split_once('\n'))
+        // A block of `family/` uses other crates, and is in no example
+        .filter(|(fence, _)| *fence != FAMILY)
         .map(|(_, code)| code)
         .collect();
-    assert_eq!(blocks.len(), 7);
+    assert_eq!(blocks.len(), 6);
     for code in blocks {
         assert!(
             examples.iter().any(|example| example.contains(code)),

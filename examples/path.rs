@@ -1,13 +1,12 @@
 //! What a GTP-U node owes its peer: the answer to an Echo Request, and an
-//! Error Indication for a G-PDU of a tunnel that it does not have; and how
-//! it supervises its path to a peer.
+//! Error Indication for a G-PDU of a tunnel that it does not have.
 //!
 //! ```sh
 //! cargo run --example path
 //! ```
 
 use oxirush_gtp_u::upf_sim::UpfSimulator;
-use oxirush_gtp_u::{Endpoint, Packet, PathEvent, RemoteTunnel};
+use oxirush_gtp_u::{Endpoint, Packet, RemoteTunnel};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> std::io::Result<()> {
@@ -28,16 +27,6 @@ async fn main() -> std::io::Result<()> {
         response.sequence,
         response.information_elements()?
     );
-
-    // The gNB asks whether its path to the UPF is alive, and supervises it
-    // from now on: `path_state` and `path_events` say when it is down
-    let mut events = gnb.path_events();
-    gnb.echo(upf.local_addr()?).await?;
-    if let Ok(PathEvent::EchoResponse { from, packet, .. }) = events.recv().await {
-        let elements = packet.information_elements()?;
-        println!("Echo Response from {from}: {elements:?}");
-    }
-    gnb.supervise(upf.local_addr()?)?;
 
     // The UPF has no session with TEID 0x1001. It answers the G-PDU with an
     // Error Indication, which the receiver gets with its tunnel

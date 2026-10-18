@@ -10,6 +10,17 @@ const UDP_HEADER_LEN: usize = 8;
 const UDP: u8 = 17;
 
 /// Build an IPv4 UDP packet from `source` to `destination`.
+///
+/// ```
+/// use oxirush_gtp_u::{ipv4_udp, parse_ipv4_udp};
+///
+/// // A packet of a UE, and what a receiver reads of it
+/// let (ue, server) = ("10.45.0.2:4000".parse().unwrap(), "192.0.2.1:7".parse().unwrap());
+/// let packet = ipv4_udp(ue, server, b"hello")?;
+/// assert_eq!(packet.len(), 20 + 8 + 5);
+/// assert_eq!(parse_ipv4_udp(&packet)?, (ue, server, b"hello".as_slice()));
+/// # Ok::<(), oxirush_gtp_u::Error>(())
+/// ```
 pub fn ipv4_udp(
     source: SocketAddrV4,
     destination: SocketAddrV4,
@@ -33,6 +44,19 @@ pub fn ipv4_udp(
 
 /// Parse an IPv4 UDP packet into its source, destination and payload. The
 /// IPv4 header checksum, and the UDP checksum when not 0, must be valid.
+///
+/// ```
+/// use oxirush_gtp_u::{ipv4_udp, parse_ipv4_udp};
+///
+/// let (ue, server) = ("10.45.0.2:4000".parse().unwrap(), "192.0.2.1:7".parse().unwrap());
+/// let mut packet = ipv4_udp(ue, server, b"hello")?;
+/// assert_eq!(parse_ipv4_udp(&packet)?.2, b"hello");
+///
+/// // An octet changed in transit fails the UDP checksum
+/// packet[30] ^= 1;
+/// assert!(parse_ipv4_udp(&packet).is_err());
+/// # Ok::<(), oxirush_gtp_u::Error>(())
+/// ```
 pub fn parse_ipv4_udp(bytes: &[u8]) -> Result<(SocketAddrV4, SocketAddrV4, &[u8]), Error> {
     let packet = parse(bytes, UDP)?;
     let udp = packet.payload;

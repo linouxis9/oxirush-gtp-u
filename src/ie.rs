@@ -12,6 +12,19 @@ use crate::{Cause, Error, ExtensionHeaderType, InformationElementType, Part};
 ///
 /// `Debug` prints a TEID and the octets of a value that is kept as received
 /// in hexadecimal.
+///
+/// ```
+/// use oxirush_gtp_u::InformationElement;
+///
+/// // What an Error Indication says of the G-PDU that triggered it
+/// let elements = [
+///     InformationElement::TeidDataI(0x1001),
+///     InformationElement::GtpUPeerAddress("127.0.0.10".parse().unwrap()),
+/// ];
+/// let octets = InformationElement::encode_all(&elements)?;
+/// assert_eq!(InformationElement::decode_all(&octets)?, elements);
+/// # Ok::<(), oxirush_gtp_u::Error>(())
+/// ```
 #[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum InformationElement {

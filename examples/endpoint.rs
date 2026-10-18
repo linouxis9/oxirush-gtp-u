@@ -1,11 +1,12 @@
-//! A gNB's endpoint and the test UPF exchange a packet in each direction.
+//! A gNB's endpoint and the test UPF: the tunnel of a PDU session, a G-PDU
+//! of its QoS flow in each direction, and the supervision of the path.
 //!
 //! ```sh
 //! cargo run --example endpoint
 //! ```
 
 use oxirush_gtp_u::upf_sim::{Session, UpfSimulator};
-use oxirush_gtp_u::{Endpoint, RemoteTunnel, ipv4_udp, parse_ipv4_udp};
+use oxirush_gtp_u::{Endpoint, PathEvent, RemoteTunnel, ipv4_udp, parse_ipv4_udp};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> std::io::Result<()> {
@@ -14,7 +15,7 @@ async fn main() -> std::io::Result<()> {
 
     // What the control plane negotiates: the UPF receives the session's
     // uplink on TEID 0x1001, the gNB its downlink on the TEID it assigns
-    // to RAN UE 1, PDU session 5
+    // to RAN UE 1, PDU session 5, whose QoS flow is 9
     let teid = gnb.install(1, 5, RemoteTunnel::new(upf.local_addr()?, 0x1001), 9)?;
     upf.set_session(Session::new(0x1001, teid, gnb.local_addr()?, 9))?;
 
@@ -39,5 +40,16 @@ async fn main() -> std::io::Result<()> {
         downlink.packet.qfi()
     );
     assert_eq!((from, to, payload), (server, ue, b"hello".as_slice()));
+
+    // The gNB asks whether its path to the UPF is alive, then supervises it:
+    // `path_state` and `path_events` say when it goes down, and up again
+    let mut events = gnb.path_events();
+    gnb.echo(upf.local_addr()?).await?;
+    if let Ok(PathEvent::EchoResponse { packet, .. }) = events.recv().await {
+        println!("Echo Response: {:?}", packet.information_elements()?);
+    }
+    gnb.supervise(upf.local_addr()?)?;
+    let state = gnb.path_state(upf.local_addr()?).expect("supervised");
+    println!("path up: {}, unanswered: {}", state.up, state.unanswered);
     Ok(())
 }

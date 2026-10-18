@@ -36,7 +36,6 @@ pub const BLOCKS: &[fn()] = &[
     block_3,
     block_4,
     block_5,
-    block_6,
 ];
 
 /// The Rust block 1 of README.md.
@@ -72,7 +71,7 @@ fn block_1() {
 /// The Rust block 2 of README.md.
 fn block_2() {
     use oxirush_gtp_u::upf_sim::{Session, UpfSimulator};
-    use oxirush_gtp_u::{Endpoint, RemoteTunnel, ipv4_udp, parse_ipv4_udp};
+    use oxirush_gtp_u::{Endpoint, PathEvent, RemoteTunnel, ipv4_udp, parse_ipv4_udp};
 
     #[tokio::main(flavor = "current_thread")]
     async fn main() -> std::io::Result<()> {
@@ -81,7 +80,7 @@ fn block_2() {
 
         // What the control plane negotiates: the UPF receives the session's
         // uplink on TEID 0x1001, the gNB its downlink on the TEID it assigns
-        // to RAN UE 1, PDU session 5
+        // to RAN UE 1, PDU session 5, whose QoS flow is 9
         let teid = gnb.install(1, 5, RemoteTunnel::new(upf.local_addr()?, 0x1001), 9)?;
         upf.set_session(Session::new(0x1001, teid, gnb.local_addr()?, 9))?;
 
@@ -106,6 +105,17 @@ fn block_2() {
             downlink.packet.qfi()
         );
         assert_eq!((from, to, payload), (server, ue, b"hello".as_slice()));
+
+        // The gNB asks whether its path to the UPF is alive, then supervises it:
+        // `path_state` and `path_events` say when it goes down, and up again
+        let mut events = gnb.path_events();
+        gnb.echo(upf.local_addr()?).await?;
+        if let Ok(PathEvent::EchoResponse { packet, .. }) = events.recv().await {
+            println!("Echo Response: {:?}", packet.information_elements()?);
+        }
+        gnb.supervise(upf.local_addr()?)?;
+        let state = gnb.path_state(upf.local_addr()?).expect("supervised");
+        println!("path up: {}, unanswered: {}", state.up, state.unanswered);
         Ok(())
     }
     main().unwrap();
@@ -114,7 +124,7 @@ fn block_2() {
 /// The Rust block 3 of README.md.
 fn block_3() {
     use oxirush_gtp_u::upf_sim::UpfSimulator;
-    use oxirush_gtp_u::{Endpoint, Packet, PathEvent, RemoteTunnel};
+    use oxirush_gtp_u::{Endpoint, Packet, RemoteTunnel};
 
     #[tokio::main(flavor = "current_thread")]
     async fn main() -> std::io::Result<()> {
@@ -135,16 +145,6 @@ fn block_3() {
             response.sequence,
             response.information_elements()?
         );
-
-        // The gNB asks whether its path to the UPF is alive, and supervises it
-        // from now on: `path_state` and `path_events` say when it is down
-        let mut events = gnb.path_events();
-        gnb.echo(upf.local_addr()?).await?;
-        if let Ok(PathEvent::EchoResponse { from, packet, .. }) = events.recv().await {
-            let elements = packet.information_elements()?;
-            println!("Echo Response from {from}: {elements:?}");
-        }
-        gnb.supervise(upf.local_addr()?)?;
 
         // The UPF has no session with TEID 0x1001. It answers the G-PDU with an
         // Error Indication, which the receiver gets with its tunnel
@@ -194,48 +194,8 @@ fn block_4() {
     main().unwrap();
 }
 
-/// The Rust block 5 of README.md.
-fn block_5() {
-    use oxirush_gtp_u::{ExtensionHeader, Packet, PduSessionContainer};
-
-    fn main() -> Result<(), oxirush_gtp_u::Error> {
-        // A downlink packet that the source gNB forwards to the target, with
-        // the PDCP sequence number that it had given it
-        let mut forwarded = Packet::downlink(0x2001, 9, b"an IP packet".to_vec());
-        let number = ExtensionHeader::PdcpPduNumber(0x0abc);
-        forwarded.extension_headers.push(number);
-        println!("{:02x?}", &forwarded.encode()?[8..20]);
-
-        // A sequence number of 18 bits has the long header
-        let mut long = Packet::downlink(0x2001, 9, b"an IP packet".to_vec());
-        long.extension_headers
-            .push(ExtensionHeader::LongPdcpPduNumber {
-                number: 0x2_abcd,
-                legacy_type: false,
-            });
-        println!("{:02x?}", &long.encode()?[8..24]);
-
-        // The End Marker of a forwarding tunnel between 5GS and EPS has the PDU
-        // Session Container
-        let container = PduSessionContainer::downlink(9);
-        let marker = Packet::end_marker(0x2001).with_pdu_session_container(container);
-        println!("{:02x?}", marker.encode()?);
-
-        // The target reads the headers of what it receives
-        let decoded = Packet::decode(&forwarded.encode()?)?;
-        for header in &decoded.extension_headers {
-            match header {
-                ExtensionHeader::PdcpPduNumber(number) => println!("PDCP PDU Number {number:#x}"),
-                other => println!("{}", other.kind()),
-            }
-        }
-        Ok(())
-    }
-    main().unwrap();
-}
-
 /// The Rust block 1 of src/lib.rs.
-fn block_6() {
+fn block_5() {
     use oxirush_gtp_u::{DownlinkPduSessionInformation, Packet, PduSessionContainer};
 
     fn main() -> Result<(), oxirush_gtp_u::Error> {
