@@ -28,23 +28,24 @@ PERF="sudo -n perf" benches/compare.sh 3    # on core 3
 
 ## Figures
 
-On one core of an AMD Ryzen 7 5700G, with Rust 1.98.1 and glibc 2.43, the
-lowest of four runs. The G-PDU that is encoded is an uplink one with its
+On one core of an AMD Ryzen 7 5700G (16 threads, Linux 7.0), with Rust 1.98.1
+and glibc 2.43, measured on a quiet machine on 2026-10-18, the lowest of five
+runs. The G-PDU that is encoded is an uplink one with its
 PDU Session Container; those that are decoded have no extension header, as
 on S1-U, that container, as on N3, or three extension headers, of which
 one is kept as octets:
 
 | | 64 octets of payload | 1400 octets |
 |---|---|---|
-| Encode into a buffer that is used again | 41 ns | 56 ns |
-| Encode into a new buffer | 53 ns | 84 ns |
+| Encode into a buffer that is used again | 34 ns | 45 ns |
+| Encode into a new buffer | 45 ns | 76 ns |
 | Decode, the payload left in the datagram: no extension header | 9 ns | 9 ns |
-| The same, with the PDU Session Container | 23 ns | 23 ns |
-| The same, with three extension headers | 65 ns | 66 ns |
-| Decode, the payload copied: no extension header | 16 ns | 38 ns |
-| The same, with the PDU Session Container | 30 ns | 55 ns |
-| The same, with three extension headers | 74 ns | 116 ns |
-| From an endpoint to the test UPF and its echo back, over the loopback interface | 12.5 µs | 13.3 µs |
+| The same, with the PDU Session Container | 22 ns | 22 ns |
+| The same, with three extension headers | 61 ns | 61 ns |
+| Decode, the payload copied: no extension header | 15 ns | 36 ns |
+| The same, with the PDU Session Container | 27 ns | 57 ns |
+| The same, with three extension headers | 76 ns | 108 ns |
+| From an endpoint to the test UPF and its echo back, over the loopback interface | 12.3 µs | 12.9 µs |
 
 Four fifths of the round trip are its four system calls, and the codec is
 under 2% of it. A message whose payload stays in the datagram is decoded
@@ -52,16 +53,15 @@ without an allocation when it has one extension header at most; with
 three, it allocates its list and the octets of the header that is kept as
 received.
 
-An endpoint with many tunnels, on the same core, the machine busy with
-other work (a load of 6 to 8). The first row is an Error Indication that
-names none of its tunnels, then a G-PDU of one of them, until the endpoint
-delivers it; the second is the tunnel of one more UE and its removal with
-`remove_ran`:
+An endpoint with many tunnels, on the same core, the lowest of five runs.
+The first row is an Error Indication that names none of its tunnels, then a
+G-PDU of one of them, until the endpoint delivers it; the second is the
+tunnel of one more UE and its removal with `remove_ran`:
 
 | | 1 000 tunnels | 100 000 tunnels |
 |---|---|---|
-| `tunnels/unmatched-error-indication` | 15.9 µs | 16.4 µs |
-| `tunnels/install-remove-ran` | 0.31 µs | 0.45 µs |
+| `tunnels/unmatched-error-indication` | 10.2 µs | 10.2 µs |
+| `tunnels/install-remove-ran` | 0.29 µs | 0.34 µs |
 
 Neither walks through the tunnels: an endpoint finds the tunnel that an
 Error Indication names, and those of a UE, in an index.
