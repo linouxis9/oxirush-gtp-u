@@ -3,7 +3,7 @@ name = "oxirush-gtp-u"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
-description = "GTP-U of 5G and 4G (3GPP TS 29.281): a codec, an endpoint for the tunnels of a base station, a test UPF, Linux TUN devices and an eBPF fast path"
+description = "GTP-U for 5G and LTE in Rust (3GPP TS 29.281, TS 38.415): a codec, a Tokio endpoint for the tunnels of a gNB or an eNB, a test UPF, Linux TUN devices and an eBPF fast path."
 license = "Apache-2.0"
 repository = "https://github.com/linouxis9/oxirush-gtp-u"
 documentation = "https://docs.rs/oxirush-gtp-u"
@@ -27,8 +27,8 @@ tun = [
 # The eBPF fast path of the endpoint's tunnels (Linux 6.6, and a
 # little-endian architecture of aya below).
 ebpf = ["tun", "dep:aya"]
-# Serialize and Deserialize for RemoteTunnel (with endpoint).
-serde = ["dep:serde"]
+# Serialize and Deserialize for RemoteTunnel, which is in endpoint.
+serde = ["endpoint", "dep:serde"]
 # The oxirush-upf-sim program, which needs Tokio's macros and signals.
 cli = ["endpoint", "tokio/macros", "tokio/signal"]
 

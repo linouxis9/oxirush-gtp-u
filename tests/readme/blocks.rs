@@ -42,7 +42,7 @@ pub const BLOCKS: &[fn()] = &[
 fn block_1() {
     use oxirush_gtp_u::{DownlinkPduSessionInformation, Packet, PduSessionContainer};
 
-    fn main() -> Result<(), oxirush_gtp_u::Error> {
+    fn main() -> Result<(), Box<dyn std::error::Error>> {
         // An uplink G-PDU of QoS flow 9, as a gNB sends it on N3: the header,
         // the PDU Session Container, then the IP packet
         let uplink = Packet::uplink(0x1234_5678, 9, b"an IP packet".as_slice());
@@ -74,9 +74,9 @@ fn block_2() {
     use oxirush_gtp_u::{Endpoint, PathEvent, RemoteTunnel, ipv4_udp, parse_ipv4_udp};
 
     #[tokio::main(flavor = "current_thread")]
-    async fn main() -> std::io::Result<()> {
-        let (upf, mut observed) = UpfSimulator::bind("127.0.0.1:0".parse().unwrap()).await?;
-        let (gnb, mut received) = Endpoint::bind("127.0.0.1:0".parse().unwrap()).await?;
+    async fn main() -> Result<(), Box<dyn std::error::Error>> {
+        let (upf, mut observed) = UpfSimulator::bind("127.0.0.1:0".parse()?).await?;
+        let (gnb, mut received) = Endpoint::bind("127.0.0.1:0".parse()?).await?;
 
         // What the control plane negotiates: the UPF receives the session's
         // uplink on TEID 0x1001, the gNB its downlink on the TEID it assigns
@@ -85,8 +85,8 @@ fn block_2() {
         upf.set_session(Session::new(0x1001, teid, gnb.local_addr()?, 9))?;
 
         // Uplink: an IP packet of the UE, which the UPF's echo service reflects
-        let ue = "10.45.0.2:4000".parse().unwrap();
-        let server = "192.0.2.1:7".parse().unwrap();
+        let ue = "10.45.0.2:4000".parse()?;
+        let server = "192.0.2.1:7".parse()?;
         gnb.send(1, 5, ipv4_udp(ue, server, b"hello")?).await?;
         let uplink = observed.recv().await.expect("the UPF is running");
         println!(
@@ -127,10 +127,10 @@ fn block_3() {
     use oxirush_gtp_u::{Endpoint, Packet, RemoteTunnel};
 
     #[tokio::main(flavor = "current_thread")]
-    async fn main() -> std::io::Result<()> {
+    async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // An Error Indication goes to port 2152 of the sender of the G-PDU
-        let (gnb, mut received) = Endpoint::bind("127.0.0.9:2152".parse().unwrap()).await?;
-        let (upf, _observed) = UpfSimulator::bind("127.0.0.10:2152".parse().unwrap()).await?;
+        let (gnb, mut received) = Endpoint::bind("127.0.0.9:2152".parse()?).await?;
+        let (upf, _observed) = UpfSimulator::bind("127.0.0.10:2152".parse()?).await?;
 
         // An endpoint answers an Echo Request by itself
         let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await?;
@@ -167,7 +167,7 @@ fn block_3() {
 fn block_4() {
     use oxirush_gtp_u::{ExtensionHeader, ExtensionHeaderType, Packet};
 
-    fn main() -> Result<(), oxirush_gtp_u::Error> {
+    fn main() -> Result<(), Box<dyn std::error::Error>> {
         // The container of an uplink G-PDU, then a header of a type that the
         // crate keeps as octets
         let mut packet = Packet::uplink(0x1234_5678, 9, b"an IP packet".to_vec());
@@ -198,7 +198,7 @@ fn block_4() {
 fn block_5() {
     use oxirush_gtp_u::{DownlinkPduSessionInformation, Packet, PduSessionContainer};
 
-    fn main() -> Result<(), oxirush_gtp_u::Error> {
+    fn main() -> Result<(), Box<dyn std::error::Error>> {
         // An uplink G-PDU of QoS flow 9, as a gNB sends it on N3: the header,
         // the PDU Session Container, then the IP packet
         let uplink = Packet::uplink(0x1234_5678, 9, b"an IP packet".as_slice());

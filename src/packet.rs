@@ -502,6 +502,17 @@ impl<P: AsRef<[u8]>> Packet<P> {
     }
 
     /// Encode the message.
+    ///
+    /// ```
+    /// use oxirush_gtp_u::Packet;
+    ///
+    /// // A G-PDU without extension header: the flags, the type, the length
+    /// // of what follows the TEID, the TEID, then the payload
+    /// let bytes = Packet::g_pdu(0x1001, b"an IP packet".as_slice()).encode()?;
+    /// assert_eq!(bytes[..8], [0x30, 0xff, 0x00, 0x0c, 0x00, 0x00, 0x10, 0x01]);
+    /// assert_eq!(&bytes[8..], b"an IP packet");
+    /// # Ok::<(), oxirush_gtp_u::Error>(())
+    /// ```
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
         let mut out = Vec::new();
         self.encode_into(&mut out)?;

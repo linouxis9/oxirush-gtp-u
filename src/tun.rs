@@ -165,8 +165,8 @@ impl TunPort {
     }
 
     /// Read a raw IPv4 or IPv6 packet that Linux routed to the TUN. A
-    /// packet longer than `buffer` is cut to it: 65535 bytes hold any, and
-    /// 1500 those of a TUN whose MTU was not changed.
+    /// packet longer than `buffer` is cut to it: 65,535 bytes hold any, and
+    /// 1,500 those of a TUN whose MTU was not changed.
     pub async fn recv(&self, buffer: &mut [u8]) -> io::Result<usize> {
         self.inner.device.recv(buffer).await
     }

@@ -6,7 +6,7 @@
 //! ```rust
 //! use oxirush_gtp_u::{DownlinkPduSessionInformation, Packet, PduSessionContainer};
 //!
-//! fn main() -> Result<(), oxirush_gtp_u::Error> {
+//! fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     // An uplink G-PDU of QoS flow 9, as a gNB sends it on N3: the header,
 //!     // the PDU Session Container, then the IP packet
 //!     let uplink = Packet::uplink(0x1234_5678, 9, b"an IP packet".as_slice());
@@ -76,9 +76,9 @@
 //! | `Serialize` and `Deserialize` for [`RemoteTunnel`] | `serde` | |
 //! | The `oxirush-upf-sim` program | `cli` | |
 //!
-//! `ebpf` brings `tun`, and `tun` brings `endpoint`. The `tun` and `ebpf`
-//! modules exist on Linux only; elsewhere their features build and add nothing
-//! to `endpoint`. So does `ebpf` where the programs cannot run: on an
+//! `ebpf` brings `tun`, and `tun`, `serde` and `cli` bring `endpoint`. The
+//! `tun` and `ebpf` modules exist on Linux only; elsewhere their features build
+//! and add nothing to `endpoint`. So does `ebpf` where the programs cannot run: on an
 //! architecture that their loader, aya, does not build for, such as 32-bit
 //! x86, and on a big-endian one, such as s390x, as their object is for
 //! little-endian eBPF. It runs on 64-bit x86, ARM, AArch64, RISC-V 64,

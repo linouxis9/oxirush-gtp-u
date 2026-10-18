@@ -7,7 +7,7 @@
 
 use oxirush_gtp_u::{ExtensionHeader, Packet, PduSessionContainer};
 
-fn main() -> Result<(), oxirush_gtp_u::Error> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     // A downlink packet that the source gNB forwards to the target, with
     // the PDCP sequence number that it had given it
     let mut forwarded = Packet::downlink(0x2001, 9, b"an IP packet".to_vec());

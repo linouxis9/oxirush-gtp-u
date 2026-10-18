@@ -6,7 +6,7 @@
 
 use oxirush_gtp_u::{DownlinkPduSessionInformation, Packet, PduSessionContainer};
 
-fn main() -> Result<(), oxirush_gtp_u::Error> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     // An uplink G-PDU of QoS flow 9, as a gNB sends it on N3: the header,
     // the PDU Session Container, then the IP packet
     let uplink = Packet::uplink(0x1234_5678, 9, b"an IP packet".as_slice());

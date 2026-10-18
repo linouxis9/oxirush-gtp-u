@@ -25,8 +25,7 @@ There is no bug bounty.
 
 ## Supported versions
 
-Fixes go into the latest release, and before the first release into the
-`master` branch. An older version gets none.
+Fixes go into the latest release. An older version gets none.
 
 ## What to know before reporting
 

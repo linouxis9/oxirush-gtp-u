@@ -11,7 +11,7 @@ station, a UPF to test against, Linux TUN devices and an eBPF fast path.
 ```rust
 use oxirush_gtp_u::{DownlinkPduSessionInformation, Packet, PduSessionContainer};
 
-fn main() -> Result<(), oxirush_gtp_u::Error> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     // An uplink G-PDU of QoS flow 9, as a gNB sends it on N3: the header,
     // the PDU Session Container, then the IP packet
     let uplink = Packet::uplink(0x1234_5678, 9, b"an IP packet".as_slice());
@@ -45,6 +45,8 @@ QFI 9, RQI true
 
 The text under a block is what the block prints.
 
+This page describes oxirush-gtp-u 0.1.0, which is not on crates.io yet.
+
 ## Installation
 
 ```toml
@@ -64,11 +66,11 @@ tokio = { version = "1", features = ["macros", "rt", "net"] } # for the endpoint
 | `serde` | `Serialize` and `Deserialize` for `RemoteTunnel` | |
 | `cli` | the `oxirush-upf-sim` program | |
 
-`ebpf` brings `tun`, and `tun` brings `endpoint`. Off Linux, `tun` and
-`ebpf` build and add nothing, and so does `ebpf` on 32-bit x86, which aya
-does not build for, and on big-endian architectures. The eBPF programs are
-committed as an object: a build with `ebpf` needs no nightly toolchain and
-no eBPF linker.
+`ebpf` brings `tun`, and `tun`, `serde` and `cli` bring `endpoint`. Off
+Linux, `tun` and `ebpf` build and add nothing, and so does `ebpf` on 32-bit
+x86, which aya does not build for, and on big-endian architectures. The
+eBPF programs are committed as an object: a build with `ebpf` needs no
+nightly toolchain and no eBPF linker.
 
 Until 0.1.0 is on crates.io, a program takes the crate from its repository:
 
@@ -91,9 +93,9 @@ use oxirush_gtp_u::upf_sim::{Session, UpfSimulator};
 use oxirush_gtp_u::{Endpoint, PathEvent, RemoteTunnel, ipv4_udp, parse_ipv4_udp};
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> std::io::Result<()> {
-    let (upf, mut observed) = UpfSimulator::bind("127.0.0.1:0".parse().unwrap()).await?;
-    let (gnb, mut received) = Endpoint::bind("127.0.0.1:0".parse().unwrap()).await?;
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let (upf, mut observed) = UpfSimulator::bind("127.0.0.1:0".parse()?).await?;
+    let (gnb, mut received) = Endpoint::bind("127.0.0.1:0".parse()?).await?;
 
     // What the control plane negotiates: the UPF receives the session's
     // uplink on TEID 0x1001, the gNB its downlink on the TEID it assigns
@@ -102,8 +104,8 @@ async fn main() -> std::io::Result<()> {
     upf.set_session(Session::new(0x1001, teid, gnb.local_addr()?, 9))?;
 
     // Uplink: an IP packet of the UE, which the UPF's echo service reflects
-    let ue = "10.45.0.2:4000".parse().unwrap();
-    let server = "192.0.2.1:7".parse().unwrap();
+    let ue = "10.45.0.2:4000".parse()?;
+    let server = "192.0.2.1:7".parse()?;
     gnb.send(1, 5, ipv4_udp(ue, server, b"hello")?).await?;
     let uplink = observed.recv().await.expect("the UPF is running");
     println!(
@@ -257,10 +259,10 @@ use oxirush_gtp_u::upf_sim::UpfSimulator;
 use oxirush_gtp_u::{Endpoint, Packet, RemoteTunnel};
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> std::io::Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // An Error Indication goes to port 2152 of the sender of the G-PDU
-    let (gnb, mut received) = Endpoint::bind("127.0.0.9:2152".parse().unwrap()).await?;
-    let (upf, _observed) = UpfSimulator::bind("127.0.0.10:2152".parse().unwrap()).await?;
+    let (gnb, mut received) = Endpoint::bind("127.0.0.9:2152".parse()?).await?;
+    let (upf, _observed) = UpfSimulator::bind("127.0.0.10:2152".parse()?).await?;
 
     // An endpoint answers an Echo Request by itself
     let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await?;
@@ -300,7 +302,7 @@ Error Indication for RAN UE 1 session 5: [TeidDataI(0x00001001), GtpUPeerAddress
 An endpoint also sends an Error Indication for a G-PDU on a TEID that it
 does not have. Whoever reaches the socket can send such G-PDUs, and Echo
 Requests, from any address: an address gets 100 Error Indications a second
-at most and 10 Echo Responses, and all addresses together 1000 Error
+at most and 10 Echo Responses, and all addresses together 1,000 Error
 Indications. `stats()` counts the replies that were not sent, the G-PDUs on
 unknown TEIDs and the Error Indications that name no tunnel.
 
@@ -309,7 +311,7 @@ unknown TEIDs and the Error Indications that name no tunnel.
 ```rust
 use oxirush_gtp_u::{ExtensionHeader, ExtensionHeaderType, Packet};
 
-fn main() -> Result<(), oxirush_gtp_u::Error> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The container of an uplink G-PDU, then a header of a type that the
     // crate keeps as octets
     let mut packet = Packet::uplink(0x1234_5678, 9, b"an IP packet".to_vec());
@@ -359,15 +361,15 @@ sends is routed into the tunnel.
 ```rust,no_run
 #[cfg(target_os = "linux")]
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> std::io::Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     use std::net::Ipv4Addr;
 
     use oxirush_gtp_u::tun::{Routing, TunConfig};
     use oxirush_gtp_u::upf_sim::{Session, UpfSimulator};
     use oxirush_gtp_u::{Endpoint, RemoteTunnel};
 
-    let (upf, _observed) = UpfSimulator::bind("127.0.0.8:2152".parse().unwrap()).await?;
-    let (gnb, _received) = Endpoint::bind("127.0.0.1:2152".parse().unwrap()).await?;
+    let (upf, _observed) = UpfSimulator::bind("127.0.0.8:2152".parse()?).await?;
+    let (gnb, _received) = Endpoint::bind("127.0.0.1:2152".parse()?).await?;
     let teid = gnb.install(1, 5, RemoteTunnel::new(upf.local_addr()?, 0x1001), 9)?;
     upf.set_session(Session::new(0x1001, teid, gnb.local_addr()?, 9))?;
 
@@ -419,7 +421,7 @@ tunnels are installed, and `attach_tun` does the rest:
 
 ```rust,no_run
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> std::io::Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     use std::net::Ipv4Addr;
 
     use oxirush_gtp_u::ebpf::FastPath;
@@ -427,8 +429,8 @@ async fn main() -> std::io::Result<()> {
     use oxirush_gtp_u::upf_sim::{Session, UpfSimulator};
     use oxirush_gtp_u::{Endpoint, RemoteTunnel};
 
-    let (upf, _observed) = UpfSimulator::bind("127.0.0.8:2152".parse().unwrap()).await?;
-    let (gnb, _received) = Endpoint::bind("127.0.0.1:2152".parse().unwrap()).await?;
+    let (upf, _observed) = UpfSimulator::bind("127.0.0.8:2152".parse()?).await?;
+    let (gnb, _received) = Endpoint::bind("127.0.0.1:2152".parse()?).await?;
 
     // Load the programs and give them to the endpoint before its tunnels:
     // installing a tunnel then prepares the interface it is routed through.
@@ -495,12 +497,12 @@ sudo ./target/debug/oxirush-upf-sim \
 ## Performance
 
 On one core of an AMD Ryzen 7 5700G (16 threads, Linux 7.0, Rust 1.98.1),
-measured on a quiet machine on 2026-10-18, a G-PDU with its PDU Session
-Container and 1400 octets of payload, the lowest of five runs:
+at 0d25889, measured on a quiet machine on 2026-10-18, a G-PDU with its PDU
+Session Container and 1,400 octets of payload, the lowest of five runs:
 
 | | Time |
 |---|---|
-| Encode into a buffer that is used again | 45 ns |
+| Build the G-PDU and encode it into a buffer that is used again | 45 ns |
 | Decode, the payload left in the datagram | 22 ns |
 | Decode, the payload copied | 57 ns |
 | From an endpoint to the test UPF and back, over the loopback interface | 12.9 µs |
@@ -512,27 +514,29 @@ has the benchmarks, the other figures and how to profile.
 ### Against go-gtp
 
 [go-gtp](https://github.com/wmnsk/go-gtp) v0.8.12 on the same G-PDUs of
-1400 octets, each program on core 2 of the same machine (Go 1.27). Times
-are the lowest of three runs, and each figure the median of three runs of
-the script; cycles and instructions are per operation, from `perf stat`,
-user and kernel; peak memory is that of the whole program; the last column
-is the time of go-gtp against this crate's.
+1,400 octets, built before they are timed, each program on core 2 of the
+same machine (Go 1.27), at 0d25889. Times are the lowest of three runs,
+and each figure the median of three runs of the script. Cycles and
+instructions are per operation, from `perf stat`, user and kernel. Peak
+memory is that of the whole program. The last column is the time of go-gtp
+over this crate's, "about the same" where it is within the spread of the
+three runs of its operation, 3 % at most.
 
 | Operation | | ns | Cycles | Instructions | Allocations | Octets allocated | Peak memory | go-gtp / this crate |
 |---|---|---|---|---|---|---|---|---|
 | Encode, no extension header | oxirush-gtp-u | 17.8 | 82 | 305 | 0 | 0 | 2.6 MiB | |
-| | go-gtp | 17.7 | 80 | 338 | 0 | 0 | 5.5 MiB | 0.99 |
+| | go-gtp | 17.7 | 80 | 338 | 0 | 0 | 5.5 MiB | about the same |
 | Encode, PDU Session Container | oxirush-gtp-u | 25.8 | 116 | 472 | 0 | 0 | 2.6 MiB | |
-| | go-gtp | 26.1 | 117 | 525 | 0 | 0 | 5.5 MiB | 1.01 |
+| | go-gtp | 26.1 | 117 | 525 | 0 | 0 | 5.5 MiB | 1.01x |
 | Decode, no extension header | oxirush-gtp-u | 10.8 | 48 | 127 | 0 | 0 | 2.7 MiB | |
-| | go-gtp | 4.1 | 18 | 88 | 0 | 0 | 5.4 MiB | 0.38 |
+| | go-gtp | 4.1 | 18 | 88 | 0 | 0 | 5.4 MiB | 0.38x |
 | Decode, PDU Session Container | oxirush-gtp-u | 24.0 | 110 | 251 | 0 | 0 | 2.7 MiB | |
-| | go-gtp | 43.9 | 204 | 864 | 2 | 56 | 10.2 MiB | 1.83 |
-| Endpoint to endpoint and back, loopback | oxirush-gtp-u | 12 078 | 56 106 | 39 975 | 2 | 2 807 | 3.0 MiB | |
-| | go-gtp | 23 900 | 109 192 | 85 322 | 82 | 8 736 | 10.3 MiB | 1.98 |
+| | go-gtp | 43.9 | 204 | 864 | 2 | 56 | 10.2 MiB | 1.83x |
+| Endpoint to endpoint and back, no extension header, loopback | oxirush-gtp-u | 12,078 | 56,106 | 39,975 | 2 | 2,807 | 3.0 MiB | |
+| | go-gtp | 23,900 | 109,192 | 85,322 | 82 | 8,736 | 10.3 MiB | 1.98x |
 
-A decoded message of this crate has room for its first extension header
-in itself, 136 octets in all, which a G-PDU without one has too.
+`decode_borrowed` returns a `Packet` of 136 octets, with room for one
+extension header whether the message has one or not.
 `benches/compare.sh 3` runs every row on core 3, and fetches go-gtp at the
 version that it pins; perf may need `PERF="sudo -n perf"`.
 
@@ -562,6 +566,11 @@ crates at the revisions that its manifest names.
 [The documentation](https://docs.rs/oxirush-gtp-u) has the terms, what the
 codec covers, and the reference of the endpoint, the test UPF, the TUN
 routings and the fast path.
+
+A pull request comes with a test for what it changes. Sign off your commits
+(`git commit -s`): by contributing you agree to the [Developer Certificate
+of Origin](https://developercertificate.org/). [SECURITY.md](SECURITY.md)
+says how to report a vulnerability.
 
 ## The OxiRush family
 

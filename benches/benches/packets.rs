@@ -1,7 +1,7 @@
 //! The time of a G-PDU through the codec and through an endpoint, and
 //! their CPU profile.
 //!
-//! ```bash
+//! ```sh
 //! cargo bench --bench packets                    # every case
 //! cargo bench --bench packets -- decode          # those whose name has it
 //! cargo bench --bench packets -- --profile-time 10 endpoint/round-trip/1400
@@ -32,7 +32,8 @@ const SIZES: [usize; 2] = [64, 1400];
 const TEID: u32 = 0x1234_5678;
 const QFI: u8 = 9;
 
-/// An uplink G-PDU with its PDU Session Container, as a gNB sends it on N3.
+/// An uplink G-PDU with its PDU Session Container, as a gNB sends it on N3:
+/// each timed call builds the message and encodes it.
 fn encode(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("encode");
     for octets in SIZES {

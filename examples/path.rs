@@ -9,10 +9,10 @@ use oxirush_gtp_u::upf_sim::UpfSimulator;
 use oxirush_gtp_u::{Endpoint, Packet, RemoteTunnel};
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> std::io::Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // An Error Indication goes to port 2152 of the sender of the G-PDU
-    let (gnb, mut received) = Endpoint::bind("127.0.0.9:2152".parse().unwrap()).await?;
-    let (upf, _observed) = UpfSimulator::bind("127.0.0.10:2152".parse().unwrap()).await?;
+    let (gnb, mut received) = Endpoint::bind("127.0.0.9:2152".parse()?).await?;
+    let (upf, _observed) = UpfSimulator::bind("127.0.0.10:2152".parse()?).await?;
 
     // An endpoint answers an Echo Request by itself
     let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await?;

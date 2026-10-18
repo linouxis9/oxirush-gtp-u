@@ -6,7 +6,7 @@
 
 use oxirush_gtp_u::{ExtensionHeader, ExtensionHeaderType, Packet};
 
-fn main() -> Result<(), oxirush_gtp_u::Error> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The container of an uplink G-PDU, then a header of a type that the
     // crate keeps as octets
     let mut packet = Packet::uplink(0x1234_5678, 9, b"an IP packet".to_vec());

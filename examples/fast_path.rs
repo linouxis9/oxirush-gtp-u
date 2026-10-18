@@ -10,7 +10,7 @@
 // Linux, on a little-endian architecture of aya: see build.rs.
 #[cfg(fast_path)]
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> std::io::Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     use std::net::Ipv4Addr;
 
     use oxirush_gtp_u::ebpf::FastPath;
@@ -18,8 +18,8 @@ async fn main() -> std::io::Result<()> {
     use oxirush_gtp_u::upf_sim::{Session, UpfSimulator};
     use oxirush_gtp_u::{Endpoint, RemoteTunnel};
 
-    let (upf, _observed) = UpfSimulator::bind("127.0.0.8:2152".parse().unwrap()).await?;
-    let (gnb, _received) = Endpoint::bind("127.0.0.1:2152".parse().unwrap()).await?;
+    let (upf, _observed) = UpfSimulator::bind("127.0.0.8:2152".parse()?).await?;
+    let (gnb, _received) = Endpoint::bind("127.0.0.1:2152".parse()?).await?;
 
     // Load the programs and give them to the endpoint before its tunnels:
     // installing a tunnel then prepares the interface it is routed through.

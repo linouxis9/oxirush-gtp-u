@@ -5,7 +5,7 @@ G-PDU through the codec and through an endpoint with
 [criterion](https://crates.io/crates/criterion), and profiles them with
 [pprof](https://crates.io/crates/pprof).
 
-```bash
+```sh
 cargo bench --bench packets                 # every benchmark
 cargo bench --bench packets -- decode       # those whose name has it
 
@@ -22,23 +22,23 @@ go-gtp: `src/bin/compare.rs` and `compare/main.go` run the same operations
 on the same G-PDUs, and `go build` fetches the version of go-gtp that
 `compare/go.mod` pins.
 
-```bash
+```sh
 PERF="sudo -n perf" benches/compare.sh 3    # on core 3
 ```
 
 ## Figures
 
 On one core of an AMD Ryzen 7 5700G (16 threads, Linux 7.0), with Rust 1.98.1
-and glibc 2.43, measured on a quiet machine on 2026-10-18, the lowest of five
-runs. The G-PDU that is encoded is an uplink one with its
-PDU Session Container; those that are decoded have no extension header, as
-on S1-U, that container, as on N3, or three extension headers, of which
-one is kept as octets:
+and glibc 2.43, at 0d25889, measured on a quiet machine on 2026-10-18, the
+lowest of five runs. The G-PDU that is encoded is an uplink one with its
+PDU Session Container, built in the timed call; those that are decoded have
+no extension header, as on S1-U, that container, as on N3, or three
+extension headers, of which one is kept as octets:
 
-| | 64 octets of payload | 1400 octets |
+| | 64 octets of payload | 1,400 octets |
 |---|---|---|
-| Encode into a buffer that is used again | 34 ns | 45 ns |
-| Encode into a new buffer | 45 ns | 76 ns |
+| Build and encode into a buffer that is used again | 34 ns | 45 ns |
+| Build and encode into a new buffer | 45 ns | 76 ns |
 | Decode, the payload left in the datagram: no extension header | 9 ns | 9 ns |
 | The same, with the PDU Session Container | 22 ns | 22 ns |
 | The same, with three extension headers | 61 ns | 61 ns |
@@ -53,12 +53,13 @@ without an allocation when it has one extension header at most; with
 three, it allocates its list and the octets of the header that is kept as
 received.
 
-An endpoint with many tunnels, on the same core, the lowest of five runs.
+An endpoint with many tunnels, on the same core and at the same commit, the
+lowest of five runs.
 The first row is an Error Indication that names none of its tunnels, then a
 G-PDU of one of them, until the endpoint delivers it; the second is the
 tunnel of one more UE and its removal with `remove_ran`:
 
-| | 1 000 tunnels | 100 000 tunnels |
+| | 1,000 tunnels | 100,000 tunnels |
 |---|---|---|
 | `tunnels/unmatched-error-indication` | 10.2 µs | 10.2 µs |
 | `tunnels/install-remove-ran` | 0.29 µs | 0.34 µs |

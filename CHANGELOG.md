@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 (unreleased)
+## Unreleased (0.1.0)
 
 First release.
 
@@ -47,6 +47,8 @@ revision `ac3a019` for a program that uses the crate:
   the `macros` and `signal` features of Tokio: the library does not use
   them, and its default features turned them on for every program.
   `cargo install --features cli` installs it.
+- `serde` turns on `endpoint`, which has `RemoteTunnel`: without it, the
+  feature added the dependency and nothing else.
 - `Packet::extension_headers` was a `Vec<ExtensionHeader>` and is an
   `ExtensionHeaders`:
   - reading it is written as before: `iter`, `len`, `is_empty`, `first`,

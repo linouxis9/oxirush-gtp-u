@@ -3,7 +3,7 @@
 //! one case, and per operation the time, the allocations and their octets.
 //! `compare.sh` reads the cycles and the instructions with `perf stat`.
 //!
-//! ```bash
+//! ```sh
 //! cargo run --release --bin compare -- decode-container 10000000
 //! ```
 //!

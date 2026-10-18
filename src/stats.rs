@@ -25,7 +25,7 @@ pub struct ReceiveStats {
     pub ignored_messages: u64,
     /// Error Indications and Supported Extension Headers Notifications not
     /// sent: past 100 a second to an address after a burst of 100, or past
-    /// 1000 a second from the socket after a burst of 1000.
+    /// 1,000 a second from the socket after a burst of 1,000.
     pub suppressed_replies: u64,
     /// Echo Responses not sent: past 10 a second to an address, after a
     /// burst of 10.

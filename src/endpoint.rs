@@ -38,6 +38,24 @@ const QUEUE: usize = 256;
 
 /// The far end of a tunnel: the peer's GTP-U address and the TEID it
 /// assigned (an F-TEID). `Debug` prints the TEID in hexadecimal.
+///
+/// ```
+/// # #[tokio::main(flavor = "current_thread")]
+/// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// use oxirush_gtp_u::{Endpoint, RemoteTunnel};
+///
+/// // The UPF's end of PDU session 5 of RAN UE 1: the address and the TEID of
+/// // the UL NG-U UP TNL Information that NGAP carries
+/// let upf = RemoteTunnel::new("192.0.2.8:2152".parse()?, 0x1001);
+///
+/// // The gNB sends the session's uplink there, and receives its downlink on
+/// // the TEID that it assigns
+/// let (gnb, _received) = Endpoint::bind("127.0.0.1:0".parse()?).await?;
+/// let teid = gnb.install(1, 5, upf, 9)?;
+/// assert_eq!(gnb.local_teid(1, 5), Some(teid));
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RemoteTunnel {
@@ -72,6 +90,28 @@ impl fmt::Debug for RemoteTunnel {
 }
 
 /// A message for one of the endpoint's tunnels.
+///
+/// ```
+/// # #[tokio::main(flavor = "current_thread")]
+/// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// use oxirush_gtp_u::{Endpoint, RemoteTunnel};
+///
+/// // Two endpoints with a tunnel between them
+/// let (gnb, _) = Endpoint::bind("127.0.0.1:0".parse()?).await?;
+/// let (peer, mut received) = Endpoint::bind("127.0.0.1:0".parse()?).await?;
+/// let peer_teid = peer.install(1, 5, RemoteTunnel::new(gnb.local_addr()?, 0), 9)?;
+/// gnb.install(1, 5, RemoteTunnel::new(peer.local_addr()?, peer_teid), 9)?;
+///
+/// // A G-PDU comes with the tunnel that it was sent on
+/// gnb.send(1, 5, b"an IP packet".as_slice()).await?;
+/// let message = received.recv().await.expect("the endpoint is running");
+/// assert_eq!((message.ran_id, message.session_id), (1, 5));
+/// assert_eq!(message.packet.qfi(), Some(9));
+/// assert_eq!(message.packet.payload, b"an IP packet");
+/// assert_eq!(message.from, gnb.local_addr()?);
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ReceivedPacket {
@@ -189,7 +229,7 @@ pub struct ReceivedPacket {
 /// authentication: whoever can send from an address can have them sent to
 /// it. The socket sends an address 100 Error Indications and Supported
 /// Extension Headers Notifications a second at most, after a burst of 100,
-/// and all addresses together 1000 a second, after a burst of 1000; past
+/// and all addresses together 1,000 a second, after a burst of 1,000; past
 /// that a reply is not sent and is counted in
 /// [`suppressed_replies`](ReceiveStats::suppressed_replies). A flood from
 /// one address uses up the replies of that address: the peer of a removed
@@ -201,7 +241,7 @@ pub struct ReceivedPacket {
 /// [`suppressed_echo_responses`](ReceiveStats::suppressed_echo_responses):
 /// a peer sends an Echo Request on a path every 60 s at most (§7.2.1), and
 /// an Echo Response, with its sequence number and Recovery, can be longer
-/// than its request. The limit of an address is one of 1024 cells, chosen
+/// than its request. The limit of an address is one of 1,024 cells, chosen
 /// by a hash of the address under a key of the socket's own; the addresses
 /// of a cell share it. A line that a peer causes, such as for a G-PDU on an
 /// unknown TEID, is logged once a second at most for each kind, with the
@@ -271,6 +311,23 @@ impl Endpoint {
     /// The address must be specific, so replies leave from the address
     /// the request reached (TS 29.281 §4.4.3). Wildcard addresses return
     /// [`InvalidInput`](io::ErrorKind::InvalidInput).
+    ///
+    /// ```
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// use oxirush_gtp_u::Endpoint;
+    ///
+    /// // A specific address: a gNB binds port 2152 of its N3 address
+    /// let (gnb, _received) = Endpoint::bind("127.0.0.1:0".parse()?).await?;
+    /// assert!(gnb.is_running());
+    ///
+    /// // A wildcard address is refused
+    /// let wildcard = Endpoint::bind("0.0.0.0:0".parse()?).await;
+    /// let kind = wildcard.err().map(|error| error.kind());
+    /// assert_eq!(kind, Some(std::io::ErrorKind::InvalidInput));
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn bind(address: SocketAddr) -> io::Result<(Self, mpsc::Receiver<ReceivedPacket>)> {
         let socket = Arc::new(DatagramSocket::bind(address).await?);
         let routes = Arc::new(RouteTable::default());

@@ -556,6 +556,22 @@ impl fmt::Debug for PduSessionContainer {
 
 /// DL PDU SESSION INFORMATION (TS 38.415 §5.5.2.1). Time stamps are 64-bit
 /// NTP timestamps (RFC 5905 §6).
+///
+/// ```
+/// use oxirush_gtp_u::{DownlinkPduSessionInformation, Packet, PduSessionContainer};
+///
+/// // QoS flow 9, with the Reflective QoS Indicator and a QFI sequence number
+/// let mut information = DownlinkPduSessionInformation::new(9);
+/// information.rqi = true;
+/// information.dl_qfi_sequence_number = Some(1);
+/// let downlink = Packet::g_pdu(0x9abc_def0, b"an IP packet".as_slice())
+///     .with_pdu_session_container(PduSessionContainer::Downlink(information.clone()));
+///
+/// let decoded = Packet::decode(&downlink.encode()?)?;
+/// let container = decoded.pdu_session_container();
+/// assert_eq!(container, Some(&PduSessionContainer::Downlink(information)));
+/// # Ok::<(), oxirush_gtp_u::Error>(())
+/// ```
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct DownlinkPduSessionInformation {
