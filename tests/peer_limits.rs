@@ -288,39 +288,65 @@ async fn each_socket_has_its_own_limit() {
     assert_eq!(sent, [100, 100]);
 }
 
-/// A flood from one address uses the replies of that address: the peer of
-/// a removed tunnel, at another address, still gets an Error Indication for
-/// each of its G-PDUs.
+/// A flood from one address uses the replies of that address: the peers of
+/// removed tunnels, at other addresses, still get an Error Indication for
+/// each of their G-PDUs.
+///
+/// The limit of an address is one of 1024 cells, under a key of the socket's
+/// own, and a peer whose address falls into the attacker's cell shares its
+/// limit. Both peers fall into it in one run of a million.
 #[tokio::test]
 async fn a_flood_from_one_address_leaves_their_error_indications_to_the_others() {
     let (endpoint, _received) = Endpoint::bind("127.0.1.1:2152".parse().unwrap())
         .await
         .unwrap();
     let attacker = UdpSocket::bind("127.0.1.2:2152").await.unwrap();
-    let peer = UdpSocket::bind("127.0.1.3:2152").await.unwrap();
+    let peers = [
+        UdpSocket::bind("127.0.1.3:2152").await.unwrap(),
+        UdpSocket::bind("127.0.1.8:2152").await.unwrap(),
+    ];
     let to = endpoint.local_addr().unwrap();
-    let removed = endpoint
-        .install(1, 5, RemoteTunnel::new(peer.local_addr().unwrap(), 9), 9)
-        .unwrap();
-    endpoint.remove(1, 5);
+    let mut removed = Vec::new();
+    for (ran, peer) in (1..).zip(&peers) {
+        let remote = RemoteTunnel::new(peer.local_addr().unwrap(), 9);
+        removed.push(endpoint.install(ran, 5, remote, 9).unwrap());
+        endpoint.remove(ran, 5);
+    }
     let stats = || endpoint.stats();
     let unknown = Packet::g_pdu(0x99, vec![0x45]);
     let start = Instant::now();
     flood(&attacker, to, &unknown, 300, stats).await;
     for _ in 0..20 {
-        flood(&peer, to, &Packet::g_pdu(removed, vec![0x45]), 1, stats).await;
+        for (peer, teid) in peers.iter().zip(&removed) {
+            flood(peer, to, &Packet::g_pdu(*teid, vec![0x45]), 1, stats).await;
+        }
         flood(&attacker, to, &unknown, 20, stats).await;
     }
     let elapsed = start.elapsed();
-    let indications = replies(&peer).await;
-    assert_eq!(indications, [MessageType::ERROR_INDICATION; 20]);
+
+    // The replies that the peers did not get are those of a peer in the
+    // attacker's cell.
+    let mut whole = 0;
+    let mut missing = 0;
+    for peer in &peers {
+        let indications = replies(peer).await;
+        assert!(indications.len() <= 20);
+        assert!(
+            indications
+                .iter()
+                .all(|kind| *kind == MessageType::ERROR_INDICATION)
+        );
+        whole += usize::from(indications.len() == 20);
+        missing += 20 - indications.len() as u64;
+    }
+    assert!(whole >= 1, "every peer lost Error Indications");
     // The attacker sent 700 G-PDUs: its address gets its burst, and what the
     // rate gives it in `elapsed`, however long the flood took.
-    let suppressed = endpoint.stats().suppressed_replies;
+    let suppressed = endpoint.stats().suppressed_replies - missing;
     let least = 700_u64.saturating_sub(at_most(elapsed) as u64);
     assert!(
         (least..=600).contains(&suppressed),
-        "{suppressed} replies suppressed in {elapsed:?}"
+        "{suppressed} replies to the attacker suppressed in {elapsed:?}"
     );
 }
 
