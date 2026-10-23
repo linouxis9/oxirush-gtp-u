@@ -112,6 +112,29 @@ async fn replies(socket: &UdpSocket) -> Vec<MessageType> {
     types
 }
 
+/// The messages that reach `socket` while `flooding` runs and until the
+/// socket is quiet after it, by type. They are read as they come: a slow
+/// flood has every reply sent, which would overflow the socket's buffer.
+async fn replies_during(
+    socket: &UdpSocket,
+    flooding: impl Future<Output = ()>,
+) -> Vec<MessageType> {
+    let mut buffer = [0; 2048];
+    let mut types = Vec::new();
+    let mut flooding = std::pin::pin!(flooding);
+    loop {
+        tokio::select! {
+            () = &mut flooding => break,
+            received = socket.recv(&mut buffer) => {
+                let size = received.unwrap();
+                types.push(Packet::decode(&buffer[..size]).unwrap().message_type);
+            }
+        }
+    }
+    types.extend(replies(socket).await);
+    types
+}
+
 /// The most replies that a socket may send to one address in `elapsed`.
 fn at_most(elapsed: Duration) -> usize {
     100 + (elapsed.as_secs_f64() * 100.0).ceil() as usize + 1
@@ -141,25 +164,27 @@ fn a_peer_without_a_tunnel_gets_replies_within_a_rate_and_few_lines() {
         let to = endpoint.local_addr().unwrap();
         let stats = || endpoint.stats();
         let start = Instant::now();
+        let mut elapsed = Duration::ZERO;
 
-        // A header that must be understood and is not: a notification each.
-        let mut unsupported = Packet::g_pdu(0x99, vec![0x45]);
-        unsupported.extension_headers.push(ExtensionHeader::Other {
-            kind: ExtensionHeaderType(0xc5),
-            content: vec![0, 0],
-        });
-        flood(&peer, to, &unsupported, 1000, stats).await;
-        // A TEID without a tunnel: an Error Indication each.
-        flood(&peer, to, &Packet::g_pdu(0x99, vec![0x45]), 1000, stats).await;
-        // An Error Indication that names no tunnel, an End Marker of no
-        // tunnel, and a message that an endpoint does not take.
-        let unmatched = Packet::error_indication(0x77, "127.0.0.60".parse().unwrap());
-        flood(&peer, to, &unmatched, 300, stats).await;
-        flood(&peer, to, &Packet::end_marker(0x99), 300, stats).await;
-        flood(&peer, to, &Packet::echo_response(3), 300, stats).await;
-        let elapsed = start.elapsed();
-
-        let replies = replies(&peer).await;
+        let replies = replies_during(&peer, async {
+            // A header that must be understood and is not: a notification each.
+            let mut unsupported = Packet::g_pdu(0x99, vec![0x45]);
+            unsupported.extension_headers.push(ExtensionHeader::Other {
+                kind: ExtensionHeaderType(0xc5),
+                content: vec![0, 0],
+            });
+            flood(&peer, to, &unsupported, 1000, stats).await;
+            // A TEID without a tunnel: an Error Indication each.
+            flood(&peer, to, &Packet::g_pdu(0x99, vec![0x45]), 1000, stats).await;
+            // An Error Indication that names no tunnel, an End Marker of no
+            // tunnel, and a message that an endpoint does not take.
+            let unmatched = Packet::error_indication(0x77, "127.0.0.60".parse().unwrap());
+            flood(&peer, to, &unmatched, 300, stats).await;
+            flood(&peer, to, &Packet::end_marker(0x99), 300, stats).await;
+            flood(&peer, to, &Packet::echo_response(3), 300, stats).await;
+            elapsed = start.elapsed();
+        })
+        .await;
         assert!(
             (100..=at_most(elapsed)).contains(&replies.len()),
             "{} replies in {elapsed:?}",
@@ -203,20 +228,22 @@ fn a_peer_without_a_session_gets_error_indications_of_the_test_upf_within_a_rate
         let to = upf.local_addr().unwrap();
         let stats = || upf.stats();
         let start = Instant::now();
-        flood(
-            &peer,
-            to,
-            &Packet::uplink(0x1001, 9, vec![0x45]),
-            1000,
-            stats,
-        )
+        let mut elapsed = Duration::ZERO;
+        let replies = replies_during(&peer, async {
+            flood(
+                &peer,
+                to,
+                &Packet::uplink(0x1001, 9, vec![0x45]),
+                1000,
+                stats,
+            )
+            .await;
+            let indication = Packet::error_indication(0x2001, "127.0.0.62".parse().unwrap());
+            flood(&peer, to, &indication, 300, stats).await;
+            flood(&peer, to, &Packet::end_marker(0x1001), 300, stats).await;
+            elapsed = start.elapsed();
+        })
         .await;
-        let indication = Packet::error_indication(0x2001, "127.0.0.62".parse().unwrap());
-        flood(&peer, to, &indication, 300, stats).await;
-        flood(&peer, to, &Packet::end_marker(0x1001), 300, stats).await;
-        let elapsed = start.elapsed();
-
-        let replies = replies(&peer).await;
         assert!(
             (100..=at_most(elapsed)).contains(&replies.len()),
             "{} replies in {elapsed:?}",
@@ -278,14 +305,23 @@ async fn a_flood_from_one_address_leaves_their_error_indications_to_the_others()
     endpoint.remove(1, 5);
     let stats = || endpoint.stats();
     let unknown = Packet::g_pdu(0x99, vec![0x45]);
+    let start = Instant::now();
     flood(&attacker, to, &unknown, 300, stats).await;
     for _ in 0..20 {
         flood(&peer, to, &Packet::g_pdu(removed, vec![0x45]), 1, stats).await;
         flood(&attacker, to, &unknown, 20, stats).await;
     }
+    let elapsed = start.elapsed();
     let indications = replies(&peer).await;
     assert_eq!(indications, [MessageType::ERROR_INDICATION; 20]);
-    assert!(endpoint.stats().suppressed_replies >= 600 - 200);
+    // The attacker sent 700 G-PDUs: its address gets its burst, and what the
+    // rate gives it in `elapsed`, however long the flood took.
+    let suppressed = endpoint.stats().suppressed_replies;
+    let least = 700_u64.saturating_sub(at_most(elapsed) as u64);
+    assert!(
+        (least..=600).contains(&suppressed),
+        "{suppressed} replies suppressed in {elapsed:?}"
+    );
 }
 
 /// Echo Responses to one address have a limit: whoever sends Echo Requests
@@ -301,14 +337,18 @@ async fn echo_responses_to_one_address_have_a_limit() {
     let to = endpoint.local_addr().unwrap();
     let stats = || endpoint.stats();
     let start = Instant::now();
-    flood(&flooder, to, &Packet::echo_request(1), 500, stats).await;
-    // An Echo Request whose Length is wrong gets an Echo Response with a
-    // Cause: within the same limit.
-    let mut wrong = Packet::echo_request(2).encode().unwrap();
-    wrong[3] += 1;
-    flood_datagram(&flooder, to, &wrong, 100, stats).await;
-    let elapsed = start.elapsed();
-    let answered = replies(&flooder).await.len();
+    let mut elapsed = Duration::ZERO;
+    let answered = replies_during(&flooder, async {
+        flood(&flooder, to, &Packet::echo_request(1), 500, stats).await;
+        // An Echo Request whose Length is wrong gets an Echo Response with a
+        // Cause: within the same limit.
+        let mut wrong = Packet::echo_request(2).encode().unwrap();
+        wrong[3] += 1;
+        flood_datagram(&flooder, to, &wrong, 100, stats).await;
+        elapsed = start.elapsed();
+    })
+    .await
+    .len();
     let at_most = 10 + (elapsed.as_secs_f64() * 10.0).ceil() as usize + 1;
     assert!(
         (10..=at_most).contains(&answered),
@@ -350,8 +390,15 @@ async fn a_socket_sends_a_thousand_replies_a_second_at_most() {
     }
     let at_most = 1000 + (elapsed.as_secs_f64() * 1000.0).ceil() as usize + 1;
     assert!(
-        (1000..=at_most.min(2499)).contains(&sent),
+        (1000..=at_most).contains(&sent),
         "{sent} replies in {elapsed:?}"
     );
-    assert_eq!(endpoint.stats().suppressed_replies, 2500 - sent as u64);
+    // A flood that took less than 1.5 s goes past the limit, and one that
+    // took longer need not: a slow machine sends every reply.
+    let suppressed = endpoint.stats().suppressed_replies;
+    assert_eq!(suppressed, 2500 - sent as u64);
+    assert!(
+        suppressed >= 2500_u64.saturating_sub(at_most as u64),
+        "{suppressed} replies suppressed in {elapsed:?}"
+    );
 }
