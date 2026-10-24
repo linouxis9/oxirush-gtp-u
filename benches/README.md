@@ -66,3 +66,33 @@ tunnel of one more UE and its removal with `remove_ran`:
 
 Neither walks through the tunnels: an endpoint finds the tunnel that an
 Error Indication names, and those of a UE, in an index.
+
+## Against go-gtp
+
+[go-gtp](https://github.com/wmnsk/go-gtp) v0.8.12 on the same G-PDUs of
+1,400 octets, built before they are timed, each program on core 2 of the
+machine above (Go 1.27), at 0d25889. Times are the lowest of three runs,
+and each figure the median of three runs of the script. Cycles and
+instructions are per operation, from `perf stat`, user and kernel. Peak
+memory is that of the whole program. The last column is the time of go-gtp
+over this crate's, "about the same" within 10 %, which two builds of the
+same code can differ by. The three runs of an operation differed by 3 % at
+most.
+
+| Operation | | ns | Cycles | Instructions | Allocations | Octets allocated | Peak memory | go-gtp / this crate |
+|---|---|---|---|---|---|---|---|---|
+| Encode, no extension header | oxirush-gtp-u | 17.8 | 82 | 305 | 0 | 0 | 2.6 MiB | |
+| | go-gtp | 17.7 | 80 | 338 | 0 | 0 | 5.5 MiB | about the same |
+| Encode, PDU Session Container | oxirush-gtp-u | 25.8 | 116 | 472 | 0 | 0 | 2.6 MiB | |
+| | go-gtp | 26.1 | 117 | 525 | 0 | 0 | 5.5 MiB | about the same |
+| Decode, no extension header | oxirush-gtp-u | 10.8 | 48 | 127 | 0 | 0 | 2.7 MiB | |
+| | go-gtp | 4.1 | 18 | 88 | 0 | 0 | 5.4 MiB | 0.38x |
+| Decode, PDU Session Container | oxirush-gtp-u | 24.0 | 110 | 251 | 0 | 0 | 2.7 MiB | |
+| | go-gtp | 43.9 | 204 | 864 | 2 | 56 | 10.2 MiB | 1.8x |
+| Endpoint to endpoint and back, no extension header, loopback | oxirush-gtp-u | 12,078 | 56,106 | 39,975 | 2 | 2,807 | 3.0 MiB | |
+| | go-gtp | 23,900 | 109,192 | 85,322 | 82 | 8,736 | 10.3 MiB | 2.0x |
+
+`decode_borrowed` returns a `Packet` of 136 octets, with room for one
+extension header whether the message has one or not.
+`benches/compare.sh 3` runs every row on core 3, and fetches go-gtp at the
+version that it pins; perf may need `PERF="sudo -n perf"`.

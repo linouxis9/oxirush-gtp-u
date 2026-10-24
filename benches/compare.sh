@@ -1,5 +1,5 @@
 #!/bin/sh
-# The table of the README's comparison: this crate and go-gtp, whose
+# The table of the comparison in benches/README.md: this crate and go-gtp, whose
 # version compare/go.mod pins and `go build` fetches, on the same G-PDUs.
 #
 #   benches/compare.sh [core]

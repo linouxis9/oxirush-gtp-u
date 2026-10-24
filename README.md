@@ -43,7 +43,7 @@ TEID 0x12345678, QFI Some(9)
 QFI 9, RQI true
 ```
 
-The text under a block is what the block prints.
+Each example is followed by its output.
 
 This page describes oxirush-gtp-u 0.1.0, which is not on crates.io yet.
 
@@ -66,11 +66,10 @@ tokio = { version = "1", features = ["macros", "rt", "net"] } # for the endpoint
 | `serde` | `Serialize` and `Deserialize` for `RemoteTunnel` | |
 | `cli` | the `oxirush-upf-sim` program | |
 
-`ebpf` brings `tun`, and `tun`, `serde` and `cli` bring `endpoint`. Off
-Linux, `tun` and `ebpf` build and add nothing, and so does `ebpf` on 32-bit
-x86, which aya does not build for, and on big-endian architectures. The
-eBPF programs are committed as an object: a build with `ebpf` needs no
-nightly toolchain and no eBPF linker.
+`ebpf` turns on `tun`, and `tun`, `serde` and `cli` turn on `endpoint`.
+Off Linux, `tun` and `ebpf` build and add nothing; so does `ebpf` on 32-bit
+x86 and on big-endian targets. The eBPF programs come prebuilt: a build
+with `ebpf` needs no nightly toolchain and no eBPF linker.
 
 Until 0.1.0 is on crates.io, a program takes the crate from its repository:
 
@@ -84,9 +83,9 @@ The minimum supported Rust version is 1.88.
 ## Carry a PDU session between a gNB and the test UPF
 
 `Endpoint` is the N3 socket of a gNB, or the S1-U socket of an eNB, for
-labs and test tools. A call gives a tunnel the TEIDs (Tunnel Endpoint
-Identifiers), the addresses and the QoS flow that NGAP, S1AP or PFCP
-would negotiate.
+labs and test tools. You give each tunnel the TEIDs (Tunnel Endpoint
+Identifiers), the addresses and the QoS flow that NGAP, S1AP or PFCP would
+negotiate.
 
 ```rust
 use oxirush_gtp_u::upf_sim::{Session, UpfSimulator};
@@ -148,11 +147,11 @@ path up: true, unanswered: 0
 
 ## Take the tunnel from NGAP
 
-The TEIDs and the QoS flow of a tunnel come from the PDU SESSION RESOURCE
-SETUP of NGAP, which
-[oxirush-ngap](https://github.com/linouxis9/oxirush-ngap) decodes: the
-request has the UPF's end of the tunnel in its transfer, and the response
-gives the AMF the gNB's.
+In a 5G network, the TEIDs and the QoS flow of a tunnel come from the PDU
+SESSION RESOURCE SETUP of NGAP, which
+[oxirush-ngap](https://github.com/linouxis9/oxirush-ngap) decodes. The
+request carries the UPF's end of the tunnel in its transfer, and the
+response gives the AMF the gNB's end.
 
 ```rust,ignore
 use oxirush_gtp_u::upf_sim::{Session, UpfSimulator};
@@ -299,12 +298,13 @@ Echo Response, sequence number Some(7), [Recovery(0)]
 Error Indication for RAN UE 1 session 5: [TeidDataI(0x00001001), GtpUPeerAddress(127.0.0.10)]
 ```
 
-An endpoint also sends an Error Indication for a G-PDU on a TEID that it
-does not have. Whoever reaches the socket can send such G-PDUs, and Echo
-Requests, from any address: an address gets 100 Error Indications a second
-at most and 10 Echo Responses, and all addresses together 1,000 Error
-Indications. `stats()` counts the replies that were not sent, the G-PDUs on
-unknown TEIDs and the Error Indications that name no tunnel.
+An endpoint, too, answers a G-PDU on a TEID it does not have with an Error
+Indication. Since anyone who reaches the socket can send such G-PDUs
+and Echo Requests from any address, the replies are limited: each address
+gets at most 100 Error Indications and 10 Echo Responses a second, and all
+addresses together 1,000 Error Indications. `stats()` counts the replies
+that were not sent, the G-PDUs on unknown TEIDs and the Error Indications
+that name no tunnel.
 
 ## Read and write extension headers
 
@@ -344,19 +344,18 @@ Other { kind: ExtensionHeaderType(0x21), content: 2 octets 0700 }
 [9a, bc, de, f0, 00, 00, 00, 85, 01, 10, 05, 21]
 ```
 
-Every extension header of TS 29.281 V19.2.0 has a variant; one of another
-type is kept as its octets, `Other`. An endpoint delivers a message with
-the headers that have a variant. It refuses one with a header that is kept
-as octets and that a receiver must understand, as the specification
-requires, and answers a G-PDU or an Echo Request that has one with the
-list of the types that it knows. `examples/handover.rs` writes the headers
-of a handover: the PDCP PDU Number of a forwarded packet, the long one, and
-the End Marker of a forwarding tunnel.
+Every extension header of TS 29.281 V19.2.0 has a variant, and a header of
+another type is kept as its octets, in `Other`. An endpoint refuses a
+message with such a header when a receiver must understand it, as the
+specification requires, and answers a G-PDU or an Echo Request that has one
+with the list of the types that it knows. `examples/handover.rs` writes the
+headers of a handover: the PDCP PDU Number of a forwarded packet, the long
+one, and the End Marker of a forwarding tunnel.
 
 ## Give a tunnel a TUN
 
 With the `tun` feature, on Linux, what a socket bound to the UE's address
-sends is routed into the tunnel.
+sends goes into the tunnel.
 
 ```rust,no_run
 #[cfg(target_os = "linux")]
@@ -400,24 +399,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 192.0.2.1:7 answered "hello"
 ```
 
-It creates an interface and a routing rule, which needs `CAP_NET_ADMIN`.
-A user namespace and a network namespace of its own give it that without
-root, and keep them off the host:
+It creates an interface and a routing rule, which needs `CAP_NET_ADMIN`. A
+user namespace with its own network namespace gives it that without root,
+and keeps both off the host:
 
 ```sh
 cargo build --features tun --example tun
 unshare --user --map-root-user --net sh -c 'ip link set lo up && target/debug/examples/tun'
 ```
 
-Where users may not make user namespaces, as Ubuntu restricts them, `sudo
-unshare --net` does it in the place of `unshare --user --map-root-user
---net`.
+Where users may not create user namespaces, as on Ubuntu, use `sudo
+unshare --net` instead of `unshare --user --map-root-user --net`.
 
 ## Carry the tunnel in the kernel
 
 With the `ebpf` feature, on Linux 6.6, eBPF programs carry the packets of a
-tunnel between its TUN and the network. The endpoint gets them before its
-tunnels are installed, and `attach_tun` does the rest:
+tunnel between its TUN and the network. Give them to the endpoint before you
+install its tunnels, and `attach_tun` does the rest:
 
 ```rust,no_run
 #[tokio::main(flavor = "current_thread")]
@@ -472,8 +470,8 @@ sudo unshare --net sh -c 'ip link set lo up && target/debug/examples/fast_path'
 ## Run the test UPF as a program
 
 The arguments are the N3 address of the UPF, that of the gNB, the uplink
-TEID, the downlink TEID, decimal or hexadecimal, and the QFI. It serves that
-session with an echo service, or as root with a TUN.
+TEID, the downlink TEID (decimal or hexadecimal), and the QFI. The program
+serves that session with an echo service, or as root with a TUN.
 
 ```sh
 cargo run --features cli --bin oxirush-upf-sim -- 127.0.0.8:2152 127.0.0.1:2152 0x1001 0x2001 9
@@ -485,20 +483,21 @@ sudo ./target/debug/oxirush-upf-sim \
 
 ## Limits
 
-- Control plane: it has no NGAP, S1AP or PFCP.
-- Untrusted peers: the endpoint and the test UPF are for labs and test
-  tools. GTP-U has no authentication: whoever reaches a socket can send on
-  its tunnels.
-- A UPF for real traffic: the test UPF has no PFCP, QoS or charging.
-- GTP' and the versions 0 and 2 of GTP.
-- IPv6 in the helpers, the TUN routing and the fast path. The codec and the
-  endpoint carry any payload.
+- It has no control plane: no NGAP, S1AP or PFCP.
+- The endpoint and the test UPF are for labs and test tools, not for
+  untrusted peers. GTP-U has no authentication: whoever reaches a socket can
+  send on its tunnels.
+- The test UPF is not one for real traffic: it has no PFCP, QoS or
+  charging.
+- It has no GTP' and no versions 0 and 2 of GTP.
+- The helpers, the TUN routing and the fast path are IPv4 only. The codec
+  and the endpoint carry any payload.
 
 ## Performance
 
-On one core of an AMD Ryzen 7 5700G (16 threads, Linux 7.0, Rust 1.98.1),
-at 0d25889, measured on a quiet machine on 2026-10-18, a G-PDU with its PDU
-Session Container and 1,400 octets of payload, the lowest of five runs:
+On one core of an AMD Ryzen 7 5700G (Linux 7.0, Rust 1.98.1), at 0d25889 on
+2026-10-18, for a G-PDU with its PDU Session Container and 1,400 octets of
+payload:
 
 | | Time |
 |---|---|
@@ -514,32 +513,26 @@ has the benchmarks, the other figures and how to profile.
 ### Against go-gtp
 
 [go-gtp](https://github.com/wmnsk/go-gtp) v0.8.12 on the same G-PDUs of
-1,400 octets, built before they are timed, each program on core 2 of the
-same machine (Go 1.27), at 0d25889. Times are the lowest of three runs,
-and each figure the median of three runs of the script. Cycles and
-instructions are per operation, from `perf stat`, user and kernel. Peak
-memory is that of the whole program. The last column is the time of go-gtp
-over this crate's, "about the same" within 10 %, which two builds of the
-same code can differ by. The three runs of an operation differed by 3 % at
-most.
+1,400 octets, at 0d25889 on core 2 of the same machine. A ratio is the time
+of go-gtp over this crate's, and "about the same" is within 10 %:
 
-| Operation | | ns | Cycles | Instructions | Allocations | Octets allocated | Peak memory | go-gtp / this crate |
-|---|---|---|---|---|---|---|---|---|
-| Encode, no extension header | oxirush-gtp-u | 17.8 | 82 | 305 | 0 | 0 | 2.6 MiB | |
-| | go-gtp | 17.7 | 80 | 338 | 0 | 0 | 5.5 MiB | about the same |
-| Encode, PDU Session Container | oxirush-gtp-u | 25.8 | 116 | 472 | 0 | 0 | 2.6 MiB | |
-| | go-gtp | 26.1 | 117 | 525 | 0 | 0 | 5.5 MiB | about the same |
-| Decode, no extension header | oxirush-gtp-u | 10.8 | 48 | 127 | 0 | 0 | 2.7 MiB | |
-| | go-gtp | 4.1 | 18 | 88 | 0 | 0 | 5.4 MiB | 0.38x |
-| Decode, PDU Session Container | oxirush-gtp-u | 24.0 | 110 | 251 | 0 | 0 | 2.7 MiB | |
-| | go-gtp | 43.9 | 204 | 864 | 2 | 56 | 10.2 MiB | 1.8x |
-| Endpoint to endpoint and back, no extension header, loopback | oxirush-gtp-u | 12,078 | 56,106 | 39,975 | 2 | 2,807 | 3.0 MiB | |
-| | go-gtp | 23,900 | 109,192 | 85,322 | 82 | 8,736 | 10.3 MiB | 2.0x |
+| Operation | This crate | go-gtp / this crate |
+|---|---|---|
+| Encode, no extension header | 17.8 ns | about the same |
+| Encode, PDU Session Container | 25.8 ns | about the same |
+| Decode, no extension header | 10.8 ns | 0.38x |
+| Decode, PDU Session Container | 24.0 ns | 1.8x |
+| Endpoint to endpoint and back, no extension header, loopback | 12,078 ns | 2.0x |
 
 `decode_borrowed` returns a `Packet` of 136 octets, with room for one
 extension header whether the message has one or not.
-`benches/compare.sh 3` runs every row on core 3, and fetches go-gtp at the
-version that it pins; perf may need `PERF="sudo -n perf"`.
+[`benches/`](benches/README.md#against-go-gtp) has every figure, with cycles,
+instructions, allocations and peak memory, and the method.
+`benches/compare.sh 3` runs every row on core 3:
+
+```sh
+benches/compare.sh 3
+```
 
 ## Tests and fuzzing
 
@@ -556,13 +549,13 @@ CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER=sudo \
 cargo test --test wireshark -- --ignored
 ```
 
-Property tests and a `cargo fuzz` target check that decoding never panics
+Property tests and a `cargo fuzz` target check that decoding never panics,
 and that what decodes encodes to a message that decodes to the same value.
-CI rebuilds the eBPF object from its source and compares. The Rust blocks of
-this page are checked with what they print
-([`tests/readme.rs`](tests/readme.rs)). The blocks that use other crates of
-the family run in the package of [`family/`](family/), which takes those
-crates at the revisions that its manifest names.
+CI rebuilds the eBPF object from its source and compares. Each Rust block of
+this page is checked with what it prints
+([`tests/readme.rs`](tests/readme.rs)). The block that uses another crate of
+the family runs in the package of [`family/`](family/), which takes that
+crate at the revision that its manifest names.
 
 [The documentation](https://docs.rs/oxirush-gtp-u) has the terms, what the
 codec covers, and the reference of the endpoint, the test UPF, the TUN
