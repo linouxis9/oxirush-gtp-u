@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- The keywords take `gtp` in the place of `3gpp`, and the description says 5GS and EPS (5G and 4G LTE), as those who look for the crate search.
+
 ## 0.1.0 - 2026-10-24
 
 First release.
