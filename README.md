@@ -474,6 +474,13 @@ TEID, the downlink TEID (decimal or hexadecimal), and the QFI. The program
 serves that session with an echo service, or as root with a TUN.
 
 ```sh
+cargo install oxirush-gtp-u --locked --features cli       # --features cli,tun for a TUN
+oxirush-upf-sim 127.0.0.8:2152 127.0.0.1:2152 0x1001 0x2001 9
+```
+
+From a checkout of the repository:
+
+```sh
 cargo run --features cli --bin oxirush-upf-sim -- 127.0.0.8:2152 127.0.0.1:2152 0x1001 0x2001 9
 
 cargo build --features cli,tun --bin oxirush-upf-sim
