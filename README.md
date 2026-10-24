@@ -45,8 +45,6 @@ QFI 9, RQI true
 
 Each example is followed by its output.
 
-This page describes oxirush-gtp-u 0.1.0, which is not on crates.io yet.
-
 ## Installation
 
 ```toml
@@ -70,13 +68,6 @@ tokio = { version = "1", features = ["macros", "rt", "net"] } # for the endpoint
 Off Linux, `tun` and `ebpf` build and add nothing; so does `ebpf` on 32-bit
 x86 and on big-endian targets. The eBPF programs come prebuilt: a build
 with `ebpf` needs no nightly toolchain and no eBPF linker.
-
-Until 0.1.0 is on crates.io, a program takes the crate from its repository:
-
-```toml
-[dependencies]
-oxirush-gtp-u = { git = "https://github.com/linouxis9/oxirush-gtp-u" }
-```
 
 The minimum supported Rust version is 1.88.
 
@@ -562,7 +553,7 @@ CI rebuilds the eBPF object from its source and compares. Each Rust block of
 this page is checked with what it prints
 ([`tests/readme.rs`](tests/readme.rs)). The block that uses another crate of
 the family runs in the package of [`family/`](family/), which takes that
-crate at the revision that its manifest names.
+crate at the version that its manifest names.
 
 [The documentation](https://docs.rs/oxirush-gtp-u) has the terms, what the
 codec covers, and the reference of the endpoint, the test UPF, the TUN

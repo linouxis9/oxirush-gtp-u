@@ -1,5 +1,5 @@
 # The blocks of the README that use other crates of the family: oxirush-gtp-u with them,
-# at the revisions that this manifest names. A package of its own, so that the crate
+# at the versions that this manifest names. A package of its own, so that the crate
 # depends on none of them: nothing here is published. `cargo test` here runs the
 # blocks and compares what they print with the README.
 [package]
@@ -11,13 +11,8 @@ license = "Apache-2.0"
 
 [dev-dependencies]
 oxirush-gtp-u = { path = ".." }
-oxirush-ngap = { git = "https://github.com/linouxis9/oxirush-ngap", rev = "eeddd94e6a8671945b9df23f46ad90adb421ba22", features = ["inspect"] }
+oxirush-ngap = { version = "0.5", features = ["inspect"] }
 tokio = { version = "1.38", features = ["macros", "net", "rt"] }
 
 # Not a member of a workspace that the crate may be in.
 [workspace]
-
-# Until they are on crates.io, the crates come from their repositories.
-[patch.crates-io]
-oxirush-aper = { git = "https://github.com/linouxis9/oxirush-aper", rev = "48d0bb4607f1ac11ada9966db59297a96d5ca154" }
-oxirush-utils = { git = "https://github.com/linouxis9/oxirush-utils", rev = "1fb4d2720fa0b1c036e54d3e9907b278adac0f80" }
