@@ -1,14 +1,23 @@
 name: Mutants
 
 # cargo-mutants changes the code of the crate at one place at a time, a mutant, and
-# runs the tests on each: a mutant that every test passes is code that no test
-# checks. .cargo/mutants.toml says what it leaves alone, and why. The mutants are
-# split in shards that run beside each other, each of which keeps its mutants.out;
-# a missed mutant fails its shard.
+# runs the tests on each: a mutant that every test passes is code that no test checks.
+# .cargo/mutants.toml says what it leaves alone, and why. Every mutant runs each Saturday
+# evening, and when the run is started by hand with `full`; on the other nights after a
+# day with a commit, and when it is started by hand without `full`, the mutants of the
+# code that the commits of the last day changed. Each job keeps its mutants.out, and a
+# missed mutant fails it. The crates of the family start at times of their own, the
+# longest first, and few jobs of each run at once, to leave runners to the other CI.
 on:
   schedule:
-    - cron: "41 2 * * *"
+    - cron: "3 22 * * 6"
+    - cron: "23 2 * * 1-6"
   workflow_dispatch:
+    inputs:
+      full:
+        description: Every mutant, rather than those of the last day's changes
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -19,26 +28,41 @@ env:
   CARGO_PROFILE_DEV_DEBUG: 0
 
 jobs:
-  # A night after a day without a commit has no new code to mutate: the scheduled
-  # run stops here. A run started by hand always runs.
-  changed:
-    name: A commit of the last day
+  # What the run mutates: every mutant, the mutants of what the commits of the last day
+  # changed since the last commit before them, or nothing after a day without a commit.
+  plan:
+    name: What to mutate
     runs-on: ubuntu-latest
     outputs:
-      run: ${{ steps.check.outputs.run }}
+      mode: ${{ steps.plan.outputs.mode }}
+      base: ${{ steps.plan.outputs.base }}
     steps:
       - uses: actions/checkout@v4
-      - id: check
+        with:
+          fetch-depth: 0
+      - id: plan
+        env:
+          WEEKLY: "3 22 * * 6"
+          SCHEDULE: ${{ github.event.schedule }}
+          FULL: ${{ inputs.full }}
         run: |
-          age=$(( $(date +%s) - $(git log -1 --format=%ct) ))
-          if [ "$GITHUB_EVENT_NAME" != schedule ] || [ "$age" -lt 86400 ]; then
-            echo run=true >> "$GITHUB_OUTPUT"
+          # The last commit before the last day, or the empty tree
+          base=$(git rev-list -1 --before="24 hours ago" HEAD)
+          base=${base:-$(git hash-object -t tree /dev/null)}
+          if [ "$SCHEDULE" = "$WEEKLY" ] || [ "$FULL" = true ]; then
+            mode=full
+          elif [ "$base" != "$(git rev-parse HEAD)" ]; then
+            mode=diff
+          else
+            mode=none
           fi
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "base=$base" >> "$GITHUB_OUTPUT"
 
   mutants:
     name: Mutants (shard ${{ matrix.shard }} of 4)
-    needs: changed
-    if: needs.changed.outputs.run == 'true'
+    needs: plan
+    if: needs.plan.outputs.mode == 'full'
     runs-on: ubuntu-latest
     env:
       # A test of a mutant that allocates without end fails once it has 4 GiB of
@@ -47,6 +71,7 @@ jobs:
     timeout-minutes: 300
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         shard: [0, 1, 2, 3]
     steps:
@@ -67,18 +92,48 @@ jobs:
           name: mutants.out-${{ matrix.shard }}
           path: mutants.out
 
-  # The TUN device, its routes, netlink and the loader of the eBPF fast path, which
-  # .cargo/mutants.toml leaves to this job: the tests that see what they do create
-  # devices and namespaces and load programs, as root, as the job `tun` of the CI runs
-  # them. One mutant at a time, for the tests share the names of their namespaces.
+  # The mutants of the lines that the commits of the last day changed.
+  changes:
+    name: Mutants of the last day's changes
+    needs: plan
+    if: needs.plan.outputs.mode == 'diff'
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: prlimit --as=4294967296
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants@27.1.0
+      - run: |
+          git diff ${{ needs.plan.outputs.base }} HEAD > "$RUNNER_TEMP/changes.diff"
+          cargo mutants --in-diff "$RUNNER_TEMP/changes.diff" -j 2 || [ $? -eq 3 ]
+          test ! -s mutants.out/missed.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mutants.out-changes
+          path: mutants.out
+
+
+  # After the shards, the TUN device, its routes, netlink and the loader of the eBPF
+  # fast path, which .cargo/mutants.toml leaves to this job: the tests that see what
+  # they do create devices and namespaces and load programs, as root, as the job `tun`
+  # of the CI runs them. One mutant at a time, for the tests share the names of their
+  # namespaces.
   privileged:
     name: Mutants of TUN, netlink and eBPF (shard ${{ matrix.shard }} of 2, root)
-    needs: changed
-    if: needs.changed.outputs.run == 'true'
+    needs: [plan, mutants]
+    if: always() && needs.plan.outputs.mode == 'full'
     runs-on: ubuntu-24.04
     timeout-minutes: 300
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         shard: [0, 1]
     steps:
