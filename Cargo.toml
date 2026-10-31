@@ -10,7 +10,7 @@ documentation = "https://docs.rs/oxirush-gtp-u"
 keywords = ["gtp", "gtp-u", "5g", "upf", "ebpf"]
 categories = ["network-programming", "parser-implementations", "development-tools::testing"]
 readme = "README.md"
-exclude = ["/.github", "/.gitignore", "/benches", "/ebpf/.gitignore", "/family", "/fuzz"]
+exclude = ["/.cargo", "/.github", "/.gitignore", "/benches", "/ebpf/.gitignore", "/family", "/fuzz"]
 
 [features]
 default = ["endpoint"]

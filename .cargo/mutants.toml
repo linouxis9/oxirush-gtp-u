@@ -1,0 +1,21 @@
+# What cargo-mutants 27.1.0 (https://mutants.rs) changes in the crate, and what it
+# leaves alone. .github/workflows/mutants.yml runs every mutant in shards; here, a
+# file or a function at a time:
+#
+#     cargo mutants -f src/extension.rs
+#
+# The CI of the crate is the same build without debug information
+# (CARGO_PROFILE_DEV_DEBUG=0), which builds and links each mutant faster. The eBPF
+# programs of src/ebpf/programs.rs are no module of the crate: ebpf/build.sh builds
+# them into the committed object, which the crate loads.
+
+# Every feature, so that the code of `tun`, `ebpf`, `serde` and `cli` is in the build
+# that the tests run on: without its feature, a mutant of that code would build
+# without it and pass.
+all_features = true
+
+# The TUN device, its routes, netlink and the loader of the eBPF fast path: the tests
+# that see what they do run as root, in network namespaces, which `cargo test` does
+# not. The job `privileged` of .github/workflows/mutants.yml runs these mutants with
+# them.
+exclude_globs = ["src/tun.rs", "src/tun/*.rs", "src/netlink.rs", "src/ebpf.rs"]
