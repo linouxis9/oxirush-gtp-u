@@ -608,6 +608,29 @@ mod tests {
         assert!(state.outstanding.contains_key(&1024));
     }
 
+    /// Requests that have not yet waited N3-REQUESTS times T3-RESPONSE keep
+    /// their place: a new one finds no room among 1024 of them.
+    #[tokio::test(start_paused = true)]
+    async fn the_requests_that_have_not_waited_their_time_keep_their_place() {
+        let paths = Paths::new();
+        let timers = PathTimers {
+            t3_response: Duration::from_secs(1),
+            n3_requests: 2,
+            ..PathTimers::default()
+        };
+        paths.set_timers(timers).unwrap();
+        let peer: IpAddr = "192.0.2.1".parse().unwrap();
+        for sequence in 0..1024 {
+            paths.sent_request(peer, sequence);
+        }
+        // Longer than T3-RESPONSE, shorter than twice it
+        tokio::time::advance(Duration::from_millis(1500)).await;
+        paths.sent_request(peer, 1024);
+        let state = lock(&paths.state);
+        assert_eq!(state.outstanding.len(), 1024);
+        assert!(!state.outstanding.contains_key(&1024));
+    }
+
     /// A request whose exchange has ended, here unanswered, is no longer
     /// awaited: a response that comes after it answers nothing.
     #[tokio::test]

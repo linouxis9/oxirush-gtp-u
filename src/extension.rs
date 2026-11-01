@@ -988,6 +988,25 @@ impl Reader<'_> {
 mod tests {
     use super::*;
 
+    /// The decoder of the usual container takes only what the decoder of
+    /// every header takes as the same container: for each first two octets
+    /// of a PDU Session Container, it answers nothing or what that one does.
+    #[test]
+    fn the_usual_container_is_decoded_as_every_header_is() {
+        for flags in 0..=u8::MAX {
+            for octet in 0..=u8::MAX {
+                let content = [flags, octet];
+                if let Some(usual) = PduSessionContainer::usual(&content) {
+                    assert_eq!(
+                        ExtensionHeader::decode_any(PDU_SESSION_CONTAINER, &content),
+                        Ok(ExtensionHeader::PduSessionContainer(usual)),
+                        "{content:02x?}"
+                    );
+                }
+            }
+        }
+    }
+
     /// The encoder of the usual container writes what the encoder of every
     /// header writes, and leaves to it what it is not for.
     #[test]

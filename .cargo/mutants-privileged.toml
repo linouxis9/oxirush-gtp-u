@@ -22,6 +22,7 @@ examine_re = [
     'src/endpoint/routes\.rs:(49|80|286|338|350|361):[0-9]+: replace ',
     'src/endpoint/routes\.rs:266:70: replace != with == in RouteTable::install_with_teid$',
     'src/endpoint\.rs:(280|622|623|670|972|1017|1078):[0-9]+: (replace|delete) ',
+    'src/endpoint\.rs:1008:5: replace forward_tun with \(\)$',
     'src/upf_sim\.rs:(277|281|296|398|435|453|519|672|676|704):[0-9]+: (replace|delete) ',
     'src/upf_sim/sessions\.rs:(57|237|255|257):[0-9]+: (replace|delete) ',
 ]
