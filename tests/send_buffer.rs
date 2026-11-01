@@ -43,8 +43,10 @@ fn isolate() {
         io::Error::last_os_error()
     );
     run("ip", &["link", "set", "lo", "up"]);
-    // Two datagrams of a bucket, then a bit a second
-    let tbf = "root tbf rate 8bit burst 4kb limit 16mb";
+    // Two datagrams of a bucket, then a kilobyte a second: in the 300 ms
+    // before the qdisc is removed, its queue lets almost nothing go. A lower
+    // rate is refused: tc's time to send the burst must fit in its ticks.
+    let tbf = "root tbf rate 8kbit burst 4kb limit 16mb";
     let tbf: Vec<&str> = tbf.split(' ').collect();
     run("tc", &[&["qdisc", "add", "dev", "lo"], &tbf[..]].concat());
 }
