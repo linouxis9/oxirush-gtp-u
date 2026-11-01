@@ -25,6 +25,24 @@ async fn rejects_wildcard_bind_addresses() {
     }
 }
 
+/// What `bind` binds on port 2152, once it is free: the same test in another
+/// process may hold the address, as when cargo-mutants tests several mutants
+/// at once.
+async fn on_port_2152<T, F: Future<Output = std::io::Result<T>>>(mut bind: impl FnMut() -> F) -> T {
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        match bind().await {
+            Err(error)
+                if error.kind() == std::io::ErrorKind::AddrInUse
+                    && std::time::Instant::now() < deadline =>
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            bound => return bound.unwrap(),
+        }
+    }
+}
+
 const WAIT: Duration = Duration::from_secs(2);
 
 fn udp(payload: &[u8]) -> Vec<u8> {
@@ -417,9 +435,8 @@ async fn error_indication_from_the_upf_reaches_the_tunnel() {
     let (upf, _) = UpfSimulator::bind("127.0.0.1:0".parse().unwrap())
         .await
         .unwrap();
-    let (gnb, mut received) = Endpoint::bind("127.0.0.27:2152".parse().unwrap())
-        .await
-        .unwrap();
+    let (gnb, mut received) =
+        on_port_2152(|| Endpoint::bind("127.0.0.27:2152".parse().unwrap())).await;
     let remote = RemoteTunnel {
         address: upf.local_addr().unwrap(),
         teid: 0x3030,
@@ -508,7 +525,7 @@ async fn sends_error_indication_for_an_unknown_uplink_teid() {
     let (upf, _) = UpfSimulator::bind("127.0.0.1:0".parse().unwrap())
         .await
         .unwrap();
-    let gnb_listener = UdpSocket::bind("127.0.0.26:2152").await.unwrap();
+    let gnb_listener = on_port_2152(|| UdpSocket::bind("127.0.0.26:2152")).await;
     let gnb = UdpSocket::bind("127.0.0.26:0").await.unwrap();
     gnb.send_to(
         &Packet::uplink(77, 9, vec![0x45]).encode().unwrap(),

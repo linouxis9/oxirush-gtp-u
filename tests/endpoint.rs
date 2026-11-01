@@ -137,12 +137,24 @@ async fn reply(socket: &UdpSocket) -> Packet {
 /// Supported Extension Headers Notifications go (TS 29.281 §4.4.2.4,
 /// §4.4.2.5), and one on another port of that address to send from. Each
 /// test takes its own address; macOS has no loopback address but 127.0.0.1.
+/// The same test in another process may hold the address, as when
+/// cargo-mutants tests several mutants at once: the socket waits until it is
+/// free.
 #[cfg(not(target_os = "macos"))]
 async fn user_plane_peer(host: u8) -> (UdpSocket, UdpSocket) {
     let address = Ipv4Addr::new(127, 0, 0, host);
-    let listener = UdpSocket::bind((address, oxirush_gtp_u::PORT))
-        .await
-        .expect("port 2152 of the test address must be free");
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    let listener = loop {
+        match UdpSocket::bind((address, oxirush_gtp_u::PORT)).await {
+            Err(error)
+                if error.kind() == io::ErrorKind::AddrInUse
+                    && std::time::Instant::now() < deadline =>
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            bound => break bound.expect("port 2152 of the test address is free"),
+        }
+    };
     let sender = UdpSocket::bind((address, 0)).await.unwrap();
     (listener, sender)
 }

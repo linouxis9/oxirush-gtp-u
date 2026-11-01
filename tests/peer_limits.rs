@@ -23,6 +23,24 @@ use tokio::time::timeout;
 use tracing::span::{Attributes, Id, Record};
 use tracing::{Event, Level, Metadata, Subscriber};
 
+/// What `bind` binds on port 2152, once it is free: the same test in another
+/// process may hold the address, as when cargo-mutants tests several mutants
+/// at once.
+async fn on_port_2152<T, F: Future<Output = std::io::Result<T>>>(mut bind: impl FnMut() -> F) -> T {
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        match bind().await {
+            Err(error)
+                if error.kind() == std::io::ErrorKind::AddrInUse
+                    && std::time::Instant::now() < deadline =>
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            bound => return bound.unwrap(),
+        }
+    }
+}
+
 /// The events of each level that a test's thread logs.
 #[derive(Default)]
 struct Lines {
@@ -148,7 +166,7 @@ fn lines_at_most(elapsed: Duration) -> usize {
 #[test]
 fn a_peer_without_a_tunnel_gets_replies_within_a_rate_and_few_lines() {
     logged(|lines| async move {
-        let (endpoint, _received) = Endpoint::bind("127.0.0.60:2152".parse().unwrap())
+        let (endpoint, _received) = Endpoint::bind("127.0.0.60:0".parse().unwrap())
             .await
             .unwrap();
         endpoint
@@ -160,7 +178,7 @@ fn a_peer_without_a_tunnel_gets_replies_within_a_rate_and_few_lines() {
             )
             .unwrap();
         // The replies go to port 2152 of the sender.
-        let peer = UdpSocket::bind("127.0.0.61:2152").await.unwrap();
+        let peer = on_port_2152(|| UdpSocket::bind("127.0.0.61:2152")).await;
         let to = endpoint.local_addr().unwrap();
         let stats = || endpoint.stats();
         let start = Instant::now();
@@ -221,10 +239,10 @@ fn a_peer_without_a_tunnel_gets_replies_within_a_rate_and_few_lines() {
 #[test]
 fn a_peer_without_a_session_gets_error_indications_of_the_test_upf_within_a_rate() {
     logged(|lines| async move {
-        let (upf, _observed) = UpfSimulator::bind("127.0.0.62:2152".parse().unwrap())
+        let (upf, _observed) = UpfSimulator::bind("127.0.0.62:0".parse().unwrap())
             .await
             .unwrap();
-        let peer = UdpSocket::bind("127.0.0.63:2152").await.unwrap();
+        let peer = on_port_2152(|| UdpSocket::bind("127.0.0.63:2152")).await;
         let to = upf.local_addr().unwrap();
         let stats = || upf.stats();
         let start = Instant::now();
@@ -273,10 +291,10 @@ fn a_peer_without_a_session_gets_error_indications_of_the_test_upf_within_a_rate
 async fn each_socket_has_its_own_limit() {
     let mut sent = Vec::new();
     for (local, remote) in [("127.0.0.64", "127.0.0.65"), ("127.0.0.66", "127.0.0.67")] {
-        let (endpoint, _received) = Endpoint::bind(format!("{local}:{PORT}").parse().unwrap())
+        let (endpoint, _received) = Endpoint::bind(format!("{local}:0").parse().unwrap())
             .await
             .unwrap();
-        let peer = UdpSocket::bind(format!("{remote}:{PORT}")).await.unwrap();
+        let peer = on_port_2152(|| UdpSocket::bind(format!("{remote}:{PORT}"))).await;
         let to = endpoint.local_addr().unwrap();
         flood(&peer, to, &Packet::g_pdu(0x99, vec![]), 100, || {
             endpoint.stats()
@@ -297,13 +315,13 @@ async fn each_socket_has_its_own_limit() {
 /// limit. Both peers fall into it in one run of a million.
 #[tokio::test]
 async fn a_flood_from_one_address_leaves_their_error_indications_to_the_others() {
-    let (endpoint, _received) = Endpoint::bind("127.0.1.1:2152".parse().unwrap())
+    let (endpoint, _received) = Endpoint::bind("127.0.1.1:0".parse().unwrap())
         .await
         .unwrap();
-    let attacker = UdpSocket::bind("127.0.1.2:2152").await.unwrap();
+    let attacker = on_port_2152(|| UdpSocket::bind("127.0.1.2:2152")).await;
     let peers = [
-        UdpSocket::bind("127.0.1.3:2152").await.unwrap(),
-        UdpSocket::bind("127.0.1.8:2152").await.unwrap(),
+        on_port_2152(|| UdpSocket::bind("127.0.1.3:2152")).await,
+        on_port_2152(|| UdpSocket::bind("127.0.1.8:2152")).await,
     ];
     let to = endpoint.local_addr().unwrap();
     let mut removed = Vec::new();
@@ -355,7 +373,7 @@ async fn a_flood_from_one_address_leaves_their_error_indications_to_the_others()
 /// address is still answered.
 #[tokio::test]
 async fn echo_responses_to_one_address_have_a_limit() {
-    let (endpoint, _received) = Endpoint::bind("127.0.1.4:2152".parse().unwrap())
+    let (endpoint, _received) = Endpoint::bind("127.0.1.4:0".parse().unwrap())
         .await
         .unwrap();
     let flooder = UdpSocket::bind("127.0.1.5:0").await.unwrap();
@@ -390,17 +408,13 @@ async fn echo_responses_to_one_address_have_a_limit() {
 /// What a socket sends to all the addresses together has a limit too.
 #[tokio::test]
 async fn a_socket_sends_a_thousand_replies_a_second_at_most() {
-    let (endpoint, _received) = Endpoint::bind("127.0.1.7:2152".parse().unwrap())
+    let (endpoint, _received) = Endpoint::bind("127.0.1.7:0".parse().unwrap())
         .await
         .unwrap();
     let to = endpoint.local_addr().unwrap();
     let mut peers = Vec::new();
     for host in 10..35 {
-        peers.push(
-            UdpSocket::bind(format!("127.0.1.{host}:2152"))
-                .await
-                .unwrap(),
-        );
+        peers.push(on_port_2152(|| UdpSocket::bind(format!("127.0.1.{host}:2152"))).await);
     }
     let start = Instant::now();
     for peer in &peers {
