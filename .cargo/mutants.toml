@@ -19,3 +19,11 @@ all_features = true
 # not. The job `privileged` of .github/workflows/mutants.yml runs these mutants with
 # them.
 exclude_globs = ["src/tun.rs", "src/tun/*.rs", "src/netlink.rs", "src/ebpf.rs"]
+
+# Mutants that no test can tell from the code, each with why.
+exclude_re = [
+    # Flags of distinct bits of one octet, and the QFI of 6 bits that check_qfi keeps
+    # under them: `^` joins them as `|` does. The flags of the first octet of new IEs
+    # of a later release are kept out of those that this release knows.
+    'src/extension\.rs:.*: replace \| with \^ in (ExtensionHeader::usual|UplinkPduSessionInformation::encode)$',
+]
