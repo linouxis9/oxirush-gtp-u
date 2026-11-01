@@ -244,6 +244,14 @@ pub(crate) use limited;
 mod tests {
     use super::*;
 
+    /// The clock of the notices is the nanoseconds since the socket was bound.
+    #[test]
+    fn the_clock_of_the_notices_goes_on() {
+        let notices = Notices::new();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        assert!(notices.now() >= 2_000_000);
+    }
+
     #[test]
     fn a_rate_lets_a_burst_through_then_one_event_an_interval() {
         let rate = Rate::new(100, 5);

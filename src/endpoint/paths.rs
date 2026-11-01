@@ -502,3 +502,51 @@ pub(super) async fn supervise(socket: Arc<DatagramSocket>, paths: Arc<Paths>, pe
         tokio::time::sleep_until(start + paths.timers().interval).await;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::Ipv4Addr;
+
+    /// The Echo Requests that are awaited are 1024 at most: one more, while all are
+    /// recent, is not awaited, and none of the others is forgotten for it.
+    #[test]
+    fn at_most_1024_echo_requests_are_awaited() {
+        let paths = Paths::new();
+        let peer: IpAddr = "192.0.2.1".parse().unwrap();
+        for sequence in 0..=1024 {
+            paths.sent_request(peer, sequence);
+        }
+        let state = lock(&paths.state);
+        assert_eq!(state.outstanding.len(), 1024);
+        assert!(!state.outstanding.contains_key(&1024));
+    }
+
+    /// The table of the peers that notified their extension headers keeps its size:
+    /// a new peer takes the place of another.
+    #[test]
+    fn the_notifying_peers_are_256_at_most() {
+        let paths = Paths::new();
+        let notification =
+            Packet::supported_extension_headers_notification(&[ExtensionHeaderType(0x85)])
+                .encode()
+                .unwrap();
+        let packet = Packet::decode_borrowed(&notification).unwrap();
+        for peer in 0..=256u32 {
+            let from = SocketAddr::new(Ipv4Addr::from(0x0a00_0000 | peer).into(), 2152);
+            assert!(paths.notification(&packet, from));
+        }
+        assert_eq!(lock(&paths.state).supported.len(), 256);
+    }
+
+    /// The supervision of every path ends when the endpoint stops.
+    #[tokio::test]
+    async fn the_supervisions_end_with_the_endpoint() {
+        let paths = Paths::new();
+        let task = tokio::spawn(std::future::pending::<()>());
+        paths.supervise("192.0.2.1:2152".parse().unwrap(), || task.abort_handle());
+        paths.end_supervisions();
+        assert!(lock(&paths.state).supervised.is_empty());
+        assert!(task.await.unwrap_err().is_cancelled());
+    }
+}

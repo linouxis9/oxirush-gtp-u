@@ -296,7 +296,9 @@ mod tests {
         let registry = SessionRegistry::default();
         let old: SocketAddr = "127.0.0.1:2152".parse().unwrap();
         let new: SocketAddr = "127.0.0.2:2152".parse().unwrap();
+        assert_eq!(registry.len(), 0);
         registry.replace(Session::new(1, 2, old, 9)).unwrap();
+        assert_eq!(registry.len(), 1);
         let generation = registry.incarnation(1).unwrap();
         assert!(registry.switch_path(1, &generation, new, 3).unwrap());
         assert!(

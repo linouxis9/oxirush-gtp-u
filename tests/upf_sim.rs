@@ -624,3 +624,31 @@ async fn a_program_that_answers_for_n6_turns_the_echo_service_off() {
     let downlink = next(&mut downlinks).await;
     assert_eq!(parse_ipv4_udp(&downlink.packet.payload).unwrap().2, b"ping");
 }
+
+/// The program says how it is called when asked.
+#[cfg(feature = "cli")]
+#[test]
+fn the_program_prints_its_usage() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_oxirush-upf-sim"))
+        .arg("--help")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let usage = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        usage.starts_with("usage: oxirush-upf-sim <bind-ip:port>"),
+        "{usage}"
+    );
+}
+
+/// A simulator that is dropped stops, and leaves its address to another.
+#[tokio::test]
+async fn a_dropped_simulator_lets_its_address_go() {
+    let (upf, receiver) = UpfSimulator::bind("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    let address = upf.local_addr().unwrap();
+    drop((upf, receiver));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    UpfSimulator::bind(address).await.unwrap();
+}

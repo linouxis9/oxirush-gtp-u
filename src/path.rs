@@ -265,6 +265,18 @@ mod tests {
     use crate::ExtensionHeaderType;
     use std::net::{Ipv4Addr, SocketAddrV6};
 
+    /// An IPv4 peer is reached from an IPv6 socket at its IPv4-mapped address, and
+    /// from an IPv4 socket at its own.
+    #[test]
+    fn an_ipv6_socket_reaches_an_ipv4_peer_at_its_mapped_address() {
+        let peer: SocketAddr = "192.0.2.1:2152".parse().unwrap();
+        let mapped: SocketAddr = "[::ffff:192.0.2.1]:2152".parse().unwrap();
+        assert_eq!(destination(true, peer), mapped);
+        assert_eq!(destination(false, peer), peer);
+        let ipv6: SocketAddr = "[2001:db8::1]:2152".parse().unwrap();
+        assert_eq!(destination(true, ipv6), ipv6);
+    }
+
     #[test]
     fn path_decisions_preserve_reply_ports_and_discard_policy() {
         let from: SocketAddr = "[fe80::1%7]:49152".parse().unwrap();

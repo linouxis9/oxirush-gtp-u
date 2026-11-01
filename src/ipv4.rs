@@ -271,6 +271,19 @@ mod tests {
         assert!(parse_ipv4_udp(&unchecked).is_ok());
     }
 
+    /// RFC 768: the checksum of a UDP datagram covers the pseudo header, the source
+    /// and destination addresses, a zero, the protocol 17 and the UDP length, then
+    /// the datagram; the sum here was done by hand.
+    #[test]
+    fn the_udp_checksum_covers_the_pseudo_header() {
+        let source = SocketAddrV4::new(Ipv4Addr::new(10, 60, 0, 2), 1234);
+        let destination = SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 40900);
+        let packet = ipv4_udp(source, destination, b"odd").unwrap();
+        assert_eq!(packet[26..28], [0xbb, 0x9d]);
+        // A sum whose carry, folded once, carries again: 0xffff + 0xffff + 1
+        assert_eq!(checksum(&[&[0xff, 0xff, 0xff, 0xff, 0x00, 0x01]]), 0xfffe);
+    }
+
     #[test]
     fn known_checksum() {
         // RFC 1071 §3 example.

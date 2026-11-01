@@ -416,6 +416,32 @@ mod tests {
         assert_eq!(routes.allocate_teid(), next[2]);
     }
 
+    /// The table counts its tunnels, and gives the route of one of them.
+    #[test]
+    fn the_table_counts_its_tunnels_and_gives_each_route() {
+        let table = RouteTable::default();
+        assert_eq!(table.len(), 0);
+        let teid = table.install(
+            (1, 5),
+            remote("192.0.2.1:2152", 44),
+            Some(9),
+            Default::default(),
+        );
+        assert_eq!(table.len(), 1);
+        #[cfg(fast_path)]
+        assert_eq!(
+            table.with_route((1, 5), |route| (
+                route.local_teid,
+                route.remote.teid,
+                route.qfi
+            )),
+            Some((teid, 44, Some(9)))
+        );
+        #[cfg(fast_path)]
+        assert_eq!(table.with_route((1, 6), |route| route.local_teid), None);
+        let _ = teid;
+    }
+
     /// Whoever knows a TEID of an endpoint cannot tell another from it.
     #[test]
     fn local_teids_cannot_be_told_from_one_another() {

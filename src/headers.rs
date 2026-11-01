@@ -289,6 +289,16 @@ mod tests {
             .collect()
     }
 
+    /// A list compares with a vector of other headers as unequal.
+    #[test]
+    fn a_list_and_a_vector_of_other_headers_differ() {
+        let mut list = ExtensionHeaders::new();
+        list.push(ExtensionHeader::UdpPort(1));
+        assert!(list == vec![ExtensionHeader::UdpPort(1)]);
+        assert!(list != vec![ExtensionHeader::UdpPort(2)]);
+        assert!(list != Vec::new());
+    }
+
     /// A list of each length as every way of making one gives it.
     fn lists(expected: &[ExtensionHeader]) -> Vec<ExtensionHeaders> {
         let mut pushed = ExtensionHeaders::new();
