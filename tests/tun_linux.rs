@@ -161,6 +161,32 @@ async fn replacing_a_session_during_tun_creation_does_not_attach_the_old_tun() {
     session_creation_race(true).await;
 }
 
+/// The program attaches the TUN that it is given to its session before it
+/// says where it is.
+#[cfg(feature = "cli")]
+#[tokio::test]
+#[ignore = "needs CAP_NET_ADMIN"]
+async fn the_program_attaches_the_tun_that_it_is_given() {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    isolate();
+    let mut program = Command::new(env!("CARGO_BIN_EXE_oxirush-upf-sim"))
+        .args(["127.0.0.1:0", "127.0.0.1:2152", "1", "2"])
+        .args(["--tun", "oxprogram", "198.19.0.30"])
+        .stdout(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut lines = BufReader::new(program.stdout.take().unwrap()).lines();
+    let first = tokio::time::timeout(Duration::from_secs(5), lines.next_line()).await;
+    let first = first
+        .unwrap()
+        .unwrap()
+        .expect("the program says where it is");
+    assert!(first.starts_with("UPF simulator on 127.0.0.1:"), "{first}");
+    assert!(exists("oxprogram"));
+    program.kill().await.unwrap();
+}
+
 #[tokio::test]
 #[ignore = "needs CAP_NET_ADMIN"]
 async fn replacing_an_attached_session_closes_its_old_tun() {
@@ -401,6 +427,7 @@ async fn clones_share_the_tun_which_goes_with_the_last_one() {
     let port = TunPort::create(TunConfig::new("oxk0", routing)).unwrap();
     let clone = port.clone();
     assert_eq!((clone.name(), clone.index()), (port.name(), port.index()));
+    assert_eq!(format!("{clone:?}"), "TunPort { name: \"oxk0\" }");
     drop(port);
     assert!(
         exists("oxk0"),

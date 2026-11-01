@@ -551,6 +551,71 @@ mod tests {
         assert_eq!(netlink.mtu_of(lo).unwrap(), 1400);
     }
 
+    /// Move this thread to a network namespace of its own.
+    fn isolate() {
+        // SAFETY: unshare only changes this thread's namespace.
+        assert_eq!(
+            unsafe { libc::unshare(libc::CLONE_NEWNET) },
+            0,
+            "a network namespace of its own: {}",
+            io::Error::last_os_error()
+        );
+    }
+
+    /// A rule that is there already is refused, rather than added twice.
+    #[test]
+    #[ignore = "needs CAP_NET_ADMIN"]
+    fn a_rule_that_is_there_already_is_refused() {
+        isolate();
+        let mut netlink = Netlink::new().unwrap();
+        let rule = Rule {
+            source: Ipv4Addr::new(198, 19, 9, 1),
+            table: 29200,
+            priority: 15200,
+        };
+        netlink.add_rule(rule).unwrap();
+        let error = netlink.add_rule(rule).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::EEXIST));
+    }
+
+    /// Announcements that found the socket's buffer full are said to be lost
+    /// (`ENOBUFS`), and not to have taken too long.
+    #[cfg(fast_path)]
+    #[test]
+    #[ignore = "needs CAP_NET_ADMIN"]
+    fn announcements_that_found_no_room_are_said_to_be_lost() {
+        isolate();
+        let mut events = LinkEvents::new().unwrap();
+        // The smallest buffer that Linux gives a socket: two announcements
+        // overflow it
+        let size: libc::c_int = 0;
+        // SAFETY: the option is an int, which `size` is, of its size.
+        let set = unsafe {
+            libc::setsockopt(
+                events.socket.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_RCVBUF,
+                (&raw const size).cast(),
+                size_of_val(&size) as libc::socklen_t,
+            )
+        };
+        assert_eq!(set, 0, "{}", io::Error::last_os_error());
+        for mtu in 1400..1410 {
+            let mtu = mtu.to_string();
+            let status = std::process::Command::new("ip")
+                .args(["link", "set", "lo", "mtu", &mtu])
+                .status()
+                .unwrap();
+            assert!(status.success());
+        }
+        let error = loop {
+            if let Err(error) = events.next() {
+                break error;
+            }
+        };
+        assert_eq!(error.raw_os_error(), Some(libc::ENOBUFS), "{error}");
+    }
+
     /// A request whose answer does not come returns an error, and does not
     /// hold its caller, a task of the runtime, for ever.
     #[test]

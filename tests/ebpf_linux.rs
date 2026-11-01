@@ -649,7 +649,9 @@ async fn short_cut_tunnel(fast_path: &FastPath, teid: u32) -> (Endpoint, UdpSock
     };
     let port = TunPort::create(TunConfig::new("oxu1", routing)).unwrap();
     fast_path.add_tun(port.index()).unwrap();
+    assert!(!fast_path.has_shortcut(port.index()));
     shortcut(&gnb, 1, 1, port.index()).await;
+    assert!(fast_path.has_shortcut(port.index()));
     (gnb, peer, port, local_teid)
 }
 
@@ -1022,6 +1024,157 @@ fn policy_tun(fast_path: &FastPath, name: &str, address: Ipv4Addr, table: u32) -
     port
 }
 
+/// A TUN has one tunnel's short-cut. Given a second tunnel's, it leaves the
+/// first's: the downlink of the first is the endpoint's again.
+#[tokio::test]
+#[ignore = "needs root"]
+async fn a_tun_given_another_tunnel_leaves_the_first() {
+    isolate();
+    let fast_path = FastPath::load().unwrap();
+    let (gnb, mut received) = Endpoint::bind("127.0.0.1:2152".parse().unwrap())
+        .await
+        .unwrap();
+    gnb.set_fast_path(fast_path.clone()).unwrap();
+    let peer = UdpSocket::bind("127.0.0.9:2152").await.unwrap();
+    let tunnel = |teid| RemoteTunnel {
+        address: peer.local_addr().unwrap(),
+        teid,
+    };
+    let first = gnb.install(1, 1, tunnel(0x6101), 9).unwrap();
+    gnb.install(2, 1, tunnel(0x6102), 9).unwrap();
+    let address = Ipv4Addr::new(198, 19, 4, 2);
+    let port = policy_tun(&fast_path, "oxn1", address, 29103);
+    shortcut(&gnb, 1, 1, port.index()).await;
+    shortcut(&gnb, 2, 1, port.index()).await;
+
+    let server = SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 9), 9);
+    let downlink = ipv4_udp(server, SocketAddrV4::new(address, 4000), b"downlink").unwrap();
+    let downlink = Packet::downlink(first, 9, downlink).encode().unwrap();
+    peer.send_to(&downlink, gnb.local_addr().unwrap())
+        .await
+        .unwrap();
+    let delivered = timeout(SECOND, received.recv())
+        .await
+        .expect("the first tunnel's downlink is the endpoint's")
+        .unwrap();
+    assert_eq!((delivered.ran_id, delivered.packet.teid), (1, first));
+}
+
+/// A tunnel given another local TEID leaves the short-cut of the old one: a
+/// downlink to the old TEID reaches no TUN, and is the endpoint's, which has
+/// no tunnel of it.
+#[tokio::test]
+#[ignore = "needs root"]
+async fn a_tunnel_given_another_local_teid_leaves_the_short_cut_of_the_old_one() {
+    isolate();
+    let fast_path = FastPath::load().unwrap();
+    let (gnb, _received) = Endpoint::bind("127.0.0.1:2152".parse().unwrap())
+        .await
+        .unwrap();
+    gnb.set_fast_path(fast_path.clone()).unwrap();
+    let peer = UdpSocket::bind("127.0.0.9:2152").await.unwrap();
+    let remote = RemoteTunnel {
+        address: peer.local_addr().unwrap(),
+        teid: 0x6201,
+    };
+    gnb.install_with_teid(1, 1, 0x7001, remote, Some(9))
+        .unwrap();
+    let address = Ipv4Addr::new(198, 19, 5, 2);
+    let port = policy_tun(&fast_path, "oxt1", address, 29104);
+    shortcut(&gnb, 1, 1, port.index()).await;
+    gnb.install_with_teid(1, 1, 0x7002, remote, Some(9))
+        .unwrap();
+
+    let application = UdpSocket::bind((address, 4000)).await.unwrap();
+    let server = SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 9), 9);
+    let downlink = ipv4_udp(server, SocketAddrV4::new(address, 4000), b"old TEID").unwrap();
+    let downlink = Packet::downlink(0x7001, 9, downlink).encode().unwrap();
+    peer.send_to(&downlink, gnb.local_addr().unwrap())
+        .await
+        .unwrap();
+    let counted = async {
+        while gnb.stats().unknown_teid_g_pdus == 0 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    };
+    timeout(SECOND, counted)
+        .await
+        .expect("the endpoint has the old TEID's downlink");
+    let mut datagram = vec![0; 2048];
+    let reached = timeout(Duration::from_millis(100), application.recv(&mut datagram)).await;
+    assert!(reached.is_err(), "the old TEID's downlink reached the TUN");
+}
+
+/// The programs send to the GTP-U port of a peer: a tunnel to another port
+/// of it gets no short-cut.
+#[tokio::test]
+#[ignore = "needs root"]
+async fn a_tunnel_to_another_port_gets_no_short_cut() {
+    isolate();
+    let fast_path = FastPath::load().unwrap();
+    let gnb = bind("127.0.0.1:2152", &fast_path).await;
+    let remote = RemoteTunnel {
+        address: "127.0.0.8:2153".parse().unwrap(),
+        teid: 0x1001,
+    };
+    gnb.install(1, 1, remote, 9).unwrap();
+    let port = ue_tun(&fast_path);
+    let refused = async {
+        loop {
+            match gnb.shortcut(1, 1, port.index()) {
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+                result => break result,
+            }
+        }
+    };
+    let error = timeout(SECOND, refused).await.unwrap().unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::Unsupported, "{error}");
+    assert!(!fast_path.has_shortcut(port.index()));
+}
+
+/// Whether device `name` computes the checksums of what it sends, as
+/// SIOCETHTOOL says.
+fn tx_checksum(name: &str) -> u32 {
+    const SIOCETHTOOL: libc::Ioctl = 0x8946;
+    const ETHTOOL_GTXCSUM: u32 = 0x16;
+    let mut value = [ETHTOOL_GTXCSUM, 0];
+    // SAFETY: ifreq is plain data, for which all zeros is valid.
+    let mut request: libc::ifreq = unsafe { std::mem::zeroed() };
+    for (target, byte) in request.ifr_name.iter_mut().zip(name.bytes()) {
+        *target = byte as libc::c_char;
+    }
+    request.ifr_ifru.ifru_data = value.as_mut_ptr().cast();
+    let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    // SAFETY: the request and the value it points to outlive the call.
+    let status = unsafe {
+        libc::ioctl(
+            std::os::fd::AsRawFd::as_raw_fd(&socket),
+            SIOCETHTOOL,
+            &mut request,
+        )
+    };
+    assert_eq!(status, 0, "{}", io::Error::last_os_error());
+    value[1]
+}
+
+/// The near end of the stage, `oxs…a`, which the UEs' packets are sent
+/// through before their encapsulation, has its TX checksum offload off: the
+/// packets leave it with their checksums.
+#[tokio::test]
+#[ignore = "needs root"]
+async fn the_stage_completes_the_checksums_of_what_it_sends() {
+    isolate();
+    let _fast_path = FastPath::load().unwrap();
+    let near: Vec<String> = stages()
+        .into_iter()
+        .filter(|name| name.ends_with('a'))
+        .collect();
+    assert_eq!(near.len(), 1, "{near:?}");
+    assert_eq!(tx_checksum(&near[0]), 0, "{}", near[0]);
+}
+
 /// A tunnel has one short-cut. Given to a second TUN, as when a UE's TUN is
 /// made anew before the old one closes, it leaves the first, whose closing
 /// then takes nothing from the second; removed, it leaves the second too.
@@ -1045,6 +1198,8 @@ async fn a_tunnel_given_to_another_tun_leaves_the_first() {
     let new = policy_tun(&fast_path, "oxm2", address, 29102);
     shortcut(&gnb, 1, 1, old.index()).await;
     shortcut(&gnb, 1, 1, new.index()).await;
+    assert!(!fast_path.has_shortcut(old.index()));
+    assert!(fast_path.has_shortcut(new.index()));
     fast_path.remove_tun(old.index());
 
     let server = SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 9), 9);

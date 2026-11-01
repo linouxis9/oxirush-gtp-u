@@ -986,6 +986,87 @@ fn disable_tx_checksum(name: &str) -> io::Result<()> {
 mod tests {
     use super::*;
 
+    /// The links give the MTU of a link, as the thread that follows them asks
+    /// for it once announcements were lost.
+    #[test]
+    fn the_links_give_the_mtu_of_a_link() {
+        let mut links = Rtnetlink {
+            events: LinkEvents::new().unwrap(),
+            requests: Netlink::new().unwrap(),
+        };
+        let lo = links.requests.index_of("lo").unwrap();
+        let mtu = std::fs::read_to_string("/sys/class/net/lo/mtu").unwrap();
+        assert_eq!(
+            links.mtu_of(lo).unwrap(),
+            mtu.trim().parse::<u32>().unwrap()
+        );
+    }
+
+    /// Move this thread to a network namespace of its own.
+    fn isolate() {
+        // SAFETY: unshare only changes this thread's namespace.
+        assert_eq!(
+            unsafe { libc::unshare(libc::CLONE_NEWNET) },
+            0,
+            "a network namespace of its own: {}",
+            io::Error::last_os_error()
+        );
+    }
+
+    /// Listening again takes a new socket: the announcements that the old
+    /// one held go with it.
+    #[test]
+    #[ignore = "needs CAP_NET_ADMIN"]
+    fn listening_again_leaves_what_the_old_socket_held() {
+        isolate();
+        let mut links = Rtnetlink {
+            events: LinkEvents::new().unwrap(),
+            requests: Netlink::new().unwrap(),
+        };
+        let status = std::process::Command::new("ip")
+            .args(["link", "set", "lo", "mtu", "1400"])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        links.listen_again().unwrap();
+        let error = links.next().unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut, "{error}");
+    }
+
+    /// A fast path says what ended the thread that follows the MTUs, gives
+    /// that thread the N3 interfaces of its short-cuts, and stops it once
+    /// it is dropped.
+    #[test]
+    #[ignore = "needs root"]
+    fn a_fast_path_gives_its_thread_what_it_follows_and_stops_it() {
+        isolate();
+        let fast_path = FastPath::load().unwrap();
+        fast_path.follows_mtus().unwrap();
+        let ended = (io::ErrorKind::BrokenPipe, "the links went".to_owned());
+        *lock(&fast_path.inner.mtus) = Some(ended.clone());
+        let error = fast_path.follows_mtus().unwrap_err();
+        assert_eq!((error.kind(), error.to_string()), ended);
+
+        let uplinks = lock(&fast_path.inner.state).uplinks.clone();
+        assert_eq!(uplinks.n3s(), BTreeSet::new());
+        let uplink = Uplink {
+            local: [127, 0, 0, 1],
+            peer: [127, 0, 0, 8],
+            teid: [0, 0, 0x10, 0x01],
+            n3: 5,
+            mtu: 1500,
+            qfi: NO_CONTAINER,
+            padding: 0,
+        };
+        lock(&uplinks).entries.insert(9, uplink);
+        assert_eq!(uplinks.n3s(), BTreeSet::from([5]));
+        lock(&uplinks).entries.clear();
+
+        let stop = fast_path.inner.stop.clone();
+        drop(fast_path);
+        assert!(stop.load(Ordering::Relaxed));
+    }
+
     /// Links whose announcements are scripted: once they have none left,
     /// the thread is told to stop.
     struct Scripted {

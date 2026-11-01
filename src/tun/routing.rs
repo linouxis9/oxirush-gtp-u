@@ -270,3 +270,20 @@ impl Drop for RoutingLease {
         self.close();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A name has 1 to 15 octets, each a letter, a digit, `_` or `-`.
+    #[test]
+    fn a_name_has_letters_digits_underscores_and_hyphens() {
+        for name in ["ox", "ox_upf-1", "a23456789012345"] {
+            assert!(validate_name(name).is_ok(), "{name}");
+        }
+        for name in ["", "a234567890123456", "ox.upf", "ox upf", "ox/upf"] {
+            let error = validate_name(name).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{name}");
+        }
+    }
+}
