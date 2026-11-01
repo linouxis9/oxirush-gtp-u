@@ -221,6 +221,30 @@ mod tests {
         assert_eq!(from, peer.local_addr().unwrap());
     }
 
+    /// An error of the socket ends the receive: here that of a socket whose
+    /// runtime has ended, and which nothing can wake.
+    #[test]
+    fn a_receive_ends_on_an_error_of_the_socket() {
+        let runtime = || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+        };
+        let bound = runtime().block_on(DatagramSocket::bind("127.0.0.1:0".parse().unwrap()));
+        let socket = bound.unwrap();
+        // A receive that would not end must not hold up the test
+        let (ended, end) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut buffer = [0; 64];
+            let received = runtime().block_on(socket.receive(&mut buffer));
+            let _ = ended.send(received.map(|_| ()));
+        });
+        let received = end.recv_timeout(std::time::Duration::from_secs(10));
+        let error = received.expect("the receive ends").unwrap_err();
+        assert!(!path::transient(&error), "{error}");
+    }
+
     #[tokio::test]
     async fn dropped_observations_do_not_construct_owned_packets() {
         let socket = DatagramSocket::bind("127.0.0.1:0".parse().unwrap())

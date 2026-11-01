@@ -67,6 +67,21 @@ async fn explicit_local_teids_are_validated_and_replace_routes_atomically() {
     assert_eq!(delivered(&mut received).await.packet.teid, 99);
 }
 
+/// An endpoint whose receiver has ended is not running, though nothing shut
+/// it down: here the runtime of the receiver has ended.
+#[test]
+fn an_endpoint_whose_receiver_ended_is_not_running() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let bound = runtime.block_on(Endpoint::bind("127.0.0.1:0".parse().unwrap()));
+    let (endpoint, _received) = bound.unwrap();
+    assert!(endpoint.is_running());
+    drop(runtime);
+    assert!(!endpoint.is_running());
+}
+
 #[tokio::test]
 async fn shutdown_is_shared_and_awaits_receiver_completion() {
     let (endpoint, mut received, peer, _) = setup().await;
@@ -101,6 +116,74 @@ async fn counters_distinguish_malformed_closed_and_path_messages() {
     assert_eq!(stats.malformed_datagrams, 1);
     assert_eq!(stats.receiver_closed_drops, 1);
     assert_eq!(stats.path_messages, 1);
+}
+
+/// The descriptor of this process's loopback UDP socket on `port`: its inode
+/// in /proc/thread-self/net/udp, among the sockets of /proc/self/fd.
+#[cfg(target_os = "linux")]
+fn udp_descriptor(port: u16) -> std::os::fd::RawFd {
+    let local = format!("{:08X}:{port:04X}", u32::from_ne_bytes([127, 0, 0, 1]));
+    let table = std::fs::read_to_string("/proc/thread-self/net/udp").unwrap();
+    let inode = table
+        .lines()
+        .find_map(|line| {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            (fields.get(1) == Some(&local.as_str())).then(|| fields[9].to_owned())
+        })
+        .expect("the socket is listed");
+    let socket = format!("socket:[{inode}]");
+    let descriptors = std::fs::read_dir("/proc/self/fd").unwrap();
+    descriptors
+        .filter_map(Result::ok)
+        .find(|entry| {
+            std::fs::read_link(entry.path()).is_ok_and(|target| target.to_str() == Some(&socket))
+        })
+        .and_then(|entry| entry.file_name().to_str()?.parse().ok())
+        .expect("the process has the socket")
+}
+
+/// The receiver goes on after the error of an earlier datagram: here the port
+/// unreachable that answers a datagram sent to a closed port. Linux reports it
+/// to an unconnected socket that asks for errors (IP_RECVERR), as Windows does
+/// to each UDP socket.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn the_receiver_goes_on_after_the_error_of_an_earlier_datagram() {
+    let (endpoint, mut received, peer, teid) = setup().await;
+    let fd = udp_descriptor(endpoint.local_addr().unwrap().port());
+    let on: libc::c_int = 1;
+    // SAFETY: the option is an int, which `on` is, of its size, on a socket
+    // of this process.
+    let set = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::IPPROTO_IP,
+            libc::IP_RECVERR,
+            (&raw const on).cast(),
+            size_of_val(&on) as libc::socklen_t,
+        )
+    };
+    assert_eq!(set, 0, "{}", io::Error::last_os_error());
+    let closed = std::net::UdpSocket::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    endpoint
+        .send_to(&Packet::end_marker(1), closed)
+        .await
+        .unwrap();
+    // The error is there before the G-PDU that follows it
+    let mut wait = libc::pollfd {
+        fd,
+        events: 0,
+        revents: 0,
+    };
+    // SAFETY: one pollfd, which lives through the call.
+    assert_eq!(unsafe { libc::poll(&mut wait, 1, 5000) }, 1);
+    assert_ne!(wait.revents & libc::POLLERR, 0);
+    send(&peer, &endpoint, &Packet::g_pdu(teid, vec![0x45])).await;
+    assert_eq!(delivered(&mut received).await.packet.payload, [0x45]);
+    assert!(endpoint.is_running());
 }
 
 /// An endpoint and a peer socket, both on 127.0.0.1, with the tunnel of RAN

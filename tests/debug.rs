@@ -3,8 +3,9 @@
 //! their number and all of them in hexadecimal.
 
 use oxirush_gtp_u::{
-    Cause, ExtensionHeader, ExtensionHeaderType, InformationElement, InformationElementType,
-    MessageType, Packet, PduSessionContainer, UnknownNewIes, UplinkPduSessionInformation,
+    Cause, DownlinkPduSetInformation, ExtensionHeader, ExtensionHeaderType, InformationElement,
+    InformationElementType, MessageType, Packet, PduSessionContainer, PduSetInformationContainer,
+    UnknownNewIes, UplinkPduSessionInformation,
 };
 
 #[test]
@@ -51,6 +52,15 @@ fn what_is_kept_as_received_prints_its_octets() {
     assert_eq!(
         format!("{:?}", PduSessionContainer::Other(vec![0x20, 0xff])),
         "Other(2 octets 20ff)"
+    );
+    assert_eq!(
+        format!("{:?}", PduSetInformationContainer::Other(vec![0x30, 0xff])),
+        "Other(2 octets 30ff)"
+    );
+    let downlink = DownlinkPduSetInformation::new(9);
+    assert_eq!(
+        format!("{:?}", PduSetInformationContainer::Downlink(downlink)),
+        format!("Downlink({downlink:?})")
     );
     let mut uplink = UplinkPduSessionInformation::new(9);
     uplink.unknown_new_ies = Some(Box::new(UnknownNewIes {
@@ -116,5 +126,49 @@ fn the_tunnels_of_an_endpoint_and_of_the_test_upf_print_their_teids_in_hexadecim
         format!("{:?}", Session::new(0x1001, 0x2001, address, 9)),
         "Session { uplink_teid: 0x00001001, downlink_teid: 0x00002001, \
          gnb_address: 127.0.0.1:2152, qfi: 9 }"
+    );
+}
+
+/// An endpoint and the test UPF print their address and how many tunnels or
+/// sessions they have; an uplink of the UPF its TEID in hexadecimal, where it
+/// came from, and its G-PDU.
+#[cfg(feature = "endpoint")]
+#[tokio::test]
+async fn an_endpoint_and_the_test_upf_print_their_address_and_their_tunnels() {
+    use oxirush_gtp_u::upf_sim::{Session, UpfSimulator};
+    use oxirush_gtp_u::{Endpoint, RemoteTunnel};
+    use std::time::Duration;
+
+    let (upf, mut uplinks) = UpfSimulator::bind("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    let (gnb, _) = Endpoint::bind("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    let (upf_address, gnb_address) = (upf.local_addr().unwrap(), gnb.local_addr().unwrap());
+    upf.set_session(Session::new(0x1001, 0x2001, gnb_address, 9))
+        .unwrap();
+    gnb.install(1, 5, RemoteTunnel::new(upf_address, 0x1001), 9)
+        .unwrap();
+    assert_eq!(
+        format!("{gnb:?}"),
+        format!("Endpoint {{ local_addr: Some({gnb_address}), tunnels: 1 }}")
+    );
+    assert_eq!(
+        format!("{upf:?}"),
+        format!("UpfSimulator {{ local_addr: Some({upf_address}), sessions: 1 }}")
+    );
+
+    gnb.send(1, 5, [0x45]).await.unwrap();
+    let uplink = tokio::time::timeout(Duration::from_secs(2), uplinks.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        format!("{uplink:?}"),
+        format!(
+            "UplinkPacket {{ uplink_teid: 0x00001001, from: {gnb_address}, packet: {:?} }}",
+            uplink.packet
+        )
     );
 }

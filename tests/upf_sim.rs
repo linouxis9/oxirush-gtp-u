@@ -346,6 +346,12 @@ async fn cancelled_shutdown_can_be_awaited_again_and_stops_all_clones() {
     drop(shutdown);
     assert!(!other.is_running());
     other.shutdown().await.unwrap();
+    // The sessions go with it
+    assert_eq!(other.session(1), None);
+    assert_eq!(
+        format!("{other:?}"),
+        format!("UpfSimulator {{ local_addr: Some({address}), sessions: 0 }}")
+    );
     assert_eq!(timeout(WAIT, observed.recv()).await.unwrap(), None);
     assert_eq!(
         other.send_downlink(1, vec![]).await.unwrap_err().kind(),
@@ -656,6 +662,102 @@ fn the_program_prints_its_usage() {
         usage.starts_with("usage: oxirush-upf-sim <bind-ip:port>"),
         "{usage}"
     );
+}
+
+/// The program refuses arguments that it cannot take, and says why.
+#[cfg(feature = "cli")]
+#[test]
+fn the_program_refuses_what_it_cannot_take() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_oxirush-upf-sim"))
+        .args(["127.0.0.1:2152", "127.0.0.1:2153", "1"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let error = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        error.starts_with("oxirush-upf-sim: wrong number of arguments\nusage:"),
+        "{error}"
+    );
+}
+
+/// Without TUNs, the program refuses one, and says why.
+#[cfg(all(feature = "cli", not(all(target_os = "linux", feature = "tun"))))]
+#[test]
+fn the_program_without_tuns_refuses_one() {
+    use std::io::Read;
+    let mut program = std::process::Command::new(env!("CARGO_BIN_EXE_oxirush-upf-sim"))
+        .args(["127.0.0.1:0", "127.0.0.1:2152", "1", "2"])
+        .args(["--tun", "oxupf", "198.19.0.30"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    // A program that took the TUN would serve until it is stopped
+    let deadline = std::time::Instant::now() + WAIT;
+    let status = loop {
+        if let Some(status) = program.try_wait().unwrap() {
+            break status;
+        }
+        if std::time::Instant::now() > deadline {
+            program.kill().unwrap();
+            panic!("the program serves with a TUN that it cannot have");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(status.code(), Some(1));
+    let mut error = String::new();
+    program
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut error)
+        .unwrap();
+    assert_eq!(
+        error,
+        "oxirush-upf-sim: --tun needs Linux and the tun feature\n"
+    );
+}
+
+/// The program serves its session until it is told to stop: it says where it
+/// is, then prints each uplink G-PDU, and ends with success on SIGTERM.
+#[cfg(all(feature = "cli", target_os = "linux"))]
+#[tokio::test]
+async fn the_program_serves_its_session_until_it_is_stopped() {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    let gnb = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let gnb_address = gnb.local_addr().unwrap().to_string();
+    let mut program = tokio::process::Command::new(env!("CARGO_BIN_EXE_oxirush-upf-sim"))
+        .args(["127.0.0.1:0", &gnb_address, "0x1001", "0x2002"])
+        .stdout(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut lines = BufReader::new(program.stdout.take().unwrap()).lines();
+    let first = timeout(WAIT, lines.next_line()).await.unwrap().unwrap();
+    let first = first.expect("the program says where it is");
+    let (address, _) = first
+        .strip_prefix("UPF simulator on ")
+        .and_then(|rest| rest.split_once(": "))
+        .expect(&first);
+    assert_eq!(
+        first,
+        format!(
+            "UPF simulator on {address}: uplink TEID 0x00001001, downlink TEID 0x00002002 \
+             at gNB {gnb_address}"
+        )
+    );
+    let uplink = Packet::g_pdu(0x1001, b"payload".to_vec()).encode().unwrap();
+    gnb.send_to(&uplink, address).await.unwrap();
+    let printed = timeout(WAIT, lines.next_line()).await.unwrap().unwrap();
+    assert_eq!(
+        printed.as_deref(),
+        Some(format!("uplink TEID 0x00001001 from {gnb_address}: 7 octets").as_str())
+    );
+    let pid = libc::pid_t::try_from(program.id().unwrap()).unwrap();
+    // SAFETY: a signal to the child that this test started.
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGTERM) }, 0);
+    let status = timeout(WAIT, program.wait()).await.unwrap().unwrap();
+    assert!(status.success(), "{status}");
 }
 
 /// A simulator that is dropped stops, and leaves its address to another.

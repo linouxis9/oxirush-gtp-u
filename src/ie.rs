@@ -344,6 +344,27 @@ fn push_tlv(out: &mut Vec<u8>, parts: &[&[u8]]) -> Result<(), Error> {
 mod tests {
     use super::*;
 
+    /// A GTP-U Peer Address of another length than an IPv4 or an IPv6 address
+    /// is refused with the length of the one it is nearer: 4 below 10 octets,
+    /// 16 from 10 on.
+    #[test]
+    fn a_peer_address_of_another_length_is_refused_with_the_nearer_one() {
+        for (length, expected) in [(0, 4), (5, 4), (9, 4), (10, 16), (15, 16), (17, 16)] {
+            let mut bytes = vec![GTP_U_PEER_ADDRESS];
+            bytes.extend_from_slice(&(length as u16).to_be_bytes());
+            bytes.resize(3 + length, 0);
+            assert_eq!(
+                InformationElement::decode_all(&bytes),
+                Err(Error::InvalidLength {
+                    what: Part::GtpUPeerAddress,
+                    length,
+                    expected
+                }),
+                "{length} octets"
+            );
+        }
+    }
+
     #[test]
     fn every_known_tv_ie_has_its_specified_length() {
         // TS 29.060 V19.0.0 table 37, excluding the separately typed

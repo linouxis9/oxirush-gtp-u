@@ -289,7 +289,8 @@ mod tests {
             .collect()
     }
 
-    /// A list compares with a vector of other headers as unequal.
+    /// A list compares with a vector, a slice or an array of other headers as
+    /// unequal.
     #[test]
     fn a_list_and_a_vector_of_other_headers_differ() {
         let mut list = ExtensionHeaders::new();
@@ -297,6 +298,10 @@ mod tests {
         assert!(list == vec![ExtensionHeader::UdpPort(1)]);
         assert!(list != vec![ExtensionHeader::UdpPort(2)]);
         assert!(list != Vec::new());
+        assert!(list == [ExtensionHeader::UdpPort(1)][..]);
+        assert!(list != [ExtensionHeader::UdpPort(2)][..]);
+        assert!(list == [ExtensionHeader::UdpPort(1)]);
+        assert!(list != [ExtensionHeader::UdpPort(2)]);
     }
 
     /// A list of each length as every way of making one gives it.

@@ -265,6 +265,31 @@ mod tests {
     use crate::ExtensionHeaderType;
     use std::net::{Ipv4Addr, SocketAddrV6};
 
+    /// The errors of a receive that concern an earlier datagram, the ICMP
+    /// errors that some systems report to every UDP socket, and an interrupted
+    /// call are transient. Those of the socket are not.
+    #[test]
+    fn the_errors_of_an_earlier_datagram_are_transient() {
+        use std::io::{Error, ErrorKind};
+        let earlier = [
+            ErrorKind::ConnectionRefused,
+            ErrorKind::ConnectionReset,
+            ErrorKind::Interrupted,
+        ];
+        for kind in earlier {
+            assert!(transient(&Error::from(kind)), "{kind:?}");
+        }
+        let of_the_socket = [
+            ErrorKind::Other,
+            ErrorKind::NotConnected,
+            ErrorKind::InvalidInput,
+            ErrorKind::OutOfMemory,
+        ];
+        for kind in of_the_socket {
+            assert!(!transient(&Error::from(kind)), "{kind:?}");
+        }
+    }
+
     /// An IPv4 peer is reached from an IPv6 socket at its IPv4-mapped address, and
     /// from an IPv4 socket at its own.
     #[test]
@@ -315,6 +340,30 @@ mod tests {
         ));
     }
 
+    /// IEs of one type, one after the other, are in ascending order: the Echo
+    /// Request that has them is answered as any other.
+    #[test]
+    fn ies_of_one_type_in_a_row_are_in_order() {
+        let from: SocketAddr = "192.0.2.1:2152".parse().unwrap();
+        let mut request = Packet::echo_request(42);
+        let extension = |identifier| InformationElement::PrivateExtension {
+            identifier,
+            value: vec![],
+        };
+        request.payload = InformationElement::encode_all(&[extension(1), extension(2)]).unwrap();
+        match classify(&request, from) {
+            PathAction::Reply {
+                packet,
+                discard_reason,
+                ..
+            } => {
+                assert_eq!(packet, Packet::echo_response(42));
+                assert_eq!(discard_reason, None);
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+    }
+
     #[test]
     fn malformed_echo_length_classification_requires_a_complete_supported_header() {
         let valid = Packet::echo_request(42).encode().unwrap();
@@ -332,6 +381,10 @@ mod tests {
         }
         invalid[0] = 0x52;
         assert!(length_error_response(&invalid).is_none());
+        // Without the optional fields the header is 8 octets, the whole of a
+        // request that says it has more, and the response has sequence number 0
+        let response = length_error_response(&[0x30, 1, 0, 1, 0, 0, 0, 0]).unwrap();
+        assert_eq!(response.sequence, Some(0));
     }
 
     #[test]

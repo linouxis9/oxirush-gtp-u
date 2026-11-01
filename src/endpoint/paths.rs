@@ -539,6 +539,96 @@ mod tests {
         assert_eq!(lock(&paths.state).supported.len(), 256);
     }
 
+    /// Forgetting what a peer supports leaves what the others said, which
+    /// still refuses what they do not support.
+    #[test]
+    fn a_forgotten_peer_leaves_what_the_others_said() {
+        let paths = Paths::new();
+        let notification =
+            Packet::supported_extension_headers_notification(&[ExtensionHeaderType(0x85)])
+                .encode()
+                .unwrap();
+        let packet = Packet::decode_borrowed(&notification).unwrap();
+        let (one, other) = ("192.0.2.1:2152", "192.0.2.2:2152");
+        for from in [one, other] {
+            assert!(paths.notification(&packet, from.parse().unwrap()));
+        }
+        let [one, other]: [SocketAddr; 2] = [one.parse().unwrap(), other.parse().unwrap()];
+        paths.forget_supported_extension_headers(one.ip());
+        let mut g_pdu = Packet::g_pdu(7, vec![0x45]);
+        g_pdu.extension_headers.push(crate::ExtensionHeader::Other {
+            kind: ExtensionHeaderType(0xc5),
+            content: vec![0, 0],
+        });
+        assert_eq!(
+            paths.refused(&g_pdu, other.ip()),
+            Some(ExtensionHeaderType(0xc5))
+        );
+        assert_eq!(paths.refused(&g_pdu, one.ip()), None);
+    }
+
+    /// The round trip of an Echo Response counts from the last time that
+    /// its request was sent, and not from the first.
+    #[tokio::test(start_paused = true)]
+    async fn a_round_trip_counts_from_the_last_send_of_its_request() {
+        let paths = Paths::new();
+        let peer: SocketAddr = "192.0.2.1:2152".parse().unwrap();
+        let (sequence, answer) = paths.register(peer.ip()).unwrap();
+        paths.sent(sequence);
+        tokio::time::advance(Duration::from_secs(3)).await;
+        // Sent again once T3-RESPONSE expired
+        paths.sent(sequence);
+        tokio::time::advance(Duration::from_millis(30)).await;
+        let response = Packet::echo_response(sequence).encode().unwrap();
+        let response = Packet::decode_borrowed(&response).unwrap();
+        assert!(paths.echo_response(&response, peer));
+        assert_eq!(answer.await.unwrap(), Duration::from_millis(30));
+    }
+
+    /// Once 1024 Echo Requests are awaited, those that went unanswered for
+    /// N3-REQUESTS times T3-RESPONSE make room for a new one.
+    #[tokio::test(start_paused = true)]
+    async fn the_requests_that_waited_their_time_make_room_for_a_new_one() {
+        let paths = Paths::new();
+        let timers = PathTimers {
+            t3_response: Duration::from_secs(1),
+            n3_requests: 2,
+            ..PathTimers::default()
+        };
+        paths.set_timers(timers).unwrap();
+        let peer: IpAddr = "192.0.2.1".parse().unwrap();
+        for sequence in 0..1024 {
+            paths.sent_request(peer, sequence);
+        }
+        // Exactly the time that they are awaited
+        tokio::time::advance(Duration::from_secs(2)).await;
+        paths.sent_request(peer, 1024);
+        let state = lock(&paths.state);
+        assert_eq!(state.outstanding.len(), 1);
+        assert!(state.outstanding.contains_key(&1024));
+    }
+
+    /// A request whose exchange has ended, here unanswered, is no longer
+    /// awaited: a response that comes after it answers nothing.
+    #[tokio::test]
+    async fn a_request_whose_exchange_ended_is_no_longer_awaited() {
+        let socket = DatagramSocket::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let silent = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let paths = Paths::new();
+        let timers = PathTimers {
+            t3_response: Duration::from_millis(10),
+            n3_requests: 1,
+            ..PathTimers::default()
+        };
+        paths.set_timers(timers).unwrap();
+        let peer = silent.local_addr().unwrap();
+        let error = exchange(&socket, &paths, peer, true).await.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(lock(&paths.state).outstanding.is_empty());
+    }
+
     /// The supervision of every path ends when the endpoint stops.
     #[tokio::test]
     async fn the_supervisions_end_with_the_endpoint() {

@@ -337,5 +337,8 @@ fn timers_that_send_nothing_are_refused() {
             assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         }
         assert_eq!(gnb.path_timers(), PathTimers::default());
+        // Timers that send are taken
+        gnb.set_path_timers(fast(50, 3, 100)).unwrap();
+        assert_eq!(gnb.path_timers(), fast(50, 3, 100));
     });
 }

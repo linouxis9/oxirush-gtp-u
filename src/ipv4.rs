@@ -360,6 +360,18 @@ mod tests {
                 expected: 20
             }
         );
+        // A packet of its header alone has no room for the UDP header
+        assert_eq!(
+            shorter(20, 9),
+            Error::Truncated {
+                what: Part::UdpHeader,
+                needed: 8,
+                available: 0
+            }
+        );
+        // A datagram of its header alone has an empty payload
+        let empty = ipv4_udp(source, source, b"").unwrap();
+        assert_eq!(parse_ipv4_udp(&empty), Ok((source, source, &b""[..])));
         let mut options = packet.clone();
         options[0] = 0x44;
         assert_eq!(
