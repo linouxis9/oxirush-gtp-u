@@ -160,10 +160,12 @@ jobs:
 
 
   # After the shards, the TUN device, its routes, netlink and the loader of the eBPF
-  # fast path, which .cargo/mutants.toml leaves to this job: the tests that see what
-  # they do create devices and namespaces and load programs, as root, as the job `tun`
-  # of the CI runs them. One mutant at a time, for the tests share the names of their
-  # namespaces.
+  # fast path, the code of TUNs and of the fast path in the other files, and the sends
+  # that wait for room in the socket's buffer, which .cargo/mutants.toml leaves to
+  # this job and .cargo/mutants-privileged.toml names: the tests that see what they
+  # do create devices and namespaces, add qdiscs and load programs, as root, as the
+  # job `tun` of the CI runs them. Every test runs but those of Wireshark. One mutant
+  # at a time, for the tests share the names of their namespaces.
   privileged:
     name: Mutants of TUN, netlink and eBPF (shard ${{ matrix.shard }} of 2, root)
     needs: [plan, mutants]
@@ -195,9 +197,12 @@ jobs:
             echo "skip=--skip ue_vrf --skip carried_in_the_kernel --skip handover --skip installing_a_tunnel" >> "$GITHUB_OUTPUT"
           fi
       - run: |
-          cargo mutants --no-config --all-features -j 1 --shard ${{ matrix.shard }}/2 --sharding round-robin \
-            -f src/tun.rs -f 'src/tun/*.rs' -f src/netlink.rs -f src/ebpf.rs \
-            -- --lib --test tun_linux --test tun_cleanup --test ebpf_linux \
+          cargo mutants --config .cargo/mutants-privileged.toml -j 1 \
+            --shard ${{ matrix.shard }}/2 --sharding round-robin \
+            -- --lib --bins --test allocations --test codec_properties --test debug \
+            --test endpoint --test errors --test paths --test peer_limits --test readme \
+            --test upf_sim --test tun_linux --test tun_cleanup --test ebpf_linux \
+            --test send_buffer \
             -- --include-ignored ${{ steps.vrf.outputs.skip }} || [ $? -eq 3 ]
           test ! -s mutants.out/missed.txt
         env:
@@ -206,4 +211,36 @@ jobs:
         if: always()
         with:
           name: mutants.out-privileged-${{ matrix.shard }}
+          path: mutants.out
+
+  # After the shards, the code that a build without the feature `tun` has, and that
+  # of every feature has not: the program's refusal of a TUN, the UPF's write to none
+  # and its shutdown without TUNs. .cargo/mutants.toml names them by the same regexes.
+  without-tun:
+    name: Mutants of the code built without TUN
+    needs: [plan, mutants]
+    if: always() && needs.plan.outputs.mode == 'full'
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: prlimit --as=4294967296
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants@27.1.0
+      - run: |
+          cargo mutants --no-config --features cli -j 2 \
+            -f src/bin/oxirush-upf-sim.rs -f src/upf_sim.rs -f src/upf_sim/sessions.rs \
+            -F 'src/bin/oxirush-upf-sim\.rs:161:5: replace attach_tun ' \
+            -F 'src/upf_sim\.rs:692:5: replace write_to_tun -> bool with true$' \
+            -F 'src/upf_sim/sessions\.rs:104:9: replace SessionRegistry::clear with \(\)$' \
+            || [ $? -eq 3 ]
+          test ! -s mutants.out/missed.txt
+          test -s mutants.out/caught.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mutants.out-without-tun
           path: mutants.out

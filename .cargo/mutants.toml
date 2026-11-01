@@ -17,13 +17,55 @@ all_features = true
 # The TUN device, its routes, netlink and the loader of the eBPF fast path: the tests
 # that see what they do run as root, in network namespaces, which `cargo test` does
 # not. The job `privileged` of .github/workflows/mutants.yml runs these mutants with
-# them.
+# them, as .cargo/mutants-privileged.toml says.
 exclude_globs = ["src/tun.rs", "src/tun/*.rs", "src/netlink.rs", "src/ebpf.rs"]
 
-# Mutants that no test can tell from the code, each with why.
 exclude_re = [
+    # The code of TUNs and of the fast path in the files that the shards mutate, the
+    # program's TUN, and the sends that wait for room in the socket's buffer, which a
+    # qdisc in a network namespace fills: the job `privileged` runs these mutants
+    # too, as root, by the same regexes in .cargo/mutants-privileged.toml. (The
+    # program's refusal of a TUN, the UPF's write to none and its shutdown without
+    # them are built without the feature `tun` alone: the job `without-tun` runs
+    # them, by the same regexes.)
+    'src/bin/oxirush-upf-sim\.rs:152:5: replace attach_tun ',
+    'src/endpoint/routes\.rs:(49|80|286|338|350|361):[0-9]+: replace ',
+    'src/endpoint/routes\.rs:266:70: replace != with == in RouteTable::install_with_teid$',
+    'src/endpoint\.rs:(280|622|623|670|972|1017|1078):[0-9]+: (replace|delete) ',
+    'src/upf_sim\.rs:(277|281|296|398|435|453|519|672|676|704):[0-9]+: (replace|delete) ',
+    'src/upf_sim/sessions\.rs:(57|237|255|257):[0-9]+: (replace|delete) ',
+    'src/bin/oxirush-upf-sim\.rs:161:5: replace attach_tun ',
+    'src/upf_sim\.rs:692:5: replace write_to_tun -> bool with true$',
+    'src/upf_sim/sessions\.rs:104:9: replace SessionRegistry::clear with \(\)$',
+
+    # Mutants that no test can tell from the code, each with why.
+    #
     # Flags of distinct bits of one octet, and the QFI of 6 bits that check_qfi keeps
     # under them: `^` joins them as `|` does. The flags of the first octet of new IEs
-    # of a later release are kept out of those that this release knows.
-    'src/extension\.rs:.*: replace \| with \^ in (ExtensionHeader::usual|UplinkPduSessionInformation::encode)$',
+    # of a later release are kept out of those that this release knows. Likewise the
+    # flags of the PDU Session Container and the PPI of 3 bits above them, the flags
+    # of the PDU Set Information and the QFI above the 2 high bits of its PSSN of 10,
+    # and the E, S and PN flags of the header.
+    'src/extension\.rs:.*: replace \| with \^ in (ExtensionHeader::usual|UplinkPduSessionInformation::encode|DownlinkPduSessionInformation::encode)$',
+    'src/pdu_set\.rs:.*: replace \| with \^ in DownlinkPduSetInformation::encode$',
+    'src/packet\.rs:.*: replace \| with \^ in (decode|Packet<P>::encode_into)$',
+    # The container of a G-PDU that the decoder takes as it usually is, and that it
+    # decodes whole when the mutant refuses it as one: the same container, and
+    # neither allocates.
+    'src/extension\.rs:491:9: replace PduSessionContainer::usual -> Option<Self> with None$',
+    'src/extension\.rs:(496:28|503:21): replace match guard octet & 0x(80|c0) == 0 with false in PduSessionContainer::usual$',
+    'src/extension\.rs:(496:34|503:27): replace & with \| in PduSessionContainer::usual$',
+    # Whether the unknown new IEs end the container at a multiple of 4 octets:
+    # two octets more or two fewer are four apart.
+    'src/extension\.rs:904:40: replace \+ with - in UplinkPduSessionInformation::encode$',
+    # A send of another error than WouldBlock, tried again by the send that waits,
+    # which fails alike: Linux gives a UDP send the errors of its datagram, not the
+    # ICMP errors of earlier ones.
+    'src/datagram\.rs:121:31: replace match guard error\.kind\(\) == io::ErrorKind::WouldBlock with true in DatagramSocket::send$',
+    # The short-cuts of an endpoint without the fast path, whose default is the body;
+    # the build with every feature has the fast path, and does not build it.
+    'src/endpoint\.rs:285:9: replace Shared::shortcuts -> Shortcuts<._> with Default::default\(\)$',
+    # The end of a receive task that is neither its return nor its abort is a panic,
+    # which no input makes it do.
+    'src/(endpoint|upf_sim)\.rs:.*: replace match guard error\.is_cancelled\(\) with true in (Endpoint|UpfSimulator)::shutdown$',
 ]
