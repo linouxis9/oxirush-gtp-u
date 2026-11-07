@@ -2,7 +2,7 @@
 
 All notable changes to `oxirush-gtp-u` are recorded here.
 
-## 0.2.0 - Unreleased
+## 0.2.0 - 2026-11-07
 
 ### Changed
 
