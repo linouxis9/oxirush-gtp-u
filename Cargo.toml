@@ -89,10 +89,6 @@ name = "tun_linux"
 required-features = ["tun"]
 
 [[test]]
-name = "send_buffer"
-required-features = ["endpoint"]
-
-[[test]]
 name = "ebpf_linux"
 required-features = ["ebpf"]
 

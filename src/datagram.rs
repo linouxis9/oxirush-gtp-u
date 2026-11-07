@@ -149,15 +149,6 @@ impl DatagramSocket {
         path::destination(self.ipv6, address)
     }
 
-    pub(crate) async fn writable(&self) -> io::Result<()> {
-        self.socket.writable().await
-    }
-
-    /// The registry owns the synchronization around this nonblocking syscall.
-    pub(crate) fn try_send_to(&self, bytes: &[u8], to: SocketAddr) -> io::Result<usize> {
-        self.socket.try_send_to(bytes, to)
-    }
-
     /// A G-PDU on `teid` from `from`, which has no tunnel here: count it,
     /// and answer it with an Error Indication within the limit of replies.
     pub(crate) async fn unknown_teid(&self, teid: u32, from: SocketAddr) {

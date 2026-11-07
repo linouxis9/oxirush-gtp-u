@@ -9,11 +9,9 @@
 
 use std::ffi::CString;
 use std::fs;
-use std::future::Future;
 use std::io;
 use std::net::Ipv4Addr;
 use std::process::Stdio;
-use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use oxirush_gtp_u::tun::{Routing, TunConfig, TunPort};
@@ -173,81 +171,6 @@ fn process_has_socket(inode: &str) -> bool {
     })
 }
 
-#[repr(C)]
-struct CapabilityHeader {
-    version: u32,
-    pid: i32,
-}
-
-#[derive(Clone, Copy, Default)]
-#[repr(C)]
-struct CapabilityData {
-    effective: u32,
-    permitted: u32,
-    inheritable: u32,
-}
-
-struct RestoreCapabilities([CapabilityData; 2]);
-
-impl Drop for RestoreCapabilities {
-    fn drop(&mut self) {
-        let header = CapabilityHeader {
-            version: 0x2008_0522,
-            pid: 0,
-        };
-        // SAFETY: Linux capability version 3 reads exactly two data entries.
-        let result = unsafe { libc::syscall(libc::SYS_capset, &header, self.0.as_ptr()) };
-        assert_eq!(
-            result,
-            0,
-            "restore capabilities: {}",
-            io::Error::last_os_error()
-        );
-    }
-}
-
-fn without_net_admin() -> RestoreCapabilities {
-    let header = CapabilityHeader {
-        version: 0x2008_0522,
-        pid: 0,
-    };
-    let mut original = [CapabilityData::default(); 2];
-    // SAFETY: the writable entries match Linux capability version 3's layout.
-    let result = unsafe { libc::syscall(libc::SYS_capget, &header, original.as_mut_ptr()) };
-    assert_eq!(
-        result,
-        0,
-        "read capabilities: {}",
-        io::Error::last_os_error()
-    );
-    let mut reduced = original;
-    reduced[0].effective &= !(1 << 12); // CAP_NET_ADMIN
-    // SAFETY: as above; pid 0 changes only the calling thread's capabilities.
-    let result = unsafe { libc::syscall(libc::SYS_capset, &header, reduced.as_ptr()) };
-    assert_eq!(
-        result,
-        0,
-        "drop CAP_NET_ADMIN: {}",
-        io::Error::last_os_error()
-    );
-    RestoreCapabilities(original)
-}
-
-#[tokio::test]
-#[ignore = "needs CAP_NET_ADMIN"]
-async fn removing_a_session_during_tun_creation_does_not_leave_an_orphan() {
-    session_creation_race(false).await;
-}
-
-#[tokio::test]
-#[ignore = "needs CAP_NET_ADMIN"]
-async fn replacing_a_session_during_tun_creation_does_not_attach_the_old_tun() {
-    session_creation_race(true).await;
-}
-
-/// The program attaches the TUN that it is given to its session before it
-/// says where it is.
-#[cfg(feature = "cli")]
 #[tokio::test]
 #[ignore = "needs CAP_NET_ADMIN"]
 async fn the_program_attaches_the_tun_that_it_is_given() {
@@ -321,17 +244,6 @@ async fn shutting_down_the_upf_closes_attachments_and_rejects_new_ones() {
     );
     upf.attach_tun(1, config.clone()).unwrap();
     assert!(exists("oxshutdown"));
-    let mut shutdown = Box::pin(upf.shutdown());
-    let mut context = Context::from_waker(Waker::noop());
-    assert!(matches!(
-        shutdown.as_mut().poll(&mut context),
-        Poll::Pending
-    ));
-    drop(shutdown);
-    assert!(
-        exists("oxshutdown"),
-        "cancelled shutdown lost its retained attachment"
-    );
     other.shutdown().await.unwrap();
     assert!(!other.is_running());
     assert!(!exists("oxshutdown"));
@@ -363,80 +275,6 @@ async fn shutting_down_the_upf_closes_attachments_and_rejects_new_ones() {
     })
     .await
     .expect("external child retained the closed UDP socket beyond its exec window");
-}
-
-#[tokio::test]
-#[ignore = "needs CAP_NET_ADMIN"]
-async fn failed_upf_shutdown_retains_cleanup_resources_for_retry() {
-    isolate();
-    let (upf, _) = UpfSimulator::bind("127.0.0.1:0".parse().unwrap())
-        .await
-        .unwrap();
-    upf.set_session(Session::new(1, 2, "127.0.0.1:2152".parse().unwrap(), 9))
-        .unwrap();
-    upf.attach_tun(
-        1,
-        TunConfig::new(
-            "oxretry",
-            Routing::UePolicy {
-                address: Ipv4Addr::new(198, 19, 0, 12),
-                table: 29010,
-                priority: 15010,
-            },
-        ),
-    )
-    .unwrap();
-    let restore = without_net_admin();
-    let error = upf.shutdown().await.unwrap_err();
-    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
-    assert!(
-        exists("oxretry"),
-        "failed cleanup lost ownership of the TUN"
-    );
-    assert!(rules().contains("15010:"));
-    drop(restore);
-    upf.shutdown().await.unwrap();
-    assert!(!exists("oxretry"));
-    assert!(!rules().contains("15010:"));
-}
-
-async fn session_creation_race(replace: bool) {
-    isolate();
-    let (upf, _) = UpfSimulator::bind("127.0.0.1:0".parse().unwrap())
-        .await
-        .unwrap();
-    upf.set_session(Session::new(1, 2, "127.0.0.1:2152".parse().unwrap(), 9))
-        .unwrap();
-    let other = upf.clone();
-    let remover = std::thread::spawn(move || {
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while !exists("oxrace") {
-            assert!(std::time::Instant::now() < deadline, "TUN was not created");
-            std::thread::yield_now();
-        }
-        other.remove_session(1);
-        if replace {
-            // Even identical parameters represent a new provisioning.
-            other
-                .set_session(Session::new(1, 2, "127.0.0.1:2152".parse().unwrap(), 9))
-                .unwrap();
-        }
-    });
-    // For a deterministic reproducer, strace can delay the return from
-    // TUNSETIFF: -e inject=ioctl:delay_exit=500ms:when=4 in this test. The remover sees
-    // the new device while attach_tun is still configuring it.
-    let result = upf.attach_tun(
-        1,
-        TunConfig::new(
-            "oxrace",
-            Routing::Upf {
-                ue_address: Ipv4Addr::new(198, 19, 0, 10),
-            },
-        ),
-    );
-    remover.join().unwrap();
-    assert!(!exists("oxrace"), "a removed session retained its TUN");
-    assert!(result.is_ok() || result.unwrap_err().kind() == io::ErrorKind::NotFound);
 }
 
 /// Reply to the ICMP Echo Request that `ping` sends through `port`, the

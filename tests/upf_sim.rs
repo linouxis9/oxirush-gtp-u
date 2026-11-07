@@ -4,7 +4,6 @@
 use std::future::Future;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddrV4};
-use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use oxirush_gtp_u::upf_sim::{Session, UpfSimulator};
@@ -150,88 +149,36 @@ async fn n3_packets_follow_the_target_after_a_path_switch() {
     );
 }
 
+/// An End Marker that cannot be sent: the error is returned, and the session
+/// stays switched.
+#[cfg(target_os = "linux")]
 #[tokio::test]
-async fn retrying_a_cancelled_switch_sends_the_pending_end_marker() {
+async fn a_failed_end_marker_leaves_the_session_switched() {
     let (upf, _) = UpfSimulator::bind("127.0.0.1:0".parse().unwrap())
         .await
         .unwrap();
-    let source = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let target = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    upf.set_session(Session::new(1, 2, source.local_addr().unwrap(), 9))
+    // An IPv4 socket cannot send to the IPv6 address of the old path.
+    upf.set_session(Session::new(1, 2, "[2001:db8::1]:2152".parse().unwrap(), 9))
         .unwrap();
-    let mut handover = Box::pin(upf.switch_downlink(1, target.local_addr().unwrap(), 3));
-    let mut context = Context::from_waker(Waker::noop());
-    // The fresh socket has not observed UDP write readiness yet. Cancelling
-    // here exercises the gap between committing the route and sending its marker.
-    assert!(matches!(
-        handover.as_mut().poll(&mut context),
-        Poll::Pending
-    ));
-    drop(handover);
-    assert_eq!(upf.session(1).unwrap().downlink_teid, 3);
-    assert_eq!(
-        upf.pending_end_marker(1),
-        Some(RemoteTunnel {
-            address: source.local_addr().unwrap(),
-            teid: 2,
-        })
+    assert!(
+        upf.switch_downlink(1, target.local_addr().unwrap(), 3)
+            .await
+            .is_err()
     );
-
+    assert_eq!(upf.session(1).unwrap().downlink_teid, 3);
     upf.send_downlink(1, vec![0x45]).await.unwrap();
     assert_eq!(reply(&target).await.teid, 3);
-    upf.switch_downlink(1, target.local_addr().unwrap(), 3)
-        .await
-        .unwrap();
-    let marker = reply(&source).await;
-    assert_eq!(
-        (marker.message_type, marker.teid),
-        (MessageType::END_MARKER, 2)
-    );
-    assert_eq!(upf.pending_end_marker(1), None);
+    // Switching to the path that the session has sends nothing.
     upf.switch_downlink(1, target.local_addr().unwrap(), 3)
         .await
         .unwrap();
     let mut buffer = [0; 128];
     assert!(
-        timeout(Duration::from_millis(50), source.recv_from(&mut buffer))
+        timeout(Duration::from_millis(50), target.recv_from(&mut buffer))
             .await
             .is_err()
     );
-}
-
-#[cfg(target_os = "linux")]
-#[tokio::test]
-async fn failed_end_marker_is_retained_without_rolling_back_the_new_path() {
-    let (upf, _) = UpfSimulator::bind("127.0.0.1:0".parse().unwrap())
-        .await
-        .unwrap();
-    let target = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    upf.set_session(Session::new(1, 2, "[2001:db8::1]:2152".parse().unwrap(), 9))
-        .unwrap();
-    let first = upf
-        .switch_downlink(1, target.local_addr().unwrap(), 3)
-        .await
-        .unwrap_err();
-    upf.send_downlink(1, vec![0x45]).await.unwrap();
-    assert_eq!(reply(&target).await.teid, 3);
-    // Success must not conceal that the previous marker was never sent.
-    let retry = upf
-        .switch_downlink(1, target.local_addr().unwrap(), 3)
-        .await
-        .unwrap_err();
-    assert_eq!(retry.raw_os_error(), first.raw_os_error());
-    assert_eq!(upf.session(1).unwrap().downlink_teid, 3);
-    assert_eq!(upf.pending_end_marker(1).unwrap().teid, 2);
-    // A third path cannot accumulate another pending marker or change the
-    // committed route until the existing send succeeds.
-    assert!(
-        upf.switch_downlink(1, target.local_addr().unwrap(), 4)
-            .await
-            .is_err()
-    );
-    assert_eq!(upf.session(1).unwrap().downlink_teid, 3);
-    upf.remove_session(1);
-    assert_eq!(upf.pending_end_marker(1), None);
 }
 
 #[tokio::test]
@@ -329,7 +276,7 @@ async fn observer_drops_are_counted_without_delaying_path_management() {
 }
 
 #[tokio::test]
-async fn cancelled_shutdown_can_be_awaited_again_and_stops_all_clones() {
+async fn shutdown_stops_all_clones() {
     let (upf, mut observed) = UpfSimulator::bind("127.0.0.1:0".parse().unwrap())
         .await
         .unwrap();
@@ -337,13 +284,7 @@ async fn cancelled_shutdown_can_be_awaited_again_and_stops_all_clones() {
     let address = upf.local_addr().unwrap();
     upf.set_session(Session::new(1, 2, address, 9)).unwrap();
     assert!(upf.is_running());
-    let mut shutdown = Box::pin(upf.shutdown());
-    let mut context = Context::from_waker(Waker::noop());
-    assert!(matches!(
-        shutdown.as_mut().poll(&mut context),
-        Poll::Pending
-    ));
-    drop(shutdown);
+    upf.shutdown().await.unwrap();
     assert!(!other.is_running());
     other.shutdown().await.unwrap();
     // The sessions go with it
@@ -369,68 +310,6 @@ async fn cancelled_shutdown_can_be_awaited_again_and_stops_all_clones() {
     drop(upf);
     drop(other);
     UdpSocket::bind(address).await.unwrap();
-}
-
-#[tokio::test]
-async fn replacing_a_session_while_send_waits_for_udp_readiness_rejects_the_old_generation() {
-    let (upf, _) = UpfSimulator::bind("127.0.0.1:0".parse().unwrap())
-        .await
-        .unwrap();
-    let old = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let new = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    upf.set_session(Session::new(1, 2, old.local_addr().unwrap(), 9))
-        .unwrap();
-    let mut sending = Box::pin(upf.send_downlink(1, vec![0x45]));
-    let mut context = Context::from_waker(Waker::noop());
-    assert!(matches!(sending.as_mut().poll(&mut context), Poll::Pending));
-    upf.set_session(Session::new(1, 3, new.local_addr().unwrap(), 9))
-        .unwrap();
-    assert_eq!(sending.await.unwrap_err().kind(), io::ErrorKind::NotFound);
-    let mut buffer = [0; 128];
-    assert!(
-        timeout(Duration::from_millis(25), old.recv_from(&mut buffer))
-            .await
-            .is_err()
-    );
-    assert!(
-        timeout(Duration::from_millis(25), new.recv_from(&mut buffer))
-            .await
-            .is_err()
-    );
-    upf.send_downlink(1, vec![0x45]).await.unwrap();
-    assert_eq!(reply(&new).await.teid, 3);
-}
-
-#[tokio::test]
-async fn replacing_a_session_while_marker_waits_does_not_end_the_replacement_tunnel() {
-    let (upf, _) = UpfSimulator::bind("127.0.0.1:0".parse().unwrap())
-        .await
-        .unwrap();
-    let old = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let target = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    upf.set_session(Session::new(1, 2, old.local_addr().unwrap(), 9))
-        .unwrap();
-    let mut switching = Box::pin(upf.switch_downlink(1, target.local_addr().unwrap(), 3));
-    let mut context = Context::from_waker(Waker::noop());
-    assert!(matches!(
-        switching.as_mut().poll(&mut context),
-        Poll::Pending
-    ));
-    // Reusing the old peer's TEID means a stale marker could now end an
-    // unrelated replacement tunnel, so the send must recheck its generation.
-    upf.set_session(Session::new(1, 2, old.local_addr().unwrap(), 9))
-        .unwrap();
-    assert_eq!(switching.await.unwrap_err().kind(), io::ErrorKind::NotFound);
-    assert_eq!(upf.pending_end_marker(1), None);
-    let mut buffer = [0; 128];
-    assert!(
-        timeout(Duration::from_millis(25), old.recv_from(&mut buffer))
-            .await
-            .is_err()
-    );
-    upf.send_downlink(1, vec![0x45]).await.unwrap();
-    let sent = reply(&old).await;
-    assert_eq!((sent.message_type, sent.teid), (MessageType::G_PDU, 2));
 }
 
 /// The UPF's Error Indication reaches a gNB endpoint on port 2152, here

@@ -11,12 +11,7 @@
 //!
 //! [`switch_downlink`](UpfSimulator::switch_downlink) moves a session's
 //! downlink to another gNB address and TEID and sends an End Marker on the old
-//! path. When that send fails or is cancelled the new path stays, the marker
-//! stays pending ([`pending_end_marker`](UpfSimulator::pending_end_marker))
-//! and the next call sends it first.
-//!
-//! [`shutdown`](UpfSimulator::shutdown) also closes the attached TUNs and
-//! returns what could not be cleaned up; call it again to retry.
+//! path.
 //!
 //! The `oxirush-upf-sim` program, of the `cli` feature, serves one session
 //! until Ctrl-C or SIGTERM. Its arguments are the UPF's N3 address, the
@@ -25,26 +20,23 @@
 //! `--tun <name> <UE address>` for a TUN as N6 in the place of the echo
 //! service.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::io;
 use std::net::SocketAddr;
-use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
-use tokio::sync::{Mutex as AsyncMutex, mpsc};
-use tokio::task::{AbortHandle, JoinHandle, JoinSet};
+use tokio::sync::mpsc;
+use tokio::task::{AbortHandle, JoinHandle};
 use tracing::{debug, warn};
 
 use crate::datagram::DatagramSocket;
+use crate::path::{self, lock};
 #[cfg(all(target_os = "linux", feature = "tun"))]
 use crate::tun::{TunConfig, TunPort};
 use crate::types::Teid;
-use crate::{MessageType, Packet, ReceiveStats, RemoteTunnel, icmp, ip};
-
-mod sessions;
-#[cfg(all(target_os = "linux", feature = "tun"))]
-use sessions::TunAttachment;
-use sessions::{Incarnation, SessionRegistry, UplinkTarget, stopped};
+use crate::{MessageType, Packet, ReceiveStats, icmp, ip};
 
 /// The tunnels of one PDU session. `Debug` prints the TEIDs in hexadecimal.
 ///
@@ -138,13 +130,14 @@ impl fmt::Debug for UplinkPacket {
 /// [`Endpoint`](crate::Endpoint), and passes a session's uplink T-PDUs to
 /// N6: its TUN if it has one, else the echo service, which reflects IPv4
 /// UDP and ICMP Echo Request packets, unless
-/// [`set_echo_service`](Self::set_echo_service) turned it off. A reply of
-/// the echo service whose session's downlink a send or a switch holds waits
-/// in a task of its own, 256 of them at most, and the task that receives
-/// goes on. The TEID alone identifies a session, whatever address the gNB
-/// sends from. Clones share the socket and sessions; the task stops and the
-/// TUNs close when the last clone is dropped. Must be used within a Tokio
-/// runtime.
+/// [`set_echo_service`](Self::set_echo_service) turned it off. The TEID
+/// alone identifies a session, whatever address the gNB sends from. Clones
+/// share the socket and sessions; the task stops and the TUNs close when the
+/// last clone is dropped. Must be used within a Tokio runtime.
+///
+/// Downlink sends and path switches of a session are not ordered with each
+/// other: a program that needs a send to come before or after an End Marker
+/// waits for one call before it makes the other.
 ///
 /// ```
 /// use oxirush_gtp_u::upf_sim::{Session, UpfSimulator};
@@ -178,25 +171,86 @@ pub struct UpfSimulator {
 
 struct Shared {
     socket: Arc<DatagramSocket>,
-    state: Arc<SessionRegistry>,
+    sessions: Arc<Sessions>,
     worker: AbortHandle,
-    shutdown: AsyncMutex<Shutdown>,
-}
-
-struct Shutdown {
-    receiver: Option<JoinHandle<io::Result<()>>>,
-    #[cfg(all(target_os = "linux", feature = "tun"))]
-    attachments: Vec<TunAttachment>,
+    receiver: tokio::sync::Mutex<Option<JoinHandle<io::Result<()>>>>,
 }
 
 impl Drop for Shared {
     fn drop(&mut self) {
-        self.state.stop();
+        self.sessions.stop();
         self.worker.abort();
-        // TUN tasks hold the state, so drain their owning attachments to
-        // break the cycle. Their cleanup must run outside the registry lock.
-        self.state.clear();
     }
+}
+
+/// The sessions by uplink TEID, with their TUNs.
+#[derive(Default)]
+struct Sessions {
+    entries: Mutex<HashMap<u32, Entry>>,
+    stopped: AtomicBool,
+    /// Whether a session without a TUN has no echo service.
+    no_echo: AtomicBool,
+}
+
+struct Entry {
+    session: Session,
+    #[cfg(all(target_os = "linux", feature = "tun"))]
+    tun: Option<TunAttachment>,
+}
+
+/// A session's TUN and the task that reads it. Dropping it closes the TUN.
+#[cfg(all(target_os = "linux", feature = "tun"))]
+struct TunAttachment {
+    port: TunPort,
+    task: JoinHandle<()>,
+}
+
+#[cfg(all(target_os = "linux", feature = "tun"))]
+impl Drop for TunAttachment {
+    fn drop(&mut self) {
+        self.task.abort();
+        self.port.close();
+    }
+}
+
+impl Sessions {
+    /// Stop, and close the TUNs: they go once the lock is released, as
+    /// closing one is netlink I/O.
+    fn stop(&self) {
+        self.stopped.store(true, Ordering::Relaxed);
+        let _entries = std::mem::take(&mut *lock(&self.entries));
+    }
+
+    fn get(&self, uplink_teid: u32) -> io::Result<Session> {
+        if self.stopped.load(Ordering::Relaxed) {
+            return Err(stopped());
+        }
+        lock(&self.entries)
+            .get(&uplink_teid)
+            .map(|entry| entry.session)
+            .ok_or_else(|| unknown_session(uplink_teid))
+    }
+
+    /// The TUN of session `uplink_teid`, if it has one.
+    #[cfg(all(target_os = "linux", feature = "tun"))]
+    fn tun(&self, uplink_teid: u32) -> Option<TunPort> {
+        lock(&self.entries)
+            .get(&uplink_teid)?
+            .tun
+            .as_ref()
+            .map(|tun| tun.port.clone())
+    }
+}
+
+fn unknown_session(uplink_teid: u32) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::NotFound,
+        format!("no session with uplink TEID {uplink_teid:#010x}"),
+    )
+}
+
+fn stopped() -> io::Error {
+    io::Error::new(io::ErrorKind::BrokenPipe, "UPF simulator has stopped")
 }
 
 impl UpfSimulator {
@@ -208,19 +262,14 @@ impl UpfSimulator {
     /// [`InvalidInput`](io::ErrorKind::InvalidInput).
     pub async fn bind(address: SocketAddr) -> io::Result<(Self, mpsc::Receiver<UplinkPacket>)> {
         let socket = Arc::new(DatagramSocket::bind(address).await?);
-        let state = Arc::new(SessionRegistry::default());
+        let sessions = Arc::new(Sessions::default());
         let (tx, rx) = mpsc::channel(256);
-        let task = tokio::spawn(receive(socket.clone(), state.clone(), tx));
-        let worker = task.abort_handle();
+        let task = tokio::spawn(receive(socket.clone(), sessions.clone(), tx));
         let shared = Shared {
             socket,
-            state,
-            worker,
-            shutdown: AsyncMutex::new(Shutdown {
-                receiver: Some(task),
-                #[cfg(all(target_os = "linux", feature = "tun"))]
-                attachments: Vec::new(),
-            }),
+            sessions,
+            worker: task.abort_handle(),
+            receiver: tokio::sync::Mutex::new(Some(task)),
         };
         Ok((
             Self {
@@ -237,7 +286,7 @@ impl UpfSimulator {
 
     /// Whether the receive task is running and shutdown has not been requested.
     pub fn is_running(&self) -> bool {
-        !self.shared.state.is_closed() && !self.shared.worker.is_finished()
+        !self.shared.sessions.stopped.load(Ordering::Relaxed) && !self.shared.worker.is_finished()
     }
 
     /// A snapshot of receive and observer queue counters shared by all clones.
@@ -245,80 +294,25 @@ impl UpfSimulator {
         self.shared.socket.stats()
     }
 
-    /// Stop background processing, close the attached TUNs, and wait for the
-    /// receive and TUN forwarding tasks to finish. Cleanup failures are
-    /// returned and their TUNs remain owned so a later call can retry. All
-    /// clones observe shutdown. The UDP socket
-    /// stays bound until the last clone is dropped. Cancelling this call does
-    /// not prevent a later call from waiting for the task to finish.
+    /// Stop the receive task for all clones, close the TUNs as best it can,
+    /// logging what it could not remove, and wait for the task. The UDP
+    /// socket stays bound until the last clone is dropped.
     pub async fn shutdown(&self) -> io::Result<()> {
-        self.shared.state.stop();
+        self.shared.sessions.stop();
         self.shared.worker.abort();
-        let mut shutdown = self.shared.shutdown.lock().await;
-        #[cfg(all(target_os = "linux", feature = "tun"))]
-        for attachment in self.shared.state.drain_attachments() {
-            if let Some(task) = &attachment.task {
-                task.abort();
-            }
-            shutdown.attachments.push(attachment);
-        }
-        #[cfg(not(all(target_os = "linux", feature = "tun")))]
-        self.shared.state.clear();
-        let result = match shutdown.receiver.as_mut() {
-            Some(task) => match task.await {
-                Ok(result) => result,
-                Err(error) if error.is_cancelled() => Ok(()),
-                Err(error) => Err(io::Error::other(error)),
-            },
-            None => Ok(()),
+        let Some(task) = self.shared.receiver.lock().await.take() else {
+            return Ok(());
         };
-        shutdown.receiver.take();
-        #[cfg(all(target_os = "linux", feature = "tun"))]
-        {
-            let mut result = result;
-            let mut index = 0;
-            while index < shutdown.attachments.len() {
-                let attachment = &mut shutdown.attachments[index];
-                if let Some(task) = attachment.task.as_mut() {
-                    if let Err(error) = task.await
-                        && !error.is_cancelled()
-                        && result.is_ok()
-                    {
-                        result = Err(io::Error::other(error));
-                    }
-                    attachment.task.take();
-                }
-                match attachment.port.try_close() {
-                    Ok(()) => {
-                        shutdown.attachments.swap_remove(index);
-                    }
-                    Err(error) => {
-                        if result.is_ok() {
-                            result = Err(error);
-                        }
-                        index += 1;
-                    }
-                }
-            }
-            result
-        }
-        #[cfg(not(all(target_os = "linux", feature = "tun")))]
-        {
-            result
-        }
-    }
-
-    fn ensure_running(&self) -> io::Result<()> {
-        if self.is_running() {
-            Ok(())
-        } else {
-            Err(stopped())
+        match task.await {
+            Ok(result) => result,
+            Err(error) if error.is_cancelled() => Ok(()),
+            Err(error) => Err(io::Error::other(error)),
         }
     }
 
     /// Provision a session, replacing one with the same uplink TEID and
-    /// closing its previous TUN. Use [`switch_downlink`](Self::switch_downlink)
-    /// for a handover that retains the session's N6 attachment.
+    /// closing its TUN. Use [`switch_downlink`](Self::switch_downlink) for a
+    /// handover that keeps the session's TUN.
     ///
     /// # Errors
     ///
@@ -329,88 +323,59 @@ impl UpfSimulator {
     /// [`Error::OutOfRange`](crate::Error::OutOfRange) for the QFI, which
     /// is what encoding a G-PDU with it returns.
     pub fn set_session(&self, session: Session) -> io::Result<()> {
-        self.shared.state.replace(session)
+        path::qfi(session.qfi)?;
+        let entry = Entry {
+            session,
+            #[cfg(all(target_os = "linux", feature = "tun"))]
+            tun: None,
+        };
+        // The TUN of the session it replaces closes once the lock is released.
+        let _replaced = lock(&self.shared.sessions.entries).insert(session.uplink_teid, entry);
+        Ok(())
     }
 
-    /// A snapshot of the current session, including the committed downlink path.
-    /// Separate calls to this method and [`pending_end_marker`](Self::pending_end_marker)
-    /// can observe different concurrent updates.
+    /// The session of `uplink_teid`, with its current downlink path.
     pub fn session(&self, uplink_teid: u32) -> Option<Session> {
-        self.shared.state.session(uplink_teid)
-    }
-
-    /// The old downlink path whose End Marker is pending after a failed or
-    /// cancelled switch. This snapshot does not guarantee delivery or make
-    /// separate status calls atomic with concurrent changes.
-    pub fn pending_end_marker(&self, uplink_teid: u32) -> Option<RemoteTunnel> {
-        self.shared.state.pending_end_marker(uplink_teid)
+        self.shared.sessions.get(uplink_teid).ok()
     }
 
     /// Move a session's downlink to `downlink_teid` at `gnb_address`, as
     /// after a handover, and send an End Marker on the old path (TS 23.502
-    /// §4.9.1.2.2).
-    ///
-    /// The route changes before the marker is sent. A send error or
-    /// cancellation leaves the new route installed and its old-path marker
-    /// pending. Retrying, even with the same target, attempts that marker
-    /// again. A further path change first completes the pending send attempt,
-    /// keeping at most one pending marker per session. UDP send success does
-    /// not guarantee delivery. Replacing or removing the session discards its
-    /// pending marker. Downlink sends and switches are ordered per session.
+    /// §4.9.1.2.2). The session is switched before the marker is sent, and
+    /// stays switched when the send fails, whose error is returned. Switching
+    /// to the path that the session has sends nothing.
     pub async fn switch_downlink(
         &self,
         uplink_teid: u32,
         gnb_address: SocketAddr,
         downlink_teid: u32,
     ) -> io::Result<()> {
-        self.ensure_running()?;
-        let incarnation = self.shared.state.incarnation(uplink_teid)?;
-        let _downlink = incarnation.downlink.lock().await;
-        self.ensure_running()?;
-        self.send_pending_marker(uplink_teid, &incarnation).await?;
-        let changed =
-            self.shared
-                .state
-                .switch_path(uplink_teid, &incarnation, gnb_address, downlink_teid)?;
-        if changed {
-            self.send_pending_marker(uplink_teid, &incarnation).await?;
+        if !self.is_running() {
+            return Err(stopped());
         }
-        Ok(())
-    }
-
-    async fn send_pending_marker(
-        &self,
-        uplink_teid: u32,
-        incarnation: &Arc<Incarnation>,
-    ) -> io::Result<()> {
-        self.ensure_running()?;
-        let pending = self.shared.state.pending_marker(uplink_teid, incarnation)?;
-        if let Some(old) = pending {
-            let marker = Packet::end_marker(old.downlink_teid)
-                .encode()
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-            let to = self.shared.socket.destination(old.gnb_address);
-            loop {
-                self.shared.socket.writable().await?;
-                self.ensure_running()?;
-                let sent = self.shared.state.send_marker(uplink_teid, incarnation, || {
-                    self.shared.socket.try_send_to(&marker, to)
-                });
-                match sent {
-                    Ok(_) => break,
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
-                    Err(error) => return Err(error),
-                }
-            }
+        let old = {
+            let mut entries = lock(&self.shared.sessions.entries);
+            let entry = entries
+                .get_mut(&uplink_teid)
+                .ok_or_else(|| unknown_session(uplink_teid))?;
+            let old = entry.session;
+            entry.session.gnb_address = gnb_address;
+            entry.session.downlink_teid = downlink_teid;
+            old
+        };
+        let new = (path::canonical(gnb_address), downlink_teid);
+        if (path::canonical(old.gnb_address), old.downlink_teid) == new {
+            return Ok(());
         }
-        Ok(())
+        let marker = Packet::end_marker(old.downlink_teid);
+        self.shared.socket.send(&marker, old.gnb_address).await
     }
 
     /// Whether the echo service answers the uplink T-PDUs of the sessions
     /// that have no TUN: it does unless
     /// [`set_echo_service`](Self::set_echo_service) turned it off.
     pub fn echo_service(&self) -> bool {
-        self.shared.state.echo_service()
+        !self.shared.sessions.no_echo.load(Ordering::Relaxed)
     }
 
     /// Turn the echo service on or off. A program that answers the UE
@@ -419,42 +384,52 @@ impl UpfSimulator {
     /// gets the echo of its packet too. The receiver still gets every
     /// uplink G-PDU.
     pub fn set_echo_service(&self, on: bool) {
-        self.shared.state.set_echo_service(on);
+        self.shared.sessions.no_echo.store(!on, Ordering::Relaxed);
     }
 
     /// Remove a session and close its TUN.
     pub fn remove_session(&self, uplink_teid: u32) {
-        self.shared.state.remove(uplink_teid);
+        // As in `set_session`, the TUN closes once the lock is released.
+        let _removed = lock(&self.shared.sessions.entries).remove(&uplink_teid);
     }
 
     /// Give a session a Linux TUN as N6: its uplink T-PDUs go to Linux, and
     /// what Linux routes to the TUN comes back as downlink G-PDUs.
+    ///
+    /// # Errors
+    ///
+    /// [`NotFound`](io::ErrorKind::NotFound) for a session that does not
+    /// exist, [`AlreadyExists`](io::ErrorKind::AlreadyExists) for one that
+    /// has a TUN, [`BrokenPipe`](io::ErrorKind::BrokenPipe) once the UPF is
+    /// shut down, and the errors of [`TunPort::create`]. On an error nothing
+    /// of the TUN is left.
     ///
     /// # Panics
     ///
     /// Outside a Tokio runtime.
     #[cfg(all(target_os = "linux", feature = "tun"))]
     pub fn attach_tun(&self, uplink_teid: u32, config: TunConfig) -> io::Result<()> {
-        self.ensure_running()?;
-        let incarnation = self.shared.state.prepare_attachment(uplink_teid)?;
+        if !self.is_running() {
+            return Err(stopped());
+        }
+        let sessions = &self.shared.sessions;
+        tun_slot(&mut lock(&sessions.entries), uplink_teid)?;
         let port = TunPort::create(config)?;
         let task = tokio::spawn(forward_tun_downlink(
             port.clone(),
             self.shared.socket.clone(),
-            self.shared.state.clone(),
+            sessions.clone(),
             uplink_teid,
-            incarnation.clone(),
         ));
-        let attachment = TunAttachment {
-            port,
-            task: Some(task),
-        };
-        self.shared.state.attach(
-            uplink_teid,
-            &incarnation,
-            attachment,
-            !self.shared.worker.is_finished(),
-        )
+        let attachment = TunAttachment { port, task };
+        // Unless the UPF stopped, or the session went away or got a TUN
+        // meanwhile: the attachment then closes once the lock is released.
+        let mut entries = lock(&sessions.entries);
+        if sessions.stopped.load(Ordering::Relaxed) {
+            return Err(stopped());
+        }
+        *tun_slot(&mut entries, uplink_teid)? = Some(attachment);
+        Ok(())
     }
 
     /// Send an owned or borrowed IP packet to a session's UE as a downlink G-PDU.
@@ -463,16 +438,31 @@ impl UpfSimulator {
         uplink_teid: u32,
         packet: P,
     ) -> io::Result<()> {
-        self.ensure_running()?;
-        let incarnation = self.shared.state.incarnation(uplink_teid)?;
         send_downlink(
             &self.shared.socket,
-            &self.shared.state,
+            &self.shared.sessions,
             uplink_teid,
-            &incarnation,
             packet,
         )
         .await
+    }
+}
+
+/// The TUN of session `uplink_teid`, which has none.
+#[cfg(all(target_os = "linux", feature = "tun"))]
+fn tun_slot(
+    entries: &mut HashMap<u32, Entry>,
+    uplink_teid: u32,
+) -> io::Result<&mut Option<TunAttachment>> {
+    let entry = entries
+        .get_mut(&uplink_teid)
+        .ok_or_else(|| unknown_session(uplink_teid))?;
+    match entry.tun {
+        Some(_) => Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("a TUN is already attached to uplink TEID {uplink_teid:#010x}"),
+        )),
+        None => Ok(&mut entry.tun),
     }
 }
 
@@ -480,93 +470,21 @@ impl fmt::Debug for UpfSimulator {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("UpfSimulator")
             .field("local_addr", &self.local_addr().ok())
-            .field("sessions", &self.shared.state.len())
+            .field("sessions", &lock(&self.shared.sessions.entries).len())
             .finish()
     }
 }
 
+/// Send `packet` on the downlink of session `uplink_teid`.
 async fn send_downlink<P: AsRef<[u8]>>(
     socket: &DatagramSocket,
-    state: &SessionRegistry,
+    sessions: &Sessions,
     uplink_teid: u32,
-    incarnation: &Arc<Incarnation>,
     packet: P,
 ) -> io::Result<()> {
-    let downlink = incarnation.downlink.lock().await;
-    send_on_downlink(socket, state, uplink_teid, incarnation, packet, downlink).await
-}
-
-/// Send `packet` on the downlink of session `uplink_teid`, which the
-/// caller holds.
-async fn send_on_downlink<P: AsRef<[u8]>>(
-    socket: &DatagramSocket,
-    state: &SessionRegistry,
-    uplink_teid: u32,
-    incarnation: &Arc<Incarnation>,
-    packet: P,
-    _downlink: tokio::sync::MutexGuard<'_, ()>,
-) -> io::Result<()> {
-    if state.is_closed() {
-        return Err(stopped());
-    }
-    let session = state.current_session(uplink_teid, incarnation)?;
-    let bytes = Packet::downlink(session.downlink_teid, session.qfi, packet)
-        .encode()
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-    let to = socket.destination(session.gnb_address);
-    loop {
-        socket.writable().await?;
-        let sent = state.send_downlink(uplink_teid, incarnation, || socket.try_send_to(&bytes, to));
-        match sent {
-            Ok(_) => return Ok(()),
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
-            Err(error) => return Err(error),
-        }
-    }
-}
-
-/// The replies of the echo service that wait for their session's
-/// downlink, each in a task: a send or a switch may hold it.
-const WAITING_REPLIES: usize = 256;
-
-/// Send the echo service's `reply` on the downlink of session
-/// `uplink_teid`: at once when it is free, and else from a task of
-/// `waiting`, so that the receive task waits for no session. Past
-/// [`WAITING_REPLIES`] such tasks a reply is dropped.
-async fn echo(
-    socket: &Arc<DatagramSocket>,
-    state: &Arc<SessionRegistry>,
-    uplink_teid: u32,
-    incarnation: &Arc<Incarnation>,
-    reply: Vec<u8>,
-    waiting: &mut JoinSet<()>,
-) {
-    let sent = match incarnation.downlink.try_lock() {
-        Ok(downlink) => {
-            send_on_downlink(socket, state, uplink_teid, incarnation, reply, downlink).await
-        }
-        Err(_) => {
-            while waiting.try_join_next().is_some() {}
-            if waiting.len() >= WAITING_REPLIES {
-                debug!(
-                    "UPF echo reply on uplink TEID {uplink_teid:#010x} dropped: \
-                     {WAITING_REPLIES} replies wait for their session"
-                );
-                return;
-            }
-            let (socket, state, incarnation) = (socket.clone(), state.clone(), incarnation.clone());
-            waiting.spawn(async move {
-                let sent = send_downlink(&socket, &state, uplink_teid, &incarnation, reply).await;
-                if let Err(error) = sent {
-                    debug!("UPF echo reply on uplink TEID {uplink_teid:#010x} failed: {error}");
-                }
-            });
-            return;
-        }
-    };
-    if let Err(error) = sent {
-        debug!("UPF echo reply on uplink TEID {uplink_teid:#010x} failed: {error}");
-    }
+    let session = sessions.get(uplink_teid)?;
+    let downlink = Packet::downlink(session.downlink_teid, session.qfi, packet);
+    socket.send(&downlink, session.gnb_address).await
 }
 
 /// The echo service's reply to an uplink T-PDU, if it answers it.
@@ -579,19 +497,16 @@ fn echo_service(packet: &[u8]) -> Option<Vec<u8>> {
 
 async fn receive(
     socket: Arc<DatagramSocket>,
-    state: Arc<SessionRegistry>,
+    sessions: Arc<Sessions>,
     tx: mpsc::Sender<UplinkPacket>,
 ) -> io::Result<()> {
     let mut buffer = vec![0; 65536];
-    // The echo replies that wait for their session's downlink. They go with
-    // this task, when the UPF is shut down or dropped.
-    let mut waiting = JoinSet::new();
     loop {
         let (packet, from) = match socket.receive(&mut buffer).await {
             Ok(Some(received)) => received,
             Ok(None) => continue,
             Err(error) => {
-                state.stop();
+                sessions.stop();
                 warn!("UPF simulator stopped receiving: {error}");
                 return Err(error);
             }
@@ -613,28 +528,23 @@ async fn receive(
                 continue;
             }
         }
-        let Some(target) = state.uplink_target(packet.teid) else {
+        if sessions.get(packet.teid).is_err() {
             debug!(
                 "UPF G-PDU for unknown TEID {:#010x} from {from}",
                 packet.teid
             );
             socket.unknown_teid(packet.teid, from).await;
             continue;
-        };
-        if !write_to_tun(&target, packet.payload).await
-            && state.echo_service()
+        }
+        if !write_to_tun(&sessions, packet.teid, packet.payload).await
+            && !sessions.no_echo.load(Ordering::Relaxed)
             && let Some(reply) = echo_service(packet.payload)
+            && let Err(error) = send_downlink(&socket, &sessions, packet.teid, reply).await
         {
-            let incarnation = &target.incarnation;
-            echo(
-                &socket,
-                &state,
-                packet.teid,
-                incarnation,
-                reply,
-                &mut waiting,
-            )
-            .await;
+            debug!(
+                "UPF echo reply on uplink TEID {:#010x} failed: {error}",
+                packet.teid
+            );
         }
         socket.observe(&tx, || UplinkPacket {
             uplink_teid: packet.teid,
@@ -646,8 +556,8 @@ async fn receive(
 
 /// Write an uplink T-PDU to its session's TUN; false if it has none.
 #[cfg(all(target_os = "linux", feature = "tun"))]
-async fn write_to_tun(target: &UplinkTarget, packet: &[u8]) -> bool {
-    let Some(port) = &target.port else {
+async fn write_to_tun(sessions: &Sessions, uplink_teid: u32, packet: &[u8]) -> bool {
+    let Some(port) = sessions.tun(uplink_teid) else {
         return false;
     };
     // A G-PDU without a T-PDU has nothing for Linux.
@@ -660,7 +570,7 @@ async fn write_to_tun(target: &UplinkTarget, packet: &[u8]) -> bool {
 }
 
 #[cfg(not(all(target_os = "linux", feature = "tun")))]
-async fn write_to_tun(_target: &UplinkTarget, _packet: &[u8]) -> bool {
+async fn write_to_tun(_sessions: &Sessions, _uplink_teid: u32, _packet: &[u8]) -> bool {
     false
 }
 
@@ -669,9 +579,8 @@ async fn write_to_tun(_target: &UplinkTarget, _packet: &[u8]) -> bool {
 async fn forward_tun_downlink(
     port: TunPort,
     socket: Arc<DatagramSocket>,
-    state: Arc<SessionRegistry>,
+    sessions: Arc<Sessions>,
     uplink_teid: u32,
-    incarnation: Arc<Incarnation>,
 ) {
     let mut buffer = vec![0; 65536];
     loop {
@@ -682,9 +591,7 @@ async fn forward_tun_downlink(
                 return;
             }
         };
-        if let Err(error) =
-            send_downlink(&socket, &state, uplink_teid, &incarnation, &buffer[..size]).await
-        {
+        if let Err(error) = send_downlink(&socket, &sessions, uplink_teid, &buffer[..size]).await {
             if matches!(
                 error.kind(),
                 io::ErrorKind::NotFound | io::ErrorKind::BrokenPipe
@@ -693,115 +600,5 @@ async fn forward_tun_downlink(
             }
             warn!("UPF TUN {} downlink failed: {error}", port.name());
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::future::Future;
-    use std::task::{Context, Poll, Waker};
-    use tokio::net::UdpSocket;
-    use tokio::time::{Duration, timeout};
-
-    /// The echo service's reply waits for its session's downlink, which a
-    /// send or a switch may hold up: the receive task does not, and still
-    /// answers Echo Requests and passes on other sessions' packets.
-    #[tokio::test]
-    async fn a_session_whose_downlink_is_held_up_holds_up_nothing_else() {
-        let (upf, mut observed) = UpfSimulator::bind("127.0.0.1:0".parse().unwrap())
-            .await
-            .unwrap();
-        let gnb = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let gnb_address = gnb.local_addr().unwrap();
-        upf.set_session(Session::new(1, 2, gnb_address, 9)).unwrap();
-        upf.set_session(Session::new(3, 4, gnb_address, 9)).unwrap();
-        let held = upf.shared.state.uplink_target(1).unwrap();
-        let guard = held.incarnation.downlink.lock().await;
-        let to = upf.local_addr().unwrap();
-        let echoed = |teid| {
-            let server = "192.0.2.1:7".parse().unwrap();
-            let ue = "10.45.0.2:4000".parse().unwrap();
-            Packet::uplink(teid, 9, ip::udp(ue, server, b"hello").unwrap())
-                .encode()
-                .unwrap()
-        };
-        gnb.send_to(&echoed(1), to).await.unwrap();
-        gnb.send_to(&Packet::echo_request(5).encode().unwrap(), to)
-            .await
-            .unwrap();
-        gnb.send_to(&echoed(3), to).await.unwrap();
-
-        // The Echo Response, and the echo of the other session, come.
-        let mut buffer = [0; 256];
-        let mut seen = Vec::new();
-        for _ in 0..2 {
-            let (size, _) = timeout(Duration::from_secs(1), gnb.recv_from(&mut buffer))
-                .await
-                .expect("the receive task waits for a session's downlink")
-                .unwrap();
-            let packet = Packet::decode(&buffer[..size]).unwrap();
-            seen.push((packet.message_type, packet.teid));
-        }
-        seen.sort();
-        assert_eq!(
-            seen,
-            [(MessageType::ECHO_RESPONSE, 0), (MessageType::G_PDU, 4)]
-        );
-        for teid in [1, 3] {
-            let uplink = timeout(Duration::from_secs(1), observed.recv()).await;
-            assert_eq!(uplink.unwrap().unwrap().uplink_teid, teid);
-        }
-        // The held one's reply goes once its downlink is free.
-        drop(guard);
-        let (size, _) = timeout(Duration::from_secs(1), gnb.recv_from(&mut buffer))
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(Packet::decode(&buffer[..size]).unwrap().teid, 2);
-    }
-
-    #[tokio::test]
-    async fn replacing_a_session_rejects_waiting_sends_and_stale_uplink_snapshots() {
-        let (upf, _) = UpfSimulator::bind("127.0.0.1:0".parse().unwrap())
-            .await
-            .unwrap();
-        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        upf.set_session(Session::new(1, 2, peer.local_addr().unwrap(), 9))
-            .unwrap();
-        let target = upf.shared.state.uplink_target(1).unwrap();
-        let guard = target.incarnation.downlink.lock().await;
-        let mut waiting = Box::pin(upf.send_downlink(1, vec![0x45]));
-        let mut context = Context::from_waker(Waker::noop());
-        assert!(matches!(waiting.as_mut().poll(&mut context), Poll::Pending));
-        upf.set_session(Session::new(1, 3, peer.local_addr().unwrap(), 9))
-            .unwrap();
-        drop(guard);
-        assert_eq!(waiting.await.unwrap_err().kind(), io::ErrorKind::NotFound);
-        assert_eq!(
-            send_downlink(
-                &upf.shared.socket,
-                &upf.shared.state,
-                1,
-                &target.incarnation,
-                vec![0x45]
-            )
-            .await
-            .unwrap_err()
-            .kind(),
-            io::ErrorKind::NotFound
-        );
-        let mut buffer = [0; 128];
-        assert!(
-            timeout(Duration::from_millis(25), peer.recv_from(&mut buffer))
-                .await
-                .is_err()
-        );
-        upf.send_downlink(1, vec![0x45]).await.unwrap();
-        let (size, _) = timeout(Duration::from_secs(1), peer.recv_from(&mut buffer))
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(Packet::decode(&buffer[..size]).unwrap().teid, 3);
     }
 }
