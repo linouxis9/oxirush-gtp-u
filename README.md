@@ -49,10 +49,10 @@ Each example is followed by its output.
 
 ```toml
 [dependencies]
-oxirush-gtp-u = "0.1"
+oxirush-gtp-u = "0.2"
 tokio = { version = "1", features = ["macros", "rt", "net"] } # for the endpoint
 # The codec alone, without a dependency:
-# oxirush-gtp-u = { version = "0.1", default-features = false }
+# oxirush-gtp-u = { version = "0.2", default-features = false }
 ```
 
 | Feature | Adds | Needs |
