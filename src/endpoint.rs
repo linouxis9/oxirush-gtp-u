@@ -51,7 +51,6 @@ const QUEUE: usize = 256;
 /// # }
 /// ```
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RemoteTunnel {
     /// The peer's address, normally on port [`PORT`](crate::PORT).
     pub address: SocketAddr,
@@ -125,21 +124,10 @@ pub struct ReceivedPacket {
 
 /// One UDP socket carrying a gNB's N3 tunnels, each identified by a RAN UE
 /// identifier (such as the RAN UE NGAP ID) and a PDU session ID, or an
-/// eNB's S1-U tunnels, identified by the eNB UE S1AP ID and E-RAB ID.
-///
-/// A task answers Echo Requests, sends an Error Indication for a G-PDU on
-/// an unknown TEID and a Supported Extension Headers Notification for an
-/// unsupported comprehension-required extension header, and delivers the
-/// tunnels' messages, with every extension header that
-/// [`ExtensionHeader`](crate::ExtensionHeader) has a variant for: those of
-/// a handover and of the RAN protocols among them. It sends Echo Requests
-/// and supervises paths when asked, and delivers what its peers send on
-/// the paths. As in TS 29.281, the TEID alone identifies a tunnel: peers
-/// may send from another address than their F-TEID's. GTP-U has no
-/// authentication, so whoever reaches the socket can send on a tunnel or
-/// report an Error Indication for it. Clones share the socket and tunnels;
-/// the task stops when the last clone is dropped. Must be used within a
-/// Tokio runtime.
+/// eNB's S1-U tunnels, identified by the eNB UE S1AP ID and E-RAB ID. Clones
+/// share the socket and tunnels; its task stops when the last clone is
+/// dropped, or at [`shutdown`](Self::shutdown). Must be used within a Tokio
+/// runtime.
 ///
 /// ```
 /// use oxirush_gtp_u::{Endpoint, RemoteTunnel};
@@ -161,74 +149,29 @@ pub struct ReceivedPacket {
 /// # }
 /// ```
 ///
-/// # Tunnels
+/// - [`install`](Self::install) and [`install_with_teid`](Self::install_with_teid)
+///   set up a tunnel, [`remove`](Self::remove) and
+///   [`remove_ran`](Self::remove_ran) remove tunnels.
+/// - [`send`](Self::send) sends an IP packet in a tunnel, and
+///   [`send_to`](Self::send_to) any message; the receiver of
+///   [`bind`](Self::bind) gets the tunnels' messages.
+/// - `attach_tun` gives a tunnel a TUN, on Linux with the `tun` feature.
+/// - [`echo`](Self::echo), [`supervise`](Self::supervise) and
+///   [`path_events`](Self::path_events) follow the paths to the peers
+///   (TS 29.281 §7.2, §11, TS 23.007 §20.3.1).
 ///
-/// [`bind`](Self::bind) opens the socket and returns the receiver of the
-/// tunnels' messages: G-PDUs, End Markers, Tunnel Status messages and the
-/// peer's Error Indications, each with its tunnel and source address. The
-/// TEID alone identifies a tunnel, so a peer may send from another address
-/// than its F-TEID's. An End Marker or a Tunnel Status on a TEID without a
-/// tunnel is ignored (TS 29.281 §7.3.2.1, §7.3.3).
-///
-/// - [`install`](Self::install) sets up the tunnel of a RAN UE and PDU session,
-///   or of an eNB UE and E-RAB without a QFI, toward a remote TEID and returns
-///   the local TEID to give the peer; on an existing tunnel it updates the
-///   remote end and the QFI. Local TEIDs are drawn at random: one cannot be
-///   told from another. A QFI above 63 is `InvalidInput`.
-///   [`install_with_teid`](Self::install_with_teid) takes a local TEID that
-///   something else assigned.
-/// - [`send`](Self::send) sends an IP packet in a tunnel.
-///   [`send_to`](Self::send_to) sends any `Packet` from the endpoint's socket,
-///   with its sequence number and extension headers.
-/// - `attach_tun` gives a tunnel a TUN (Linux, `tun` feature) and carries its
-///   packets both ways: the tunnel's G-PDUs then go to Linux and no longer to
-///   the receiver. The TUN closes with its tunnel, on `remove`, `remove_ran`
-///   and `shutdown`, and when the last clone of the endpoint is dropped.
-/// - [`remove`](Self::remove) and [`remove_ran`](Self::remove_ran) remove
-///   tunnels; [`local_teid`](Self::local_teid) looks one up.
-///
-/// # Path management
-///
-/// The endpoint sends by itself the replies that TS 29.281 §7 asks of every
+/// The task sends by itself the replies that TS 29.281 §7 asks of every
 /// GTP-U node: it answers Echo Requests, sends an Error Indication for a
-/// G-PDU on an unknown TEID and a Supported Extension Headers Notification
-/// for an extension header it must understand and does not. The last two go
-/// to port 2152, as the specification requires. A slow receiver never
-/// delays these replies: past 256 queued messages new ones are dropped and
-/// counted, and a dropped receiver changes nothing else.
-///
-/// The rest is the program's to ask for:
-///
-/// - [`echo`](Self::echo) sends an Echo Request to a peer and waits for its
-///   response, which it repeats each T3-RESPONSE, N3-REQUESTS times at most
-///   (§11, [`PathTimers`]).
-/// - [`supervise`](Self::supervise) sends one on a path each interval and
-///   follows its state, which [`path_state`](Self::path_state) reads: the
-///   path is down once more than N3-REQUESTS of its requests' timers expired
-///   since its last response (TS 29.281 §9.2, TS 23.007 §20.3.1).
-/// - [`path_events`](Self::path_events) gives the Echo Responses, the
-///   peers' Supported Extension Headers Notifications and the changes of the
-///   supervised paths. An Echo Response that answers no request of `echo` or
-///   of a supervised path is a duplicate, which §11 discards.
-///
-/// A peer needs no tunnel to cause these replies, and GTP-U has no
-/// authentication: whoever can send from an address can have them sent to
-/// it. The socket sends 1,000 Error Indications, Supported Extension Headers
-/// Notifications and Echo Responses a second at most, after a burst of
-/// 1,000; past that a reply is not sent and is counted in
-/// [`suppressed_replies`](ReceiveStats::suppressed_replies). A flood from one
-/// address can use up the replies owed to the others. What a peer causes is
+/// G-PDU on an unknown TEID, and a Supported Extension Headers Notification
+/// for an extension header that it must understand and does not, the last
+/// two to port 2152. A slow receiver never delays them. As in TS 29.281, the
+/// TEID alone identifies a tunnel, and GTP-U has no authentication: whoever
+/// reaches the socket can send on a tunnel, or cause these replies from any
+/// address. The socket sends 1,000 of them a second at most, after a burst
+/// of 1,000; past that a reply is not sent and is counted in
+/// [`suppressed_replies`](ReceiveStats::suppressed_replies), and one flooding
+/// peer can use up the replies owed to the others. What a peer causes is
 /// logged at the `debug` level.
-///
-/// Bind a specific address: a wildcard is refused with `InvalidInput`, so that
-/// replies leave from the address the request reached. Bind port 2152 to
-/// receive the peer's Error Indications, which TS 29.281 §4.4.2.4 sends there
-/// whatever port the G-PDUs came from.
-///
-/// [`stats`](Self::stats) has the receive and drop counters and
-/// [`is_running`](Self::is_running) the state of the background task.
-/// [`shutdown`](Self::shutdown) stops it for all clones and waits for it; the
-/// port stays bound until the last clone is dropped.
 #[derive(Clone)]
 pub struct Endpoint {
     shared: Arc<Shared>,

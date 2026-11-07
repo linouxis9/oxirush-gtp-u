@@ -9,7 +9,7 @@
 # programs of src/ebpf/programs.rs are no module of the crate: ebpf/build.sh builds
 # them into the committed object, which the crate loads.
 
-# Every feature, so that the code of `tun`, `ebpf`, `serde` and `cli` is in the build
+# Every feature, so that the code of `tun`, `ebpf` and `cli` is in the build
 # that the tests run on: without its feature, a mutant of that code would build
 # without it and pass.
 all_features = true
@@ -21,23 +21,15 @@ all_features = true
 exclude_globs = ["src/tun.rs", "src/tun/*.rs", "src/netlink.rs", "src/ebpf.rs"]
 
 exclude_re = [
-    # The code of TUNs and of the fast path in the files that the shards mutate, the
-    # program's TUN, and the sends that wait for room in the socket's buffer, which a
-    # qdisc in a network namespace fills: the job `privileged` runs these mutants
-    # too, as root, by the same regexes in .cargo/mutants-privileged.toml. (The
-    # program's refusal of a TUN, the UPF's write to none and its shutdown without
-    # them are built without the feature `tun` alone: the job `without-tun` runs
-    # them, by the same regexes.)
-    'src/bin/oxirush-upf-sim\.rs:152:5: replace attach_tun ',
-    'src/endpoint/routes\.rs:(49|80|286|338|350|361):[0-9]+: replace ',
-    'src/endpoint/routes\.rs:266:70: replace != with == in RouteTable::install_with_teid$',
-    'src/endpoint\.rs:(280|622|623|670|972|1017|1078):[0-9]+: (replace|delete) ',
-    'src/endpoint\.rs:1008:5: replace forward_tun with \(\)$',
-    'src/upf_sim\.rs:(277|281|296|398|435|453|519|672|676|704):[0-9]+: (replace|delete) ',
-    'src/upf_sim/sessions\.rs:(57|237|255|257):[0-9]+: (replace|delete) ',
-    'src/bin/oxirush-upf-sim\.rs:161:5: replace attach_tun ',
-    'src/upf_sim\.rs:692:5: replace write_to_tun -> bool with true$',
-    'src/upf_sim/sessions\.rs:104:9: replace SessionRegistry::clear with \(\)$',
+    # The code of TUNs in the files that the shards mutate, and the program's TUN:
+    # the job `privileged` runs these mutants, as root, by the same regexes in
+    # .cargo/mutants-privileged.toml. (What the program and the UPF do without a
+    # TUN is built without the feature `tun`: the job `without-tun` runs it.)
+    'src/bin/oxirush-upf-sim\.rs:.*: replace attach_tun ',
+    'src/endpoint\.rs:.*(: replace (Endpoint::attach_tun|forward_tun) | in (Endpoint::attach_tun|forward_tun)$)',
+    'src/endpoint\.rs:.*: (replace match guard !packet\.payload\.is_empty\(\) with (true|false)|delete !) in receive$',
+    'src/endpoint/routes\.rs:.*(TunAttachment>::drop|RouteTable::(close_tuns|tun_slot|attach_tun|tun) |Routes::tun_slot)',
+    'src/upf_sim\.rs:.*(TunAttachment>::drop|Sessions::tun |UpfSimulator::attach_tun|: replace (tun_slot|forward_tun_downlink) | in (write_to_tun|forward_tun_downlink|tun_slot)$|replace write_to_tun -> bool with false$)',
 
     # Mutants that no test can tell from the code, each with why.
     #
@@ -51,11 +43,9 @@ exclude_re = [
     'src/pdu_set\.rs:.*: replace \| with \^ in DownlinkPduSetInformation::encode$',
     'src/packet\.rs:.*: replace \| with \^ in (decode|Packet<P>::encode_into)$',
     # Whether the unknown new IEs end the container at a multiple of 4 octets:
-    # two octets more or two fewer are four apart.
-    'src/extension\.rs:904:40: replace \+ with - in UplinkPduSessionInformation::encode$',
-    # The short-cuts of an endpoint without the fast path, whose default is the body;
-    # the build with every feature has the fast path, and does not build it.
-    'src/endpoint\.rs:285:9: replace Shared::shortcuts -> Shortcuts<._> with Default::default\(\)$',
+    # two octets more or two fewer are four apart. Named by its column, as the
+    # function has a mutant of the same name.
+    'src/extension\.rs:\d+:40: replace \+ with - in UplinkPduSessionInformation::encode$',
     # The end of a receive task that is neither its return nor its abort is a panic,
     # which no input makes it do.
     'src/(endpoint|upf_sim)\.rs:.*: replace match guard error\.is_cancelled\(\) with true in (Endpoint|UpfSimulator)::shutdown$',

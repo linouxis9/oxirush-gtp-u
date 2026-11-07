@@ -73,10 +73,9 @@
 //! | [`Endpoint`], [`upf_sim`] | `endpoint`, the default | a Tokio runtime |
 //! | [`tun`], and `attach_tun` of [`Endpoint`] and [`UpfSimulator`](upf_sim::UpfSimulator) | `tun` | Linux, `CAP_NET_ADMIN` |
 //! | [`ebpf`] | `ebpf` | Linux 6.6, `CAP_BPF` and `CAP_NET_ADMIN` |
-//! | `Serialize` and `Deserialize` for [`RemoteTunnel`] | `serde` | |
 //! | The `oxirush-upf-sim` program | `cli` | |
 //!
-//! `ebpf` brings `tun`, and `tun`, `serde` and `cli` bring `endpoint`. Off
+//! `ebpf` brings `tun`, and `tun` and `cli` bring `endpoint`. Off
 //! Linux, `tun` and `ebpf` build and add nothing; so does `ebpf` on an
 //! architecture that its loader, aya, does not build for, such as 32-bit x86,
 //! and on a big-endian one, as the programs' object is for little-endian eBPF.

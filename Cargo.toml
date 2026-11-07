@@ -24,16 +24,13 @@ tun = [
     "dep:netlink-packet-route",
     "dep:netlink-sys",
 ]
-# The eBPF fast path of the endpoint's tunnels (Linux 6.6, and a
+# The eBPF fast path of the tunnels of a gNB or an eNB (Linux 6.6, and a
 # little-endian architecture of aya below).
 ebpf = ["tun", "dep:aya"]
-# Serialize and Deserialize for RemoteTunnel, which is in endpoint.
-serde = ["endpoint", "dep:serde"]
 # The oxirush-upf-sim program, which needs Tokio's macros and signals.
 cli = ["endpoint", "tokio/macros", "tokio/signal"]
 
 [dependencies]
-serde = { version = "1.0.110", features = ["derive"], optional = true }
 tokio = { version = "1.38", features = ["net", "rt", "sync", "time"], optional = true }
 tracing = { version = "0.1.40", optional = true, default-features = false, features = ["std"] }
 

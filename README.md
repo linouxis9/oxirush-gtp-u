@@ -61,10 +61,9 @@ tokio = { version = "1", features = ["macros", "rt", "net"] } # for the endpoint
 | `endpoint`, the default | `Endpoint`, `upf_sim` | a Tokio runtime |
 | `tun` | `tun`, and `attach_tun` of `Endpoint` and `UpfSimulator` | Linux, `CAP_NET_ADMIN` |
 | `ebpf` | `ebpf` | Linux 6.6, `CAP_BPF` and `CAP_NET_ADMIN` |
-| `serde` | `Serialize` and `Deserialize` for `RemoteTunnel` | |
 | `cli` | the `oxirush-upf-sim` program | |
 
-`ebpf` turns on `tun`, and `tun`, `serde` and `cli` turn on `endpoint`.
+`ebpf` turns on `tun`, and `tun` and `cli` turn on `endpoint`.
 Off Linux, `tun` and `ebpf` build and add nothing; so does `ebpf` on 32-bit
 x86 and on big-endian targets. The eBPF programs come prebuilt: a build
 with `ebpf` needs no nightly toolchain and no eBPF linker.

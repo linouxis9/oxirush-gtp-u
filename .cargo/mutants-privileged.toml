@@ -15,16 +15,13 @@ examine_re = [
     # The TUN device, its routes, netlink and the loader of the eBPF fast path.
     '^src/(tun|netlink|ebpf)\.rs:',
     '^src/tun/[a-z_]+\.rs:',
-    # The code of TUNs and of the fast path in the files that the shards mutate, the
-    # program's TUN, and the sends that wait for room in the socket's buffer: the
-    # regexes by which .cargo/mutants.toml leaves them out.
-    'src/bin/oxirush-upf-sim\.rs:152:5: replace attach_tun ',
-    'src/endpoint/routes\.rs:(49|80|286|338|350|361):[0-9]+: replace ',
-    'src/endpoint/routes\.rs:266:70: replace != with == in RouteTable::install_with_teid$',
-    'src/endpoint\.rs:(280|622|623|670|972|1017|1078):[0-9]+: (replace|delete) ',
-    'src/endpoint\.rs:1008:5: replace forward_tun with \(\)$',
-    'src/upf_sim\.rs:(277|281|296|398|435|453|519|672|676|704):[0-9]+: (replace|delete) ',
-    'src/upf_sim/sessions\.rs:(57|237|255|257):[0-9]+: (replace|delete) ',
+    # The code of TUNs in the files that the shards mutate, and the program's TUN:
+    # the regexes by which .cargo/mutants.toml leaves them out.
+    'src/bin/oxirush-upf-sim\.rs:.*: replace attach_tun ',
+    'src/endpoint\.rs:.*(: replace (Endpoint::attach_tun|forward_tun) | in (Endpoint::attach_tun|forward_tun)$)',
+    'src/endpoint\.rs:.*: (replace match guard !packet\.payload\.is_empty\(\) with (true|false)|delete !) in receive$',
+    'src/endpoint/routes\.rs:.*(TunAttachment>::drop|RouteTable::(close_tuns|tun_slot|attach_tun|tun) |Routes::tun_slot)',
+    'src/upf_sim\.rs:.*(TunAttachment>::drop|Sessions::tun |UpfSimulator::attach_tun|: replace (tun_slot|forward_tun_downlink) | in (write_to_tun|forward_tun_downlink|tun_slot)$|replace write_to_tun -> bool with false$)',
 ]
 
 # Mutants that no test can tell from the code, each with why.
@@ -34,49 +31,47 @@ exclude_re = [
     # request, which are never those; NLM_F_CREATE and NLM_F_EXCL; the flags of a
     # TUN; O_NONBLOCK with the flags of a descriptor that this module opened
     # without it; each CPU's bit of an RPS mask; SOCK_DGRAM and SOCK_CLOEXEC.
-    'src/netlink\.rs:(115:38|115:50|264:26|289:26|356:26|385:26|392:26): replace \| with \^ ',
-    'src/tun/device\.rs:(27:28|27:46|84:68): replace \| with \^ ',
-    'src/ebpf\.rs:(929:22: replace \| with \^ in rps_mask|969:67: replace \| with \^ in disable_tx_checksum)$',
+    'src/netlink\.rs:.*: replace \| with \^ in Netlink::(exchange|add_vrf|add_veth|add_address|add_route|add_rule)$',
+    'src/tun/device\.rs:.*: replace \| with \^ in (TunDevice::create|set_nonblocking)$',
+    'src/ebpf\.rs:.*: replace \| with \^ in (rps_mask|disable_tx_checksum)$',
     # An IPv4 address that a link lacks is added without NLM_F_CREATE, and one
     # that it has is refused with EEXIST without NLM_F_REPLACE, with NLM_F_EXCL
     # or not.
-    'src/netlink\.rs:356:26: replace \| with & in Netlink::add_address$',
+    'src/netlink\.rs:.*: replace \| with & in Netlink::add_address$',
     # The kernel answers each request of this module with datagrams of one
     # message, the answer and then the acknowledgement: a message ends where its
     # datagram does, and the loop over the messages of a datagram ends after it
-    # whatever the length that the mutant reads.
-    'src/netlink\.rs:143:(60: replace \+ with \*|65: replace & with [|^]) in Netlink::exchange$',
-    'src/netlink\.rs:144:(27: replace == with !=|32: replace \|\| with &&|42: replace >= with <) in Netlink::exchange$',
+    # whatever the length that the mutant reads. Named by their column, as the
+    # function has mutants of the same name.
+    'src/netlink\.rs:\d+:(60: replace \+ with \*|65: replace & with [|^]) in Netlink::exchange$',
+    'src/netlink\.rs:\d+:(27: replace == with !=|32: replace \|\| with &&|42: replace >= with <) in Netlink::exchange$',
     # Likewise the last message of an announcement ends where its datagram does:
     # the loop ends after it without the break.
-    'src/netlink\.rs:458:24: replace \|\| with && in link_mtus$',
+    'src/netlink\.rs:.*: replace \|\| with && in link_mtus$',
     # A request for the link of an index fails with ENODEV alone, when it has none.
-    'src/netlink\.rs:209:27: replace match guard error\.raw_os_error\(\) == Some\(libc::ENODEV\) with true in Netlink::name_of$',
+    'src/netlink\.rs:.*: replace match guard error\.raw_os_error\(\) == Some\(libc::ENODEV\) with true in Netlink::name_of$',
     # A write to a TUN takes the whole packet or fails; fcntl on a descriptor
     # that is open does not fail, and gives flags of O_RDWR at least, and
-    # F_SETFL 0.
-    'src/tun/device\.rs:68:36: replace match guard written == packet\.len\(\) with true in TunDevice::send$',
-    'src/tun/device\.rs:80:14: replace < with (<=|==) in set_nonblocking$',
-    'src/tun/device\.rs:84:90: replace < with > in set_nonblocking$',
+    # F_SETFL 0. Named by their column, as above.
+    'src/tun/device\.rs:.*: replace match guard written == packet\.len\(\) with true in TunDevice::send$',
+    'src/tun/device\.rs:\d+:14: replace < with (<=|==) in set_nonblocking$',
+    'src/tun/device\.rs:\d+:90: replace < with > in set_nonblocking$',
     # Likewise a UDP socket of the stage's ioctl, which is not descriptor 0, the
     # standard input; and the ioctl, which gives 0, on a veth, which has the
     # offload to turn off.
-    'src/ebpf\.rs:970:19: replace < with (<=|==) in disable_tx_checksum$',
-    'src/ebpf\.rs:976:78: replace < with > in disable_tx_checksum$',
+    'src/ebpf\.rs:\d+:19: replace < with (<=|==) in disable_tx_checksum$',
+    'src/ebpf\.rs:\d+:78: replace < with > in disable_tx_checksum$',
     # A kernel with IPv6, as each runner's, turns the IPv6 addresses of a TUN or
     # of the stage off: the call does not fail with the errors of a kernel
     # without it, or with any other.
-    'src/ebpf\.rs:362:24: (delete ! |replace match guard .* with (true|false) )in FastPath::load$',
-    'src/tun/routing\.rs:124:20: (delete ! |replace match guard .* with (true|false) )in RoutingLease::configure$',
+    'src/ebpf\.rs:.*: (delete ! |replace match guard .* with (true|false) )in FastPath::load$',
+    'src/tun/routing\.rs:.*: (delete ! |replace match guard .* with (true|false) )in RoutingLease::configure$',
     # A tunnel short-cut again through the TUN that has its short-cut: the
     # mutant ends it first, and makes the same maps again.
-    'src/ebpf\.rs:665:26: replace match guard other != tun with true in State::write$',
+    'src/ebpf\.rs:.*: replace match guard other != tun with true in State::write$',
     # A second error of the announcements' socket exactly one second after the
     # first, to the nanosecond.
-    'src/ebpf\.rs:773:65: replace < with <= in follow_mtus$',
-    # A TUN's reader that asks for the short-cut that its TUN has, or before the
-    # time to ask again: the same short-cut is made again.
-    'src/endpoint\.rs:1017:32: replace && with \|\| in forward_tun$',
+    'src/ebpf\.rs:.*: replace < with <= in follow_mtus$',
     # A link removed by another between the check of its name and its removal.
-    'src/tun/routing\.rs:80:23: replace match guard error\.raw_os_error\(\) == Some\(libc::ENODEV\) with false in remove_link$',
+    'src/tun/routing\.rs:.*: replace match guard error\.raw_os_error\(\) == Some\(libc::ENODEV\) with false in remove_link$',
 ]

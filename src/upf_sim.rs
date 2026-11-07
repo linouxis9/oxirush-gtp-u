@@ -557,22 +557,21 @@ async fn receive(
 }
 
 /// Write an uplink T-PDU to its session's TUN; false if it has none.
-#[cfg(all(target_os = "linux", feature = "tun"))]
+#[cfg_attr(
+    not(all(target_os = "linux", feature = "tun")),
+    allow(unused_variables)
+)]
 async fn write_to_tun(sessions: &Sessions, uplink_teid: u32, packet: &[u8]) -> bool {
-    let Some(port) = sessions.tun(uplink_teid) else {
-        return false;
-    };
-    // A G-PDU without a T-PDU has nothing for Linux.
-    if !packet.is_empty()
-        && let Err(error) = port.send(packet).await
-    {
-        debug!("UPF TUN {} write failed: {error}", port.name());
+    #[cfg(all(target_os = "linux", feature = "tun"))]
+    if let Some(port) = sessions.tun(uplink_teid) {
+        // A G-PDU without a T-PDU has nothing for Linux.
+        if !packet.is_empty()
+            && let Err(error) = port.send(packet).await
+        {
+            debug!("UPF TUN {} write failed: {error}", port.name());
+        }
+        return true;
     }
-    true
-}
-
-#[cfg(not(all(target_os = "linux", feature = "tun")))]
-async fn write_to_tun(_sessions: &Sessions, _uplink_teid: u32, _packet: &[u8]) -> bool {
     false
 }
 

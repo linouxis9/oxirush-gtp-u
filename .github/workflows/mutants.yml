@@ -269,10 +269,9 @@ jobs:
       - run: |
           cargo mutants --config .cargo/mutants-privileged.toml -j 1 \
             --shard ${{ matrix.shard }}/2 --sharding round-robin \
-            -- --lib --bins --test allocations --test codec_properties --test debug \
-            --test endpoint --test errors --test paths --test peer_limits --test readme \
-            --test upf_sim --test tun_linux --test tun_cleanup --test ebpf_linux \
-            --test send_buffer \
+            -- --lib --bins --test codec_properties --test endpoint --test paths \
+            --test peer_limits --test upf_sim --test tun_linux --test tun_cleanup \
+            --test ebpf_linux \
             -- --include-ignored ${{ steps.vrf.outputs.skip }} || [ $? -eq 3 ]
           test ! -s mutants.out/missed.txt
         env:
@@ -283,9 +282,8 @@ jobs:
           name: mutants.out-privileged-${{ matrix.shard }}
           path: mutants.out
 
-  # After the shards, the code that a build without the feature `tun` has, and that
-  # of every feature has not: the program's refusal of a TUN, the UPF's write to none
-  # and its shutdown without TUNs. .cargo/mutants.toml names them by the same regexes.
+  # After the shards, what a build without the feature `tun` does where that of every
+  # feature has a TUN: the program's refusal of one, and the UPF's write to none.
   without-tun:
     name: Mutants of the code built without TUN
     needs: [plan, mutants]
@@ -302,10 +300,9 @@ jobs:
           tool: cargo-mutants@27.1.0
       - run: |
           cargo mutants --no-config --features cli -j 2 \
-            -f src/bin/oxirush-upf-sim.rs -f src/upf_sim.rs -f src/upf_sim/sessions.rs \
-            -F 'src/bin/oxirush-upf-sim\.rs:161:5: replace attach_tun ' \
-            -F 'src/upf_sim\.rs:692:5: replace write_to_tun -> bool with true$' \
-            -F 'src/upf_sim/sessions\.rs:104:9: replace SessionRegistry::clear with \(\)$' \
+            -f src/bin/oxirush-upf-sim.rs -f src/upf_sim.rs \
+            -F 'src/bin/oxirush-upf-sim\.rs:.*: replace attach_tun ' \
+            -F 'src/upf_sim\.rs:.*: replace write_to_tun -> bool with true$' \
             || [ $? -eq 3 ]
           test ! -s mutants.out/missed.txt
           test -s mutants.out/caught.txt

@@ -142,22 +142,27 @@ async fn shutdown_signal() -> io::Result<()> {
     tokio::signal::ctrl_c().await
 }
 
-#[cfg(all(target_os = "linux", feature = "tun"))]
+/// Give the session the TUN `name`, with the UE's address, as N6: without
+/// TUNs, an error.
+#[cfg_attr(
+    not(all(target_os = "linux", feature = "tun")),
+    allow(unused_variables)
+)]
 fn attach_tun(
     upf: &UpfSimulator,
     uplink_teid: u32,
     name: String,
     ue_address: Ipv4Addr,
 ) -> io::Result<()> {
-    use oxirush_gtp_u::tun::{Routing, TunConfig};
-    upf.attach_tun(
-        uplink_teid,
-        TunConfig::new(name, Routing::Upf { ue_address }),
-    )
-}
-
-#[cfg(not(all(target_os = "linux", feature = "tun")))]
-fn attach_tun(_: &UpfSimulator, _: u32, _: String, _: Ipv4Addr) -> io::Result<()> {
+    #[cfg(all(target_os = "linux", feature = "tun"))]
+    {
+        use oxirush_gtp_u::tun::{Routing, TunConfig};
+        upf.attach_tun(
+            uplink_teid,
+            TunConfig::new(name, Routing::Upf { ue_address }),
+        )
+    }
+    #[cfg(not(all(target_os = "linux", feature = "tun")))]
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "--tun needs Linux and the tun feature",
