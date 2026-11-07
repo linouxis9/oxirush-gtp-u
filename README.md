@@ -189,11 +189,11 @@ Error Indication for RAN UE 1 session 5: [TeidDataI(0x00001001), GtpUPeerAddress
 
 An endpoint, too, answers a G-PDU on a TEID it does not have with an Error
 Indication. Since anyone who reaches the socket can send such G-PDUs
-and Echo Requests from any address, the replies are limited: each address
-gets at most 100 Error Indications and 10 Echo Responses a second, and all
-addresses together 1,000 Error Indications. `stats()` counts the replies
-that were not sent, the G-PDUs on unknown TEIDs and the Error Indications
-that name no tunnel.
+and Echo Requests from any address, the replies are limited: a socket sends
+at most 1,000 Error Indications, Supported Extension Headers Notifications
+and Echo Responses a second, after a burst of 1,000. `stats()` counts the
+replies that were not sent, the G-PDUs on unknown TEIDs and the Error
+Indications that name no tunnel.
 
 ## Read and write extension headers
 

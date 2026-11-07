@@ -9,13 +9,10 @@ use std::time::Duration;
 
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::{AbortHandle, JoinHandle};
-#[cfg(all(target_os = "linux", feature = "tun"))]
-use tracing::debug;
-use tracing::trace;
+use tracing::{debug, trace};
 
 use crate::ReceiveStats;
 use crate::datagram::DatagramSocket;
-use crate::limit::limited;
 #[cfg(all(target_os = "linux", feature = "tun"))]
 use crate::tun::{TunConfig, TunPort};
 use crate::types::Teid;
@@ -219,25 +216,12 @@ pub struct ReceivedPacket {
 ///
 /// A peer needs no tunnel to cause these replies, and GTP-U has no
 /// authentication: whoever can send from an address can have them sent to
-/// it. The socket sends an address 100 Error Indications and Supported
-/// Extension Headers Notifications a second at most, after a burst of 100,
-/// and all addresses together 1,000 a second, after a burst of 1,000; past
-/// that a reply is not sent and is counted in
-/// [`suppressed_replies`](ReceiveStats::suppressed_replies). A flood from
-/// one address uses up the replies of that address: the peer of a removed
-/// tunnel still gets an Error Indication for its next G-PDUs, which is what
-/// TS 29.281 §7.3.1 has it for. The clause expects such a defence against
-/// denial of service, for which it gives the Error Indication its UDP Port
-/// header. An address gets 10 Echo Responses a second at most, after a
-/// burst of 10, and the others are counted in
-/// [`suppressed_echo_responses`](ReceiveStats::suppressed_echo_responses):
-/// a peer sends an Echo Request on a path every 60 s at most (§7.2.1), and
-/// an Echo Response, with its sequence number and Recovery, can be longer
-/// than its request. The limit of an address is one of 1,024 cells, chosen
-/// by a hash of the address under a key of the socket's own; the addresses
-/// of a cell share it. A line that a peer causes, such as for a G-PDU on an
-/// unknown TEID, is logged once a second at most for each kind, with the
-/// number of those that were not.
+/// it. The socket sends 1,000 Error Indications, Supported Extension Headers
+/// Notifications and Echo Responses a second at most, after a burst of
+/// 1,000; past that a reply is not sent and is counted in
+/// [`suppressed_replies`](ReceiveStats::suppressed_replies). A flood from one
+/// address can use up the replies owed to the others. What a peer causes is
+/// logged at the `debug` level.
 ///
 /// Bind a specific address: a wildcard is refused with `InvalidInput`, so that
 /// replies leave from the address the request reached. Bind port 2152 to
@@ -831,17 +815,14 @@ async fn receive(
             packet.teid,
             packet.payload.len()
         );
-        let (notices, counters) = (socket.notices(), socket.counters());
+        let counters = socket.counters();
         let key = match packet.message_type {
             MessageType::G_PDU | MessageType::END_MARKER | MessageType::TUNNEL_STATUS => {
                 let found = routes.session(packet.teid);
                 match found {
                     Some(key) => key,
                     None if packet.message_type == MessageType::G_PDU => {
-                        limited!(
-                            DEBUG,
-                            notices,
-                            unknown_teid,
+                        debug!(
                             "N3 G-PDU for unknown TEID {:#010x} from {from}",
                             packet.teid
                         );
@@ -851,13 +832,9 @@ async fn receive(
                     // TS 29.281 §7.3.2.1 and §7.3.3: ignored.
                     None => {
                         counters.ignored_messages.fetch_add(1, Ordering::Relaxed);
-                        limited!(
-                            DEBUG,
-                            notices,
-                            ignored,
+                        debug!(
                             "N3 {} for unknown TEID {:#010x} from {from}",
-                            packet.message_type,
-                            packet.teid
+                            packet.message_type, packet.teid
                         );
                         continue;
                     }
@@ -869,12 +846,7 @@ async fn receive(
                     counters
                         .unmatched_error_indications
                         .fetch_add(1, Ordering::Relaxed);
-                    limited!(
-                        DEBUG,
-                        notices,
-                        error_indication,
-                        "N3 Error Indication from {from} matches no tunnel"
-                    );
+                    debug!("N3 Error Indication from {from} matches no tunnel");
                     continue;
                 }
             },
@@ -888,12 +860,7 @@ async fn receive(
             // which TS 29.281 §11 discards.
             message_type => {
                 counters.ignored_messages.fetch_add(1, Ordering::Relaxed);
-                limited!(
-                    DEBUG,
-                    notices,
-                    ignored,
-                    "N3 ignored message type {message_type} from {from}"
-                );
+                debug!("N3 ignored message type {message_type} from {from}");
                 continue;
             }
         };
@@ -908,13 +875,7 @@ async fn receive(
         #[cfg(all(target_os = "linux", feature = "tun"))]
         if let Some(port) = tun {
             if let Err(error) = port.send(packet.payload).await {
-                limited!(
-                    DEBUG,
-                    socket.notices(),
-                    tun,
-                    "N3 TUN {} write failed: {error}",
-                    port.name()
-                );
+                debug!("N3 TUN {} write failed: {error}", port.name());
             }
             continue;
         }

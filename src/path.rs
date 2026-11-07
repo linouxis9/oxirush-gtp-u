@@ -7,14 +7,13 @@ use tokio::net::UdpSocket;
 use tracing::debug;
 
 use crate::datagram::DatagramSocket;
-use crate::limit::limited;
 use crate::{Cause, ExtensionHeader, InformationElement, MessageType, PORT, Packet};
 
 #[derive(Debug)]
 enum PathAction {
     Forward,
     Discard(&'static str),
-    /// An Echo Response, within the limit of those to its address.
+    /// An Echo Response, within the limit of replies.
     Reply {
         packet: Packet,
         to: SocketAddr,
@@ -39,12 +38,7 @@ pub(crate) async fn answer<P: AsRef<[u8]>>(
     from: SocketAddr,
 ) -> bool {
     let discarded = |reason| {
-        limited!(
-            WARN,
-            socket.notices(),
-            discarded,
-            "GTP-U: dropped a message from {from}: {reason}"
-        );
+        debug!("GTP-U: dropped a message from {from}: {reason}");
     };
     match classify(packet, from) {
         PathAction::Forward => false,
@@ -60,7 +54,7 @@ pub(crate) async fn answer<P: AsRef<[u8]>>(
             if let Some(reason) = discard_reason {
                 discarded(reason);
             }
-            socket.send_echo_response(&packet, to).await;
+            socket.send_reply(&packet, to).await;
             true
         }
         PathAction::Notify {
@@ -69,7 +63,7 @@ pub(crate) async fn answer<P: AsRef<[u8]>>(
             discard_reason,
         } => {
             discarded(discard_reason);
-            socket.send_limited(&packet, to).await;
+            socket.send_reply(&packet, to).await;
             true
         }
     }
@@ -137,7 +131,7 @@ fn classify<P: AsRef<[u8]>>(packet: &Packet<P>, from: SocketAddr) -> PathAction 
 /// Truncated headers and unsupported versions are silently discarded.
 pub(crate) async fn answer_length_error(socket: &DatagramSocket, bytes: &[u8], from: SocketAddr) {
     if let Some(response) = length_error_response(bytes) {
-        socket.send_echo_response(&response, from).await;
+        socket.send_reply(&response, from).await;
     }
 }
 

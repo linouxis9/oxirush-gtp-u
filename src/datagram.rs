@@ -2,13 +2,15 @@
 
 use std::io;
 use std::net::SocketAddr;
+use std::sync::Mutex;
 use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
 
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc::{Sender, error::TrySendError};
+use tracing::debug;
 
-use crate::limit::{Notices, limited};
-use crate::path;
+use crate::path::{self, lock};
 use crate::stats::Counters;
 use crate::{Packet, ReceiveStats};
 
@@ -18,8 +20,51 @@ pub(crate) struct DatagramSocket {
     socket: UdpSocket,
     ipv6: bool,
     counters: Counters,
-    /// The limits of what a peer can make this socket send and log.
-    notices: Notices,
+    replies: Replies,
+}
+
+/// The replies that a peer can cause without a tunnel (Error Indication,
+/// Supported Extension Headers Notification, Echo Response) that a socket
+/// sends in a second, after a burst of as many: GTP-U has no authentication,
+/// and whoever reaches the socket can send what causes them, from any
+/// address.
+pub(crate) const REPLIES_PER_SECOND: u32 = 1000;
+
+/// The replies of a socket, as a bucket of tokens that refills by one each
+/// millisecond.
+struct Replies {
+    bucket: Mutex<(u32, Instant)>,
+}
+
+impl Replies {
+    fn new() -> Self {
+        Self {
+            bucket: Mutex::new((REPLIES_PER_SECOND, Instant::now())),
+        }
+    }
+
+    /// Whether a reply goes out now, which then takes a token.
+    fn take(&self) -> bool {
+        self.take_at(Instant::now())
+    }
+
+    fn take_at(&self, now: Instant) -> bool {
+        let mut bucket = lock(&self.bucket);
+        let (tokens, refilled) = &mut *bucket;
+        let earned = now.saturating_duration_since(*refilled).as_millis();
+        if earned >= u128::from(REPLIES_PER_SECOND) {
+            (*tokens, *refilled) = (REPLIES_PER_SECOND, now);
+        } else {
+            // `earned` is below `REPLIES_PER_SECOND`, and fits.
+            *tokens = (*tokens + earned as u32).min(REPLIES_PER_SECOND);
+            *refilled += Duration::from_millis(earned as u64);
+        }
+        let Some(left) = tokens.checked_sub(1) else {
+            return false;
+        };
+        *tokens = left;
+        true
+    }
 }
 
 impl DatagramSocket {
@@ -36,12 +81,8 @@ impl DatagramSocket {
             socket,
             ipv6,
             counters: Counters::default(),
-            notices: Notices::new(),
+            replies: Replies::new(),
         })
-    }
-
-    pub(crate) fn notices(&self) -> &Notices {
-        &self.notices
     }
 
     pub(crate) fn counters(&self) -> &Counters {
@@ -79,12 +120,7 @@ impl DatagramSocket {
                 self.counters
                     .malformed_datagrams
                     .fetch_add(1, Ordering::Relaxed);
-                limited!(
-                    DEBUG,
-                    &self.notices,
-                    malformed,
-                    "GTP-U dropped a malformed message from {from}: {error}"
-                );
+                debug!("GTP-U dropped a malformed message from {from}: {error}");
                 path::answer_length_error(self, &buffer[..size], from).await;
                 return Ok(None);
             }
@@ -131,30 +167,18 @@ impl DatagramSocket {
         if let Some((indication, to)) =
             path::error_indication(&self.socket, teid, self.destination(from))
         {
-            self.send_limited(&indication, to).await;
+            self.send_reply(&indication, to).await;
         }
     }
 
     /// Send a reply that a peer causes without a tunnel, unless it is past
-    /// the limits of such replies, where it is counted.
-    pub(crate) async fn send_limited(&self, packet: &Packet, to: SocketAddr) {
-        if self.notices.reply(to.ip()) {
+    /// the socket's [`REPLIES_PER_SECOND`], where it is counted.
+    pub(crate) async fn send_reply(&self, packet: &Packet, to: SocketAddr) {
+        if self.replies.take() {
             path::send(&self.socket, packet, to).await;
         } else {
             self.counters
                 .suppressed_replies
-                .fetch_add(1, Ordering::Relaxed);
-        }
-    }
-
-    /// Send an Echo Response, unless it is past the limit of those to its
-    /// address, where it is counted.
-    pub(crate) async fn send_echo_response(&self, packet: &Packet, to: SocketAddr) {
-        if self.notices.echo_response(to.ip()) {
-            path::send(&self.socket, packet, to).await;
-        } else {
-            self.counters
-                .suppressed_echo_responses
                 .fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -183,6 +207,30 @@ impl DatagramSocket {
 mod tests {
     use super::*;
     use tokio::sync::mpsc;
+
+    #[test]
+    fn replies_go_out_after_a_burst_at_one_a_millisecond() {
+        let replies = Replies::new();
+        let start = lock(&replies.bucket).1;
+        let at = |ms| start + Duration::from_millis(ms);
+        // The burst, and nothing more within the millisecond.
+        assert_eq!((0..1500).filter(|_| replies.take_at(start)).count(), 1000);
+        assert!(!replies.take_at(at(0)));
+        // A token each millisecond, and the part of one that is not a
+        // whole millisecond is kept.
+        assert!(replies.take_at(at(1)));
+        assert!(!replies.take_at(at(1)));
+        assert!(replies.take_at(start + Duration::from_micros(2500)));
+        assert!(!replies.take_at(start + Duration::from_micros(2900)));
+        assert!(replies.take_at(at(3)));
+        assert_eq!((0..10).filter(|_| replies.take_at(at(8))).count(), 5);
+        // A second of nothing gives the burst back, and no more.
+        assert_eq!(
+            (0..1500).filter(|_| replies.take_at(at(5000))).count(),
+            1000
+        );
+        assert_eq!((0..1500).filter(|_| replies.take_at(at(5999))).count(), 999);
+    }
 
     #[tokio::test]
     async fn receive_borrows_the_datagram_payload() {

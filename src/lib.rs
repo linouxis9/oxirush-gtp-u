@@ -141,8 +141,6 @@ mod icmp;
 pub mod ebpf;
 #[cfg(feature = "endpoint")]
 mod endpoint;
-#[cfg(feature = "endpoint")]
-mod limit;
 #[cfg(all(target_os = "linux", feature = "tun"))]
 #[allow(unsafe_code)]
 mod netlink;

@@ -340,11 +340,9 @@ async fn answers_out_of_sequence_echo_request_with_error_cause() {
 
 #[tokio::test]
 async fn answers_echo_request_length_errors_with_error_cause() {
-    // All E/S/PN combinations and both values of the ignored spare bit,
-    // each to an endpoint of its own: one address gets 10 Echo Responses
-    // a second at most.
+    // All E/S/PN combinations and both values of the ignored spare bit.
+    let (endpoint, _, peer, _) = setup().await;
     for flags in 0u8..16 {
-        let (endpoint, _, peer, _) = setup().await;
         let mut request = Packet::echo_request(77);
         request.payload = vec![255, 0, 2, 0, 1]; // Private Extension.
         let mut wire = request.encode().unwrap();
@@ -370,7 +368,6 @@ async fn answers_echo_request_length_errors_with_error_cause() {
             );
         }
     }
-    let (endpoint, _, peer, _) = setup().await;
     let mut unsupported = Packet::echo_request(77).encode().unwrap();
     unsupported[0] = 0x52;
     unsupported[2..4].copy_from_slice(&0u16.to_be_bytes());
