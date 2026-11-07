@@ -65,6 +65,12 @@ impl EncodeBuffer for EncodedLength {
 /// let kinds: Vec<_> = decoded.extension_headers.iter().map(|header| header.kind()).collect();
 /// assert_eq!(kinds, [ExtensionHeaderType::PDU_SESSION_CONTAINER, ExtensionHeaderType(0x21)]);
 /// assert!(!decoded.extension_headers[1].comprehension_required());
+///
+/// // What is kept as received prints its length and its octets
+/// assert_eq!(
+///     format!("{:?}", decoded.extension_headers[1]),
+///     "Other { kind: ExtensionHeaderType(0x21), content: 2 octets 0700 }"
+/// );
 /// # Ok::<(), oxirush_gtp_u::Error>(())
 /// ```
 #[derive(Clone, PartialEq, Eq)]

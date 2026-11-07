@@ -61,7 +61,13 @@ use sessions::{Incarnation, SessionRegistry, UplinkTarget, stopped};
 /// // The UPF receives the uplink on TEID 0x1001, and sends the downlink to the
 /// // gNB at its N3 address on TEID 0x2002, in QoS flow 9
 /// let gnb = "127.0.0.1:2152".parse().unwrap();
-/// upf.set_session(Session::new(0x1001, 0x2002, gnb, 9))?;
+/// let session = Session::new(0x1001, 0x2002, gnb, 9);
+/// upf.set_session(session)?;
+/// assert_eq!(
+///     format!("{session:?}"),
+///     "Session { uplink_teid: 0x00001001, downlink_teid: 0x00002002, \
+///      gnb_address: 127.0.0.1:2152, qfi: 9 }"
+/// );
 ///
 /// // A QFI has six bits
 /// assert!(upf.set_session(Session::new(0x1001, 0x2002, gnb, 64)).is_err());

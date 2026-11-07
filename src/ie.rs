@@ -23,6 +23,10 @@ use crate::{Cause, Error, ExtensionHeaderType, InformationElementType, Part};
 /// ];
 /// let octets = InformationElement::encode_all(&elements)?;
 /// assert_eq!(InformationElement::decode_all(&octets)?, elements);
+/// assert_eq!(
+///     format!("{elements:?}"),
+///     "[TeidDataI(0x00001001), GtpUPeerAddress(127.0.0.10)]"
+/// );
 /// # Ok::<(), oxirush_gtp_u::Error>(())
 /// ```
 #[derive(Clone, PartialEq, Eq)]
