@@ -329,10 +329,10 @@ async fn ue_policy_routes_the_ue_s_traffic_through_the_tun() {
         ping(&["-I", "198.19.0.2", "203.0.113.1"]),
         answer_ping(&port, address, destination)
     );
-    port.close();
+    port.close().unwrap();
     assert!(!exists("oxp0"));
     assert!(!rules().contains("15001:"), "{}", rules());
-    port.close(); // again: nothing to do
+    port.close().unwrap(); // again: nothing to do
 }
 
 #[tokio::test]
@@ -707,7 +707,7 @@ async fn close_wakes_a_reader() {
         reader.recv(&mut buffer).await
     });
     tokio::time::sleep(Duration::from_millis(100)).await;
-    port.close();
+    port.close().unwrap();
     let read = tokio::time::timeout(Duration::from_secs(2), task)
         .await
         .expect("the reader still waits after close")

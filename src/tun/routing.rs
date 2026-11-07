@@ -206,7 +206,9 @@ impl RoutingLease {
         Ok(())
     }
 
-    pub(super) fn try_close(&self) -> io::Result<()> {
+    /// Remove the TUN, its rule and its VRF, once: what could not be removed
+    /// is forgotten, and the first failure returned.
+    pub(super) fn close(&self) -> io::Result<()> {
         let mut cleanup = lock(&self.cleanup);
         let Cleanup {
             netlink,
@@ -215,59 +217,38 @@ impl RoutingLease {
             vrf,
         } = &mut *cleanup;
         let mut failure = None;
-        if let Some(value) = *rule {
-            match netlink.delete_rule(value) {
-                Ok(()) => *rule = None,
-                Err(error) if matches!(error.raw_os_error(), Some(libc::ENOENT | libc::ESRCH)) => {
-                    *rule = None
-                }
-                Err(error) => {
+        if let Some(rule) = rule.take() {
+            match netlink.delete_rule(rule) {
+                Err(error) if !matches!(error.raw_os_error(), Some(libc::ENOENT | libc::ESRCH)) => {
                     failure = Some(context(
                         error,
                         format_args!("remove rule of TUN {}", self.name),
-                    ))
+                    ));
                 }
+                _ => {}
             }
         }
-        if let Some(value) = *index {
-            match remove_link(netlink, value, &self.name) {
-                Ok(()) => *index = None,
-                Err(error) => {
-                    failure.get_or_insert_with(|| {
-                        context(error, format_args!("remove TUN {}", self.name))
-                    });
-                }
-            }
+        if let Some(index) = index.take()
+            && let Err(error) = remove_link(netlink, index, &self.name)
+        {
+            failure.get_or_insert_with(|| context(error, format_args!("remove TUN {}", self.name)));
         }
-        if let Some((value, name)) = vrf {
-            match remove_link(netlink, *value, name) {
-                Ok(()) => *vrf = None,
-                Err(error) => {
-                    failure.get_or_insert_with(|| {
-                        context(error, format_args!("remove VRF of TUN {}", self.name))
-                    });
-                }
-            }
+        if let Some((index, name)) = vrf.take()
+            && let Err(error) = remove_link(netlink, index, &name)
+        {
+            failure.get_or_insert_with(|| {
+                context(error, format_args!("remove VRF of TUN {}", self.name))
+            });
         }
-        match failure {
-            Some(error) => Err(error),
-            None => Ok(()),
-        }
-    }
-
-    /// Perform best-effort cleanup, logging any failure. Later calls
-    /// retry remaining resources; use [`try_close`](Self::try_close) to
-    /// inspect failures.
-    pub(super) fn close(&self) {
-        if let Err(error) = self.try_close() {
-            tracing::warn!("{error}");
-        }
+        failure.map_or(Ok(()), Err)
     }
 }
 
 impl Drop for RoutingLease {
     fn drop(&mut self) {
-        self.close();
+        if let Err(error) = self.close() {
+            tracing::warn!("{error}");
+        }
     }
 }
 

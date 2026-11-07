@@ -148,12 +148,11 @@ fn endpoint(criterion: &mut Criterion) {
 
 /// What an endpoint with many tunnels does for a datagram that anyone can
 /// send it, and for a UE that leaves. The number in the name is that of its
-/// tunnels: the time must not grow with it.
+/// tunnels, which the endpoint walks through.
 ///
 /// - `unmatched-error-indication`: an Error Indication that names no tunnel
 ///   of the endpoint, then a G-PDU of one of its tunnels, until the endpoint
-///   delivers it. (An Echo Request would do, but an endpoint answers 10 a
-///   second to one address.)
+///   delivers it.
 /// - `install-remove-ran`: the tunnel of one more UE, and its removal.
 fn tunnels(criterion: &mut Criterion) {
     let runtime = tokio::runtime::Builder::new_current_thread()

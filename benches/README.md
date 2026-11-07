@@ -52,19 +52,10 @@ under 2% of it. A message whose payload stays in the datagram allocates the list
 extension headers when it has any, and the octets of a header that is kept
 as received.
 
-An endpoint with many tunnels, on the same core and at the same commit, the
-lowest of five runs.
-The first row is an Error Indication that names none of its tunnels, then a
-G-PDU of one of them, until the endpoint delivers it; the second is the
-tunnel of one more UE and its removal with `remove_ran`:
-
-| | 1,000 tunnels | 100,000 tunnels |
-|---|---|---|
-| `tunnels/unmatched-error-indication` | 10.2 µs | 10.2 µs |
-| `tunnels/install-remove-ran` | 0.29 µs | 0.34 µs |
-
-Neither walks through the tunnels: an endpoint finds the tunnel that an
-Error Indication names, and those of a UE, in an index.
+An endpoint finds the tunnel that an Error Indication names, and the tunnels
+of a UE that `remove_ran` removes, by walking through its tunnels: the
+benchmarks `tunnels/unmatched-error-indication` and
+`tunnels/install-remove-ran` time them with 1,000 and 100,000 tunnels.
 
 ## Against go-gtp
 

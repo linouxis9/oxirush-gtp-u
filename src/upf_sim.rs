@@ -209,7 +209,9 @@ struct TunAttachment {
 impl Drop for TunAttachment {
     fn drop(&mut self) {
         self.task.abort();
-        self.port.close();
+        if let Err(error) = self.port.close() {
+            tracing::warn!("{error}");
+        }
     }
 }
 

@@ -1,9 +1,7 @@
 //! Linux TUN devices and their routing, for UE and UPF sessions.
 //!
 //! [`TunPort::create`] makes the TUN and sets up its address, routes, rule
-//! or VRF over rtnetlink. [`TunPort::try_close`] removes them, reporting
-//! cleanup failures so they can be retried. [`TunPort::close`] and dropping
-//! the last clone of the port perform best-effort cleanup. It needs
+//! or VRF over rtnetlink, and [`TunPort::close`] removes them. It needs
 //! `CAP_NET_ADMIN`.
 //! `Endpoint::attach_tun` and `UpfSimulator::attach_tun` make a TUN and carry
 //! its packets. [`TunPort::create`] makes one for a program that carries them
@@ -24,9 +22,9 @@
 //! through it unasked. `recv` and `send` exchange raw IP packets with Linux.
 //! A [`TunPort`] is `Clone`, for a task that reads it and one that writes.
 //!
-//! Dropping the last clone removes the TUN and its routing, as does `close`
-//! at once; `try_close` reports what could not be removed and keeps it for
-//! another call. Removal happens in the network namespace of the creation. A
+//! `close` removes the TUN and its routing at once, and so does dropping the
+//! last clone, which logs what it could not remove. Removal happens in the
+//! network namespace of the creation. A
 //! process that ends without running destructors, as on SIGKILL, leaves the
 //! rule or the VRF behind; the TUN goes with the process.
 
@@ -180,19 +178,12 @@ impl TunPort {
     /// network namespace where it was created. The other clones of the
     /// port then observe `recv` and `send` errors.
     ///
-    /// Attempts every remaining resource and returns the first failure.
-    /// Successfully removed or already absent resources are forgotten;
-    /// failed removals are retained for the next call. This blocks while
-    /// waiting for netlink acknowledgements and requires `CAP_NET_ADMIN`
-    /// in the creation namespace.
-    pub fn try_close(&self) -> io::Result<()> {
-        self.inner.routing.try_close()
-    }
-
-    /// Perform best-effort cleanup, logging any failure. Later calls retry
-    /// remaining resources; use [`try_close`](Self::try_close) to inspect failures.
-    pub fn close(&self) {
-        self.inner.routing.close();
+    /// It tries each of them once, and returns the first failure: what
+    /// could not be removed is not tried again. This blocks while waiting
+    /// for netlink acknowledgements and requires `CAP_NET_ADMIN` in the
+    /// creation namespace.
+    pub fn close(&self) -> io::Result<()> {
+        self.inner.routing.close()
     }
 }
 

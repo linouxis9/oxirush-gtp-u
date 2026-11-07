@@ -76,7 +76,7 @@ async fn close_uses_the_creation_namespace_and_preserves_other_links() {
     // Both fresh namespaces allocate index 2; equal names must not permit
     // cleanup to remove this unrelated interface in the caller's namespace.
     ip(&["link", "add", "scope_tun", "type", "dummy"]);
-    port.close();
+    port.close().unwrap();
     assert!(
         exists("scope_tun"),
         "cleanup removed an unrelated interface"
@@ -92,7 +92,7 @@ async fn close_uses_the_creation_namespace_and_preserves_other_links() {
 
 #[tokio::test]
 #[ignore = "needs CAP_NET_ADMIN"]
-async fn try_close_accepts_externally_removed_resources() {
+async fn close_accepts_externally_removed_resources() {
     isolate();
     let port = TunPort::create(TunConfig::new(
         "gone_tun",
@@ -116,103 +116,10 @@ async fn try_close_accepts_externally_removed_resources() {
         "1002",
     ]);
     ip(&["link", "add", "gone_tun", "type", "dummy"]);
-    port.try_close().unwrap();
-    port.try_close().unwrap();
+    port.close().unwrap();
+    port.close().unwrap();
     assert!(
         exists("gone_tun"),
         "cleanup removed the replacement interface"
     );
-}
-
-#[repr(C)]
-struct CapabilityHeader {
-    version: u32,
-    pid: i32,
-}
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-struct CapabilityData {
-    effective: u32,
-    permitted: u32,
-    inheritable: u32,
-}
-
-struct Capabilities([CapabilityData; 2]);
-
-impl Capabilities {
-    fn without_net_admin() -> Self {
-        let header = CapabilityHeader {
-            version: 0x2008_0522,
-            pid: 0,
-        };
-        let mut saved = [CapabilityData::default(); 2];
-        // SAFETY: these C-layout buffers have the two entries required by version 3.
-        assert_eq!(
-            unsafe { libc::syscall(libc::SYS_capget, &header, saved.as_mut_ptr()) },
-            0
-        );
-        let mut changed = saved;
-        // CAP_NET_ADMIN is bit 12 in Linux's capability bitmap.
-        changed[0].effective &= !(1 << 12);
-        // SAFETY: capset with pid 0 changes only the calling thread's capabilities.
-        assert_eq!(
-            unsafe { libc::syscall(libc::SYS_capset, &header, changed.as_ptr()) },
-            0
-        );
-        Self(saved)
-    }
-}
-
-impl Drop for Capabilities {
-    fn drop(&mut self) {
-        let header = CapabilityHeader {
-            version: 0x2008_0522,
-            pid: 0,
-        };
-        // SAFETY: restore this thread's saved effective capabilities, whose permitted
-        // and inheritable sets were never changed.
-        assert_eq!(
-            unsafe { libc::syscall(libc::SYS_capset, &header, self.0.as_ptr()) },
-            0
-        );
-    }
-}
-
-#[tokio::test]
-#[ignore = "needs CAP_NET_ADMIN"]
-async fn close_retries_resources_after_a_permission_failure() {
-    isolate();
-    let port = TunPort::create(TunConfig::new(
-        "retry_tun",
-        Routing::UePolicy {
-            address: Ipv4Addr::new(198, 19, 0, 21),
-            table: 1001,
-            priority: 1001,
-        },
-    ))
-    .unwrap();
-    let capabilities = Capabilities::without_net_admin();
-    let error = port.try_close().unwrap_err();
-    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
-    let source = error.get_ref().unwrap().source().unwrap();
-    assert_eq!(
-        source.downcast_ref::<io::Error>().unwrap().raw_os_error(),
-        Some(libc::EPERM)
-    );
-    port.close();
-    assert!(
-        exists("retry_tun"),
-        "cleanup unexpectedly succeeded without CAP_NET_ADMIN"
-    );
-    drop(capabilities);
-    port.close();
-    assert!(
-        !exists("retry_tun"),
-        "cleanup did not retry the failed link removal"
-    );
-    assert!(
-        !ip(&["-4", "rule", "show"]).contains("198.19.0.21"),
-        "cleanup did not retry the failed policy rule removal"
-    );
-    port.try_close().unwrap();
 }

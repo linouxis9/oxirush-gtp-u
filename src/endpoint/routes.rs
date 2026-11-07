@@ -1,7 +1,7 @@
 //! The indexes of the endpoint's tunnel registry, and the tunnels' TUNs.
 
+use std::collections::HashMap;
 use std::collections::hash_map::RandomState;
-use std::collections::{BTreeSet, HashMap};
 use std::hash::BuildHasher;
 use std::io;
 use std::net::IpAddr;
@@ -52,7 +52,9 @@ impl Drop for TunAttachment {
         if let Some(fast_path) = &self.fast_path {
             fast_path.remove_tun(self.port.index());
         }
-        self.port.close();
+        if let Err(error) = self.port.close() {
+            tracing::warn!("{error}");
+        }
     }
 }
 
@@ -103,12 +105,6 @@ fn remote_key(remote: &RemoteTunnel) -> RemoteKey {
 struct Routes {
     by_session: HashMap<SessionKey, Route>,
     by_teid: HashMap<u32, SessionKey>,
-    /// The tunnels by their far end. Anyone who reaches the socket can send
-    /// an Error Indication: finding its tunnel, or that it has none, must
-    /// not be a walk through every tunnel.
-    by_remote: BTreeSet<(RemoteKey, SessionKey)>,
-    /// The tunnels in the order of their RAN UE, to remove those of one.
-    by_ran: BTreeSet<SessionKey>,
     teids: Teids,
     /// The TUNs of the tunnels that have one.
     tuns: HashMap<SessionKey, TunAttachment>,
@@ -153,8 +149,6 @@ impl Routes {
     fn remove(&mut self, key: SessionKey) -> Option<Route> {
         let route = self.by_session.remove(&key)?;
         self.by_teid.remove(&route.local_teid);
-        self.by_remote.remove(&(remote_key(&route.remote), key));
-        self.by_ran.remove(&key);
         Some(route)
     }
 
@@ -162,8 +156,6 @@ impl Routes {
         self.remove(key);
         self.by_session.insert(key, route);
         self.by_teid.insert(route.local_teid, key);
-        self.by_remote.insert((remote_key(&route.remote), key));
-        self.by_ran.insert(key);
     }
 
     /// Whether tunnel `key` can get a TUN.
@@ -201,12 +193,9 @@ impl RouteTable {
         let routes = &mut *lock(&self.routes);
         let local_teid = match routes.by_session.get_mut(&key) {
             Some(route) => {
-                let former = std::mem::replace(&mut route.remote, remote);
+                route.remote = remote;
                 route.qfi = qfi;
-                let local_teid = route.local_teid;
-                routes.by_remote.remove(&(remote_key(&former), key));
-                routes.by_remote.insert((remote_key(&remote), key));
-                local_teid
+                route.local_teid
             }
             None => {
                 let local_teid = routes.allocate_teid();
@@ -311,8 +300,9 @@ impl RouteTable {
     pub(super) fn remove_ran(&self, ran_id: u32, shortcuts: Shortcuts<'_>) -> Vec<u32> {
         let mut routes = lock(&self.routes);
         let keys: Vec<_> = routes
-            .by_ran
-            .range((ran_id, u8::MIN)..=(ran_id, u8::MAX))
+            .by_session
+            .keys()
+            .filter(|(ran, _)| *ran == ran_id)
             .copied()
             .collect();
         let _tuns: Vec<_> = keys
@@ -386,10 +376,11 @@ impl RouteTable {
         })?;
         let remote = (teid, peer.to_canonical());
         lock(&self.routes)
-            .by_remote
-            .range((remote, (u32::MIN, u8::MIN))..=(remote, (u32::MAX, u8::MAX)))
-            .next()
-            .map(|(_, key)| *key)
+            .by_session
+            .iter()
+            .filter(|(_, route)| remote_key(&route.remote) == remote)
+            .map(|(key, _)| *key)
+            .min()
     }
 }
 
@@ -506,21 +497,13 @@ mod tests {
         table.error_indication_session(&indication)
     }
 
-    /// Every index has every tunnel, and nothing else.
+    /// Both maps have every tunnel, and nothing else.
     fn assert_indexed(table: &RouteTable, tunnels: usize) {
         let routes = lock(&table.routes);
         assert_eq!(routes.by_session.len(), tunnels);
         assert_eq!(routes.by_teid.len(), tunnels);
-        assert_eq!(routes.by_remote.len(), tunnels);
-        assert_eq!(routes.by_ran.len(), tunnels);
         for (key, route) in &routes.by_session {
             assert_eq!(routes.by_teid.get(&route.local_teid), Some(key));
-            assert!(
-                routes
-                    .by_remote
-                    .contains(&(remote_key(&route.remote), *key))
-            );
-            assert!(routes.by_ran.contains(key));
         }
     }
 
@@ -700,34 +683,5 @@ mod tests {
         assert_eq!(table.remove_ran(6, Default::default()).len(), 1);
         assert_eq!(table.remove_ran(8, Default::default()).len(), 1);
         assert_indexed(&table, 0);
-    }
-
-    /// Anyone who reaches the socket can send an Error Indication, and a UE
-    /// that leaves has its tunnels removed: neither walks through the
-    /// tunnels. With 100 000 of them, a walk for each of these 40 000 calls
-    /// takes several seconds in an optimized build and a minute in this one.
-    #[test]
-    fn an_error_indication_and_the_removal_of_a_ue_do_not_walk_through_the_tunnels() {
-        const TUNNELS: u32 = 100_000;
-        const CALLS: u32 = 20_000;
-        let table = RouteTable::default();
-        for ran_id in 0..TUNNELS {
-            let far_end = remote("192.0.2.1:2152", 0x1000_0000 + ran_id);
-            table.install((ran_id, 5), far_end, Some(9), Default::default());
-        }
-        let unmatched = Packet::error_indication(0x0bad_f00d, "192.0.2.1".parse().unwrap());
-        let start = std::time::Instant::now();
-        for _ in 0..CALLS {
-            assert_eq!(table.error_indication_session(&unmatched), None);
-        }
-        for ran_id in 0..CALLS {
-            assert_eq!(table.remove_ran(ran_id, Default::default()).len(), 1);
-        }
-        let elapsed = start.elapsed();
-        assert!(
-            elapsed < std::time::Duration::from_secs(1),
-            "{CALLS} Error Indications and {CALLS} removals took {elapsed:?}"
-        );
-        assert_indexed(&table, (TUNNELS - CALLS) as usize);
     }
 }
