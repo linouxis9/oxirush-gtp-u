@@ -74,4 +74,8 @@ exclude_re = [
     'src/ebpf\.rs:.*: replace < with <= in follow_mtus$',
     # A link removed by another between the check of its name and its removal.
     'src/tun/routing\.rs:.*: replace match guard error\.raw_os_error\(\) == Some\(libc::ENODEV\) with false in remove_link$',
+    # The deletion of a TUN's rule as root fails only because the rule is gone
+    # (ENOENT, ESRCH); another error (EPERM, ENOBUFS) needs a fault that a test
+    # cannot make without injecting it into netlink.
+    'src/tun/routing\.rs:.*: replace match guard !matches!\(error\.raw_os_error\(\), Some\(libc::ENOENT \| libc::ESRCH\)\) with false in RoutingLease::close$',
 ]
