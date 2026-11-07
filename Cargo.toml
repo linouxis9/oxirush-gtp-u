@@ -10,7 +10,7 @@ documentation = "https://docs.rs/oxirush-gtp-u"
 keywords = ["gtp", "gtp-u", "5g", "upf", "ebpf"]
 categories = ["network-programming", "parser-implementations", "development-tools::testing"]
 readme = "README.md"
-exclude = ["/.cargo", "/.github", "/.gitignore", "/benches", "/ebpf/.gitignore", "/family", "/fuzz"]
+exclude = ["/.cargo", "/.github", "/.gitignore", "/benches", "/ebpf/.gitignore", "/fuzz", "/readme"]
 
 [features]
 default = ["endpoint"]
@@ -60,14 +60,6 @@ libc = "0.2.164"
 [[bin]]
 name = "oxirush-upf-sim"
 required-features = ["cli"]
-
-[[example]]
-name = "endpoint"
-required-features = ["endpoint"]
-
-[[example]]
-name = "path"
-required-features = ["endpoint"]
 
 [[example]]
 name = "tun"

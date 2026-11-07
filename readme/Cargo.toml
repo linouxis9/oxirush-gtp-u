@@ -1,0 +1,16 @@
+# The README and the front page of the documentation print what they show: the build
+# script writes each of their Rust blocks as a function, and the test compares what
+# each prints with the output under it. A package of its own, which is not published.
+[package]
+name = "oxirush-gtp-u-readme"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+
+[dev-dependencies]
+oxirush-gtp-u = { path = ".." }
+tokio = { version = "1.38", features = ["macros", "net", "rt"] }
+
+# Not a member of a workspace that the crate may be in.
+[workspace]
