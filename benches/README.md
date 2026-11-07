@@ -48,10 +48,9 @@ extension headers, of which one is kept as octets:
 | From an endpoint to the test UPF and its echo back, over the loopback interface | 12.3 µs | 12.9 µs |
 
 Four fifths of the round trip are its four system calls, and the codec is
-under 2% of it. A message whose payload stays in the datagram is decoded
-without an allocation when it has one extension header at most; with
-three, it allocates its list and the octets of the header that is kept as
-received.
+under 2% of it. A message whose payload stays in the datagram allocates the list of its
+extension headers when it has any, and the octets of a header that is kept
+as received.
 
 An endpoint with many tunnels, on the same core and at the same commit, the
 lowest of five runs.
@@ -92,7 +91,5 @@ most.
 | Endpoint to endpoint and back, no extension header, loopback | oxirush-gtp-u | 12,078 | 56,106 | 39,975 | 2 | 2,807 | 3.0 MiB | |
 | | go-gtp | 23,900 | 109,192 | 85,322 | 82 | 8,736 | 10.3 MiB | 2.0x |
 
-`decode_borrowed` returns a `Packet` of 136 octets, with room for one
-extension header whether the message has one or not.
 `benches/compare.sh 3` runs every row on core 3, and fetches go-gtp at the
 version that it pins; perf may need `PERF="sudo -n perf"`.

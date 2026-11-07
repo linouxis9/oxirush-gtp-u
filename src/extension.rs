@@ -197,61 +197,8 @@ impl ExtensionHeader {
         self.kind().comprehension_required()
     }
 
-    /// The two octets of content of the usual header, which most G-PDUs on
-    /// N3 have and which their encoder writes where the message is: a PDU
-    /// Session Container of downlink information with a QFI and its RQI, or
-    /// of uplink information with a QFI, and none of the fields that a flag
-    /// announces. None for another header, and for a QFI that the encoder
-    /// refuses, which the encoder of every header then refuses.
-    #[inline(always)]
-    pub(crate) fn usual(&self) -> Option<[u8; 2]> {
-        let ExtensionHeader::PduSessionContainer(container) = self else {
-            return None;
-        };
-        match container {
-            PduSessionContainer::Downlink(DownlinkPduSessionInformation {
-                qfi: qfi @ 0..=63,
-                rqi,
-                ppi: None,
-                dl_sending_time_stamp: None,
-                dl_qfi_sequence_number: None,
-                dl_mbs_qfi_sequence_number: None,
-                burst_size: None,
-                time_to_next_burst: None,
-            }) => Some([0x00, flag(*rqi, 0x40) | qfi]),
-            PduSessionContainer::Uplink(UplinkPduSessionInformation {
-                qfi: qfi @ 0..=63,
-                time_stamps: None,
-                dl_delay_result: None,
-                ul_delay_result: None,
-                ul_qfi_sequence_number: None,
-                n3_n9_delay_result: None,
-                d1_ul_pdcp_delay_result_ind: None,
-                ul_congestion_information: None,
-                dl_congestion_information: None,
-                ul_available_bitrate: None,
-                dl_available_bitrate: None,
-                unknown_new_ies: None,
-            }) => Some([0x10, *qfi]),
-            _ => None,
-        }
-    }
-
     /// Decode the content of an extension header of type `kind`.
-    #[inline(always)]
     pub(crate) fn decode(kind: u8, content: &[u8]) -> Result<Self, Error> {
-        // The usual header is made where the message is: the decoder of
-        // every other one is long, and is not paid for by this one.
-        if kind == PDU_SESSION_CONTAINER
-            && let Some(container) = PduSessionContainer::usual(content)
-        {
-            return Ok(ExtensionHeader::PduSessionContainer(container));
-        }
-        Self::decode_any(kind, content)
-    }
-
-    #[inline(never)]
-    fn decode_any(kind: u8, content: &[u8]) -> Result<Self, Error> {
         match kind {
             UDP_PORT => match *content {
                 [high, low] => Ok(ExtensionHeader::UdpPort(u16::from_be_bytes([high, low]))),
@@ -486,28 +433,6 @@ impl PduSessionContainer {
                 Some(std::mem::replace(&mut information.qfi, qfi))
             }
             PduSessionContainer::Other(_) => None,
-        }
-    }
-
-    /// The container of a G-PDU as it usually is: downlink information
-    /// with a QFI and its RQI, or uplink information with a QFI, and none
-    /// of the fields that a flag announces.
-    #[inline(always)]
-    fn usual(content: &[u8]) -> Option<Self> {
-        let &[flags, octet, ..] = content else {
-            return None;
-        };
-        match flags {
-            // PDU type 0, whose spare bit is not evaluated.
-            0x00 | 0x01 if octet & 0x80 == 0 => Some(PduSessionContainer::Downlink(
-                DownlinkPduSessionInformation {
-                    qfi: octet & 0x3f,
-                    rqi: octet & 0x40 != 0,
-                    ..DownlinkPduSessionInformation::default()
-                },
-            )),
-            0x10 if octet & 0xc0 == 0 => Some(PduSessionContainer::uplink(octet & 0x3f)),
-            _ => None,
         }
     }
 
@@ -987,68 +912,5 @@ impl Reader<'_> {
             return Ok(None);
         }
         self.u64().map(Some)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The decoder of the usual container takes only what the decoder of
-    /// every header takes as the same container: for each first two octets
-    /// of a PDU Session Container, it answers nothing or what that one does.
-    #[test]
-    fn the_usual_container_is_decoded_as_every_header_is() {
-        for flags in 0..=u8::MAX {
-            for octet in 0..=u8::MAX {
-                let content = [flags, octet];
-                if let Some(usual) = PduSessionContainer::usual(&content) {
-                    assert_eq!(
-                        ExtensionHeader::decode_any(PDU_SESSION_CONTAINER, &content),
-                        Ok(ExtensionHeader::PduSessionContainer(usual)),
-                        "{content:02x?}"
-                    );
-                }
-            }
-        }
-    }
-
-    /// The encoder of the usual container writes what the encoder of every
-    /// header writes, and leaves to it what it is not for.
-    #[test]
-    fn the_usual_container_is_encoded_as_every_header_is() {
-        let general = |header: &ExtensionHeader| {
-            let mut out = Vec::new();
-            header.encode(0x40, &mut out).map(|()| out)
-        };
-        for qfi in 0..=64 {
-            let uplink = PduSessionContainer::uplink(qfi);
-            let mut headers = vec![ExtensionHeader::PduSessionContainer(uplink)];
-            for rqi in [false, true] {
-                let mut information = DownlinkPduSessionInformation::new(qfi);
-                information.rqi = rqi;
-                let downlink = PduSessionContainer::Downlink(information);
-                headers.push(ExtensionHeader::PduSessionContainer(downlink));
-            }
-            for header in headers {
-                match (header.usual(), general(&header)) {
-                    (Some([first, second]), Ok(out)) => assert_eq!(out, [1, first, second, 0x40]),
-                    (None, Err(_)) => assert_eq!(qfi, 64),
-                    (usual, general) => panic!("{header:?}: {usual:?} and {general:?}"),
-                }
-            }
-        }
-        let mut downlink = DownlinkPduSessionInformation::new(9);
-        downlink.ppi = Some(1);
-        let mut uplink = UplinkPduSessionInformation::new(9);
-        uplink.ul_qfi_sequence_number = Some(1);
-        for other in [
-            ExtensionHeader::PduSessionContainer(PduSessionContainer::Downlink(downlink)),
-            ExtensionHeader::PduSessionContainer(PduSessionContainer::Uplink(uplink)),
-            ExtensionHeader::PduSessionContainer(PduSessionContainer::Other(vec![0x20, 0])),
-            ExtensionHeader::UdpPort(2152),
-        ] {
-            assert_eq!(other.usual(), None, "{other:?}");
-        }
     }
 }

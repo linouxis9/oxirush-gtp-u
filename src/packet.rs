@@ -6,8 +6,8 @@ use std::net::IpAddr;
 use crate::error::truncated;
 use crate::types::{Octets, Teid};
 use crate::{
-    Error, ExtensionHeader, ExtensionHeaderType, ExtensionHeaders, InformationElement, MessageType,
-    Part, PduSessionContainer,
+    Error, ExtensionHeader, ExtensionHeaderType, InformationElement, MAX_EXTENSION_HEADERS,
+    MessageType, Part, PduSessionContainer,
 };
 
 /// Version 1, protocol type GTP.
@@ -29,8 +29,7 @@ const OPTIONAL_LEN: usize = 4;
 ///
 /// `P` defaults to an owned `Vec<u8>`. Constructors also accept slices and
 /// other byte buffers implementing `AsRef<[u8]>`. Borrowed decoding keeps the
-/// payload in the original datagram; the extension headers are owned, in a
-/// list that holds the first of them itself.
+/// payload in the original datagram; the extension headers are owned.
 ///
 /// ```
 /// use oxirush_gtp_u::{MessageType, Packet};
@@ -75,7 +74,7 @@ pub struct Packet<P = Vec<u8>> {
     /// N-PDU Number (PN flag).
     pub n_pdu_number: Option<u8>,
     /// Extension headers, in order (E flag).
-    pub extension_headers: ExtensionHeaders,
+    pub extension_headers: Vec<ExtensionHeader>,
     /// The T-PDU of a G-PDU, or the information elements of a signalling
     /// message (see [`information_elements`](Packet::information_elements)).
     pub payload: P,
@@ -114,7 +113,7 @@ impl<P: AsRef<[u8]>> Packet<P> {
             teid,
             sequence: None,
             n_pdu_number: None,
-            extension_headers: ExtensionHeaders::new(),
+            extension_headers: Vec::new(),
             payload,
         }
     }
@@ -347,13 +346,8 @@ impl Packet {
     /// The payload is copied only when [`into_owned`](Packet::into_owned) is
     /// called.
     ///
-    /// The extension headers are owned. A message without extension header,
-    /// or with one that is a UDP Port or a PDU Session Container of downlink
-    /// or uplink information without new IEs of a later release, is decoded
-    /// without an allocation. A second header allocates the list, and a
-    /// header or a PDU type that is kept as received allocates its octets.
-    /// A chain of more than [`ExtensionHeaders::MAX`] headers is refused
-    /// where it exceeds it.
+    /// The extension headers are owned. A chain of more than
+    /// [`MAX_EXTENSION_HEADERS`] headers is refused where it exceeds it.
     ///
     /// ```
     /// use oxirush_gtp_u::Packet;
@@ -411,37 +405,23 @@ fn decode<'a, P>(bytes: &'a [u8], payload: impl Fn(&'a [u8]) -> P) -> Result<Pac
             next = optional[3];
         }
     }
-    // A message is made once, where it is returned: its list has the room
-    // of a header, which a move copies whether the header is there or not.
-    let message = |extension_headers, rest| Packet {
-        message_type,
-        teid,
-        sequence,
-        n_pdu_number,
-        extension_headers,
-        payload: payload(rest),
-    };
-    if next == 0 {
-        return Ok(message(ExtensionHeaders::new(), rest));
-    }
-    let (content, following, after) = extension_header(rest)?;
-    let first = ExtensionHeader::decode(next, content)?;
-    if following == 0 {
-        // The usual chain is one header, which goes from its decoder into
-        // the message.
-        return Ok(message(first.into(), after));
-    }
-    let mut extension_headers = ExtensionHeaders::from(first);
-    (next, rest) = (following, after);
+    let mut extension_headers = Vec::new();
     while next != 0 {
-        if extension_headers.len() == ExtensionHeaders::MAX {
+        if extension_headers.len() == MAX_EXTENSION_HEADERS {
             return Err(TOO_MANY);
         }
         let (content, following, after) = extension_header(rest)?;
         extension_headers.push(ExtensionHeader::decode(next, content)?);
         (next, rest) = (following, after);
     }
-    Ok(message(extension_headers, rest))
+    Ok(Packet {
+        message_type,
+        teid,
+        sequence,
+        n_pdu_number,
+        extension_headers,
+        payload: payload(rest),
+    })
 }
 
 /// The extension header at the start of `rest`: its content, between the
@@ -525,7 +505,7 @@ impl<P: AsRef<[u8]>> Packet<P> {
     }
 
     fn encoded_len_for_payload(&self, payload_length: usize) -> Result<usize, Error> {
-        if self.extension_headers.len() > ExtensionHeaders::MAX {
+        if self.extension_headers.len() > MAX_EXTENSION_HEADERS {
             return Err(TOO_MANY);
         }
         let optional = self.sequence.is_some()
@@ -538,11 +518,7 @@ impl<P: AsRef<[u8]>> Packet<P> {
             length = length.saturating_add(OPTIONAL_LEN);
         }
         for header in &self.extension_headers {
-            let header = match header.usual() {
-                Some(_) => 4,
-                None => header.encoded_len()?,
-            };
-            length = length.saturating_add(header);
+            length = length.saturating_add(header.encoded_len()?);
         }
         if length > usize::from(u16::MAX) {
             return Err(Error::OutOfRange {
@@ -593,11 +569,7 @@ impl<P: AsRef<[u8]>> Packet<P> {
         }
         for (index, header) in self.extension_headers.iter().enumerate() {
             let next = self.extension_headers.get(index + 1).map_or(0, kind);
-            match header.usual() {
-                // Its length, its content and the type of the next header.
-                Some([first, second]) => out.extend_from_slice(&[1, first, second, next]),
-                None => header.encode(next, out)?,
-            }
+            header.encode(next, out)?;
         }
         out.extend_from_slice(payload);
         let length = (length - MANDATORY_LEN) as u16;
@@ -607,7 +579,7 @@ impl<P: AsRef<[u8]>> Packet<P> {
 }
 
 const TOO_MANY: Error = Error::TooManyExtensionHeaders {
-    max: ExtensionHeaders::MAX,
+    max: MAX_EXTENSION_HEADERS,
 };
 
 /// The type of an extension header, as the octet that names it to the
@@ -858,8 +830,7 @@ mod tests {
         uplink.dl_congestion_information = Some(1000);
         packet.extension_headers = vec![ExtensionHeader::PduSessionContainer(
             PduSessionContainer::Uplink(uplink.clone()),
-        )]
-        .into();
+        )];
         // New IE Flags 0 to 2, D1 UL PDCP Delay Result Ind, UL and DL
         // Congestion Information, padding.
         round_trip(
@@ -879,8 +850,7 @@ mod tests {
         }));
         packet.extension_headers = vec![ExtensionHeader::PduSessionContainer(
             PduSessionContainer::Uplink(uplink.clone()),
-        )]
-        .into();
+        )];
         round_trip(
             &packet,
             "34 ff 0010 00000001 0000 00 85 03 10 47 a1 01 00 aabbcc0000 00",
@@ -903,8 +873,7 @@ mod tests {
             }));
             packet.extension_headers = vec![ExtensionHeader::PduSessionContainer(
                 PduSessionContainer::Uplink(uplink.clone()),
-            )]
-            .into();
+            )];
             assert_eq!(packet.encode(), Err(Error::Malformed(Part::NewIeFlags)));
         }
     }
@@ -1060,8 +1029,7 @@ mod tests {
                 kind: ExtensionHeaderType(0xe0),
                 content: vec![1, 2, 3, 4, 5, 6],
             },
-        ]
-        .into();
+        ];
         round_trip(
             &packet,
             "37 ff 0019 00000003 0102 33 40
@@ -1266,8 +1234,7 @@ mod tests {
         packet.extension_headers = vec![ExtensionHeader::Other {
             kind: ExtensionHeaderType(0),
             content: vec![0, 0],
-        }]
-        .into();
+        }];
         let kept = |kind| Error::InvalidType {
             what: Part::ExtensionHeader,
             kind,
@@ -1278,15 +1245,13 @@ mod tests {
             packet.extension_headers = vec![ExtensionHeader::Other {
                 kind,
                 content: vec![0, 0],
-            }]
-            .into();
+            }];
             assert_eq!(packet.encode(), Err(kept(kind.0)));
         }
         packet.extension_headers = vec![ExtensionHeader::Other {
             kind: ExtensionHeaderType(0x21),
             content: vec![0],
-        }]
-        .into();
+        }];
         assert_eq!(
             packet.encode(),
             Err(Error::InvalidLength {
@@ -1298,8 +1263,7 @@ mod tests {
         packet.extension_headers = vec![ExtensionHeader::Other {
             kind: ExtensionHeaderType(0x21),
             content: vec![0; 1022],
-        }]
-        .into();
+        }];
         assert_eq!(
             packet.encode(),
             Err(Error::OutOfRange {
@@ -1312,8 +1276,7 @@ mod tests {
         downlink.ppi = Some(8);
         packet.extension_headers = vec![ExtensionHeader::PduSessionContainer(
             PduSessionContainer::Downlink(downlink),
-        )]
-        .into();
+        )];
         assert_eq!(
             packet.encode(),
             Err(Error::OutOfRange {

@@ -47,22 +47,12 @@ exclude_re = [
     # flags of the PDU Session Container and the PPI of 3 bits above them, the flags
     # of the PDU Set Information and the QFI above the 2 high bits of its PSSN of 10,
     # and the E, S and PN flags of the header.
-    'src/extension\.rs:.*: replace \| with \^ in (ExtensionHeader::usual|UplinkPduSessionInformation::encode|DownlinkPduSessionInformation::encode)$',
+    'src/extension\.rs:.*: replace \| with \^ in (UplinkPduSessionInformation::encode|DownlinkPduSessionInformation::encode)$',
     'src/pdu_set\.rs:.*: replace \| with \^ in DownlinkPduSetInformation::encode$',
     'src/packet\.rs:.*: replace \| with \^ in (decode|Packet<P>::encode_into)$',
-    # The container of a G-PDU that the decoder takes as it usually is, and that it
-    # decodes whole when the mutant refuses it as one: the same container, and
-    # neither allocates.
-    'src/extension\.rs:491:9: replace PduSessionContainer::usual -> Option<Self> with None$',
-    'src/extension\.rs:(496:28|503:21): replace match guard octet & 0x(80|c0) == 0 with false in PduSessionContainer::usual$',
-    'src/extension\.rs:(496:34|503:27): replace & with \| in PduSessionContainer::usual$',
     # Whether the unknown new IEs end the container at a multiple of 4 octets:
     # two octets more or two fewer are four apart.
     'src/extension\.rs:904:40: replace \+ with - in UplinkPduSessionInformation::encode$',
-    # A send of another error than WouldBlock, tried again by the send that waits,
-    # which fails alike: Linux gives a UDP send the errors of its datagram, not the
-    # ICMP errors of earlier ones.
-    'src/datagram\.rs:121:31: replace match guard error\.kind\(\) == io::ErrorKind::WouldBlock with true in DatagramSocket::send$',
     # The short-cuts of an endpoint without the fast path, whose default is the body;
     # the build with every feature has the fast path, and does not build it.
     'src/endpoint\.rs:285:9: replace Shared::shortcuts -> Shortcuts<._> with Default::default\(\)$',

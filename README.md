@@ -402,9 +402,8 @@ payload:
 | Decode, the payload copied | 57 ns |
 | From an endpoint to the test UPF and back, over the loopback interface | 12.9 µs |
 
-A message with one extension header at most is decoded without an
-allocation. [`benches/`](benches/README.md)
-has the benchmarks, the other figures and how to profile.
+[`benches/`](benches/README.md) has the benchmarks, the other figures and
+how to profile.
 
 ### Against go-gtp
 
@@ -420,8 +419,6 @@ of go-gtp over this crate's, and "about the same" is within 10 %:
 | Decode, PDU Session Container | 24.0 ns | 1.8x |
 | Endpoint to endpoint and back, no extension header, loopback | 12,078 ns | 2.0x |
 
-`decode_borrowed` returns a `Packet` of 136 octets, with room for one
-extension header whether the message has one or not.
 [`benches/`](benches/README.md#against-go-gtp) has every figure, with cycles,
 instructions, allocations and peak memory, and the method.
 `benches/compare.sh 3` runs every row on core 3:

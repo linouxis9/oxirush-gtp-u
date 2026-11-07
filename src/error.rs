@@ -76,7 +76,7 @@ pub enum Error {
     /// [`UnknownNewIes`](crate::UnknownNewIes).
     Malformed(Part),
     /// A chain of more extension headers than a message is decoded or
-    /// encoded with ([`ExtensionHeaders::MAX`](crate::ExtensionHeaders::MAX)).
+    /// encoded with ([`MAX_EXTENSION_HEADERS`](crate::MAX_EXTENSION_HEADERS)).
     TooManyExtensionHeaders {
         /// That limit.
         max: usize,

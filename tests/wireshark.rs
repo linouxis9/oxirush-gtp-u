@@ -419,8 +419,7 @@ fn optional_fields_and_an_extension_header_chain() {
             number: 0x01_0203,
             legacy_type: false,
         },
-    ]
-    .into();
+    ];
     check(
         &packet,
         &[
@@ -457,7 +456,7 @@ fn optional_fields_and_an_extension_header_chain() {
 fn handover_and_forwarding_headers() {
     let with = |headers: Vec<ExtensionHeader>| {
         let mut packet = Packet::g_pdu(0x2001, vec![0x45]);
-        packet.extension_headers = headers.into();
+        packet.extension_headers = headers;
         packet
     };
     check(

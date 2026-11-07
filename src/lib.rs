@@ -49,7 +49,7 @@
 //! | Carry a PDU session between a gNB and the test UPF | [`Endpoint`], [`Endpoint::install`], [`Endpoint::send`], [`upf_sim::UpfSimulator`], [`upf_sim::Session`], [`ipv4_udp`] |
 //! | Supervise the path to a peer | [`Endpoint::echo`], [`Endpoint::supervise`], [`Endpoint::path_state`], [`Endpoint::path_events`], [`PathEvent`] |
 //! | Answer a peer: Echo and Error Indication | [`Packet::echo_request`], [`InformationElement`] |
-//! | Read and write extension headers | [`ExtensionHeader`], [`ExtensionHeaders`], [`ExtensionHeaderType`] |
+//! | Read and write extension headers | [`ExtensionHeader`], [`ExtensionHeaderType`] |
 //! | The headers of a handover | [`ExtensionHeader::PdcpPduNumber`], [`Packet::end_marker`] |
 //! | Give a tunnel a TUN, on Linux | [`tun::TunConfig`], [`tun::Routing`], [`Endpoint::attach_tun`] |
 //! | Carry the tunnel in the kernel, on Linux | [`ebpf::FastPath`], [`Endpoint::set_fast_path`] |
@@ -123,7 +123,6 @@
 
 mod error;
 mod extension;
-mod headers;
 mod icmp;
 mod ie;
 mod ipv4;
@@ -163,7 +162,6 @@ pub use extension::{
     DownlinkPduSessionInformation, ExtensionHeader, PduSessionContainer, UnknownNewIes,
     UplinkPduSessionInformation, UplinkTimeStamps,
 };
-pub use headers::{ExtensionHeaders, ExtensionHeadersIntoIter};
 pub use icmp::{
     EchoKind, IcmpEcho, ipv4_icmp_echo_reply, ipv4_icmp_echo_request, parse_ipv4_icmp_echo,
 };
@@ -177,6 +175,17 @@ pub use types::{Cause, ExtensionHeaderType, InformationElementType, MessageType}
 
 /// The UDP port of GTP-U.
 pub const PORT: u16 = 2152;
+
+/// The most extension headers that a message is decoded or encoded with: a
+/// longer chain is [`Error::TooManyExtensionHeaders`].
+///
+/// The specification sets no limit. TS 29.281 V19.2.0 has eleven types, which
+/// make eight headers at most in one message: two headers have a second type
+/// from an earlier release, and a message has the PDCP PDU Number or the long
+/// one. Twice that leaves room for the types of later releases, and a datagram
+/// that is nothing but headers costs its receiver the first of them and no
+/// more.
+pub const MAX_EXTENSION_HEADERS: usize = 16;
 
 /// The blocks of the README, which are compiled, and run unless they need
 /// privileges, with the documentation tests.
