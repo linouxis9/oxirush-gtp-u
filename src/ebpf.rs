@@ -1,20 +1,15 @@
-//! The eBPF fast path of an [`Endpoint`](crate::Endpoint)'s tunnels.
+//! The eBPF fast path of a gNB's or an eNB's tunnels: TCX programs that carry
+//! the packets of a tunnel between its TUN and the network, in the kernel.
 //!
-//! [`FastPath::load`] loads three TCX programs. Once an endpoint has the fast
-//! path ([`Endpoint::set_fast_path`](crate::Endpoint::set_fast_path)), a TUN
-//! is on it ([`FastPath::add_tun`]) and a tunnel has that TUN
-//! ([`Endpoint::shortcut`](crate::Endpoint::shortcut)), they encapsulate
-//! what Linux routes into the TUN and decapsulate what the N3 interface
-//! receives for it. What they leave alone still goes through
-//! userspace, the endpoint's socket and the TUN's reader: anything but
-//! IPv4 in a G-PDU without extension header other than one PDU Session
-//! Container, fragments, G-PDUs longer than the MTU of N3, and ICMP Echo
-//! Replies, which whoever pings through the endpoint expects there.
-//!
-//! It needs Linux 6.6 (TCX), `CAP_BPF` and `CAP_NET_ADMIN`.
-//!
-//! [`Endpoint::attach_tun`](crate::Endpoint::attach_tun) puts the TUN it
-//! makes on the endpoint's fast path and short-cuts its tunnel:
+//! [`FastPath`] knows nothing of an [`Endpoint`](crate::Endpoint): the
+//! program drives it with what it gave the endpoint. [`FastPath::add_tun`]
+//! puts a TUN on the fast path, once, and [`FastPath::shortcut`] gives it a
+//! tunnel, after `install` and again after each `install` that changes the
+//! tunnel's remote end or QFI. [`FastPath::end_shortcut`] leaves the tunnel
+//! to userspace again, before the endpoint removes it, and
+//! [`FastPath::remove_tun`] takes the TUN off the fast path before it closes.
+//! What the programs leave alone still goes through userspace, the
+//! endpoint's socket and the TUN's reader.
 //!
 //! ```no_run
 //! use oxirush_gtp_u::ebpf::FastPath;
@@ -23,41 +18,31 @@
 //!
 //! # #[tokio::main(flavor = "current_thread")]
 //! # async fn main() -> std::io::Result<()> {
-//! let (gnb, _received) = Endpoint::bind("192.0.2.1:2152".parse().unwrap()).await?;
+//! let local = "192.0.2.1:2152".parse().unwrap();
+//! let (gnb, _received) = Endpoint::bind(std::net::SocketAddr::V4(local)).await?;
 //! let fast_path = FastPath::load()?;
-//! gnb.set_fast_path(fast_path.clone())?;
-//! gnb.install(1, 5, RemoteTunnel::new("192.0.2.2:2152".parse().unwrap(), 0x1001), Some(9))?;
 //!
+//! let remote = RemoteTunnel::new("192.0.2.2:2152".parse().unwrap(), 0x1001);
+//! let teid = gnb.install(1, 5, remote, Some(9))?;
 //! let routing = Routing::UePolicy {
 //!     address: "10.45.0.2".parse().unwrap(),
 //!     table: 100,
 //!     priority: 100,
 //! };
-//! gnb.attach_tun(1, 5, TunConfig::new("ue0", routing))?;
+//! let tun = gnb.attach_tun(1, 5, TunConfig::new("ue0", routing))?;
+//! fast_path.add_tun(tun)?;
+//! fast_path.shortcut(tun, local, teid, remote, Some(9))?;
+//!
+//! // When the tunnel goes: its short-cut and its TUN first
+//! fast_path.end_shortcut(tun);
+//! fast_path.remove_tun(tun);
+//! gnb.remove(1, 5);
 //! # Ok(())
 //! # }
 //! ```
 //!
-//! A program that carries a TUN of its own does these steps itself:
+//! It needs Linux 6.6 (TCX), `CAP_BPF` and `CAP_NET_ADMIN`.
 //!
-//! ```no_run
-//! # use oxirush_gtp_u::ebpf::FastPath;
-//! # use oxirush_gtp_u::tun::TunPort;
-//! # use oxirush_gtp_u::Endpoint;
-//! # fn steps(gnb: &Endpoint, fast_path: &FastPath, tun: &TunPort) -> std::io::Result<()> {
-//! // Once, when the TUN is made:
-//! fast_path.add_tun(tun.index())?;
-//! // When userspace carried a packet of the tunnel from the TUN, and the
-//! // TUN has no short-cut. On `WouldBlock`, ask with a later packet; on
-//! // another error, after a while: each asking looks up a route.
-//! if !fast_path.has_shortcut(tun.index()) {
-//!     gnb.shortcut(1, 5, tun.index())?;
-//! }
-//! // Before the TUN is closed:
-//! fast_path.remove_tun(tun.index());
-//! # Ok(())
-//! # }
-//! ```
 //! # The programs
 //!
 //! [`FastPath::load`] loads three TCX programs:
@@ -87,41 +72,19 @@
 //!
 //! The N3 interface of a tunnel is the one Linux routes it through, from the
 //! endpoint's address to the peer's: the loopback interface for a peer on the
-//! same host. It gets `decap` when a first tunnel through it is installed, on
-//! a blocking thread of the Tokio runtime, so that the task that installs the
-//! tunnel does not wait for it (outside a runtime the caller attaches it).
-//! Until it is there the tunnel stays in userspace.
+//! same host. The first `shortcut` through an interface attaches `decap` to
+//! it, which blocks for milliseconds; `add_tun` attaches `uplink` to its TUN
+//! likewise.
 //!
-//! `Endpoint::attach_tun` does the rest for the TUN it makes. A program that
-//! carries a TUN of its own does it in three calls. [`FastPath::add_tun`] puts
-//! the TUN on the fast path, once: it attaches `uplink` in the caller's
-//! thread. `Endpoint::shortcut` gives the TUN its tunnel, when the TUN's
-//! reader carried a packet and the TUN has no short-cut
-//! ([`FastPath::has_shortcut`]): it fails with `WouldBlock` while the N3
-//! interface is getting its program, and a later packet asks again.
-//! `attach_tun` asks each millisecond at most then, and a second after
-//! another failure. And [`FastPath::remove_tun`] takes the TUN off the fast
-//! path, before it is closed.
-//!
-//! # Short-cuts
-//!
-//! A short-cut follows its tunnel. `install` on the tunnel updates it;
-//! `remove` and the endpoint's `shutdown` end it, and so does giving the TUN
-//! another tunnel or the tunnel another TUN. Each change reaches it with the
-//! endpoint's tunnels locked, so that two changes that come at once reach it
-//! in the order that they reached the endpoint. [`FastPath::end_shortcut`] leaves
-//! a TUN's tunnel to userspace until the next `shortcut`, as when its UE moves
-//! to another endpoint. When `shortcut` fails the tunnel stays in userspace.
-//!
-//! The programs leave to userspace, which keeps working underneath: other
-//! messages than G-PDUs, unknown TEIDs, extension headers other than one PDU
-//! Session Container, fragments, inner packets that are not IPv4, G-PDUs
-//! longer than the MTU of N3 (the socket fragments them), and ICMP Echo Replies,
-//! which a caller that pings through the endpoint expects on its receiver.
-//! What they leave also goes on to the interface's other TCX programs and tc
-//! filters (`TC_ACT_UNSPEC`), so several fast paths or other tools can share
-//! an N3 interface. [`FastPath::stats`] counts the packets carried, returned
-//! as too long and dropped.
+//! The programs leave to userspace: other messages than G-PDUs, unknown
+//! TEIDs, extension headers other than one PDU Session Container, fragments,
+//! inner packets that are not IPv4, G-PDUs longer than the MTU of N3 (the
+//! socket fragments them), and ICMP Echo Replies, which a caller that pings
+//! through the endpoint expects on its receiver. What they leave also goes on
+//! to the interface's other TCX programs and tc filters (`TC_ACT_UNSPEC`), so
+//! several fast paths or other tools can share an N3 interface.
+//! [`FastPath::stats`] counts the packets carried, returned as too long and
+//! dropped.
 //!
 //! # What it needs and leaves
 //!
@@ -160,12 +123,12 @@
 //! too: in a copy of it, `ebpf/build.sh` rebuilds the object that it ships.
 
 use std::collections::hash_map::RandomState;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ffi::CStr;
 use std::fmt;
 use std::hash::{BuildHasher, Hasher};
 use std::io;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddrV4};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -225,11 +188,6 @@ pub struct FastPath {
 }
 
 struct Inner {
-    // The programs and their links go before the stage, which `state` has.
-    /// Attaching a program takes milliseconds. Inside a Tokio runtime
-    /// whoever holds this lock does not hold `state`, which a tunnel's
-    /// set-up and short-cut need.
-    programs: Mutex<Ebpf>,
     state: Mutex<State>,
     /// Tells the thread that follows the MTU of the N3 interfaces to end.
     stop: Arc<AtomicBool>,
@@ -286,13 +244,15 @@ fn with_mtu(entries: &HashMap<u32, Uplink>, n3: u32, mtu: u32) -> Vec<(u32, Upli
 }
 
 struct State {
+    /// The programs and their links, which go before the stage.
+    ebpf: Ebpf,
     /// Shared with the thread that follows the MTU of the N3 interfaces,
     /// which takes this lock alone. Whoever takes both takes `state` first.
     uplinks: Arc<Mutex<Uplinks>>,
     downlinks: Map<MapData, DownlinkKey, u32>,
     stats: PerCpuArray<MapData, u64>,
-    /// The N3 interfaces and their `decap` program.
-    n3s: HashMap<u32, N3>,
+    /// The N3 interfaces that have the `decap` program.
+    n3s: HashSet<u32>,
     /// The TUN interfaces with the `uplink` program.
     tuns: HashMap<u32, Tun>,
     /// Whether `/sys` shows this network namespace: its devices are then
@@ -305,16 +265,6 @@ struct Tun {
     uplink: SchedClassifierLinkId,
     /// Its short-cut tunnel.
     key: Option<DownlinkKey>,
-}
-
-/// The `decap` program of an N3 interface.
-enum N3 {
-    /// Being attached since a first tunnel through the interface was
-    /// installed: its tunnels stay in userspace meanwhile.
-    Attaching,
-    Attached,
-    /// Why it could not be attached: its tunnels stay in userspace.
-    Failed(String),
 }
 
 struct Stage {
@@ -421,17 +371,17 @@ impl FastPath {
             .name("gtp-u fast path".into())
             .spawn(follow)?;
         let state = State {
+            ebpf,
             uplinks,
             downlinks: Map::try_from(downlinks).map_err(io::Error::other)?,
             stats: PerCpuArray::try_from(stats).map_err(io::Error::other)?,
-            n3s: HashMap::new(),
+            n3s: HashSet::new(),
             tuns: HashMap::new(),
             steering,
             stage,
         };
         Ok(Self {
             inner: Arc::new(Inner {
-                programs: Mutex::new(ebpf),
                 state: Mutex::new(state),
                 stop,
                 mtus,
@@ -468,22 +418,19 @@ impl FastPath {
         }
     }
 
-    /// Put TUN interface `tun` on the fast path: the programs carry its
-    /// packets once [`Endpoint::shortcut`](crate::Endpoint::shortcut) gives
-    /// it a tunnel. Attaching a program takes milliseconds: call it once,
+    /// Put TUN interface `tun` on the fast path
+    /// ([`TunPort::index`](crate::tun::TunPort::index), or what
+    /// [`Endpoint::attach_tun`](crate::Endpoint::attach_tun) returns): the
+    /// programs carry its packets once [`shortcut`](Self::shortcut) gives it
+    /// a tunnel. Attaching its program blocks for milliseconds: call it once,
     /// when the TUN is created.
     pub fn add_tun(&self, tun: u32) -> io::Result<()> {
-        if lock(&self.inner.state).tuns.contains_key(&tun) {
+        let mut state = lock(&self.inner.state);
+        if state.tuns.contains_key(&tun) {
             return Ok(());
         }
         let name = name_of(tun)?;
-        let uplink = attach(
-            &mut lock(&self.inner.programs),
-            "uplink",
-            &name,
-            TcAttachType::Egress,
-        )?;
-        let mut state = lock(&self.inner.state);
+        let uplink = attach(&mut state.ebpf, "uplink", &name, TcAttachType::Egress)?;
         if state.steering {
             steer(&name);
         }
@@ -495,134 +442,58 @@ impl FastPath {
     /// short-cut. Call it before the TUN is closed, whose index another
     /// interface may then get.
     pub fn remove_tun(&self, tun: u32) {
-        let removed = {
-            let mut state = lock(&self.inner.state);
-            state.end_shortcut(tun);
-            state.tuns.remove(&tun)
-        };
-        let Some(tun) = removed else {
-            return;
-        };
-        if let Ok(program) = program(&mut lock(&self.inner.programs), "uplink") {
-            let _ = program.detach(tun.uplink);
+        let mut state = lock(&self.inner.state);
+        state.end_shortcut(tun);
+        if let Some(removed) = state.tuns.remove(&tun)
+            && let Ok(program) = program(&mut state.ebpf, "uplink")
+        {
+            let _ = program.detach(removed.uplink);
         }
     }
 
-    /// Leave the tunnel of TUN interface `tun` to userspace again, until its
-    /// next short-cut: when its UE leaves for another endpoint.
-    pub fn end_shortcut(&self, tun: u32) {
-        lock(&self.inner.state).end_shortcut(tun);
-    }
-
-    /// Whether TUN interface `tun` has a tunnel's short-cut: the reader of
-    /// a TUN that has one need not ask for it again.
-    pub fn has_shortcut(&self, tun: u32) -> bool {
-        lock(&self.inner.state)
-            .tuns
-            .get(&tun)
-            .is_some_and(|tun| tun.key.is_some())
-    }
-
-    /// Short-cut the tunnel of the endpoint at `local` with local TEID
-    /// `teid` through TUN interface `tun`, in place of the TUN's former
-    /// tunnel if any. A failure leaves the tunnel to userspace.
-    pub(crate) fn shortcut(
+    /// Carry in the kernel the tunnel of the endpoint at `local` whose local
+    /// TEID is `local_teid`, toward `remote` with QoS flow `qfi` (`None` for
+    /// S1-U), through TUN interface `tun`, which [`add_tun`](Self::add_tun)
+    /// put on the fast path. It replaces the TUN's former tunnel, and the
+    /// tunnel's former TUN, if any. It asks Linux for the route to the peer
+    /// and writes two map entries; the first short-cut through an N3
+    /// interface attaches `decap` to it, which blocks for milliseconds.
+    ///
+    /// Call it again after an `install` that changes the tunnel's remote end
+    /// or QFI, and [`end_shortcut`](Self::end_shortcut) before the endpoint
+    /// removes the tunnel.
+    ///
+    /// # Errors
+    ///
+    /// On an error the tunnel stays in userspace, and `tun` loses the
+    /// short-cut it had.
+    ///
+    /// - [`Unsupported`](io::ErrorKind::Unsupported): `local` or the peer is
+    ///   not on the GTP-U port, or the peer is not IPv4.
+    /// - [`NotFound`](io::ErrorKind::NotFound): `tun` is not on the fast path.
+    /// - Another error: the route lookup or a map write failed, or the N3
+    ///   interface could not get its program.
+    pub fn shortcut(
         &self,
         tun: u32,
-        local: Ipv4Addr,
-        teid: u32,
+        local: SocketAddrV4,
+        local_teid: u32,
         remote: RemoteTunnel,
         qfi: Option<u8>,
     ) -> io::Result<()> {
         let mut state = lock(&self.inner.state);
-        let result = self.try_shortcut(&mut state, tun, local, teid, remote, qfi);
+        let result = state.shortcut(tun, local, local_teid, remote, qfi);
         if result.is_err() {
             state.end_shortcut(tun);
         }
         result
     }
 
-    /// Apply the new remote end and QFI of the endpoint's tunnel `teid`, or
-    /// its removal, to its short-cut if it has one. A tunnel's N3 interface
-    /// gets its program now, before the tunnel's first packet.
-    pub(crate) fn refresh(
-        &self,
-        local: Ipv4Addr,
-        teid: u32,
-        route: Option<(RemoteTunnel, Option<u8>)>,
-    ) {
-        let mut state = lock(&self.inner.state);
-        if let Some(Ok((_, n3))) = route.map(|(remote, _)| state.n3(local, remote)) {
-            let _ = self.serve(&mut state, n3);
-        }
-        let Ok(tun) = state.downlinks.get(&key(local, teid), 0) else {
-            return;
-        };
-        let kept = route.is_some_and(|(remote, qfi)| {
-            self.try_shortcut(&mut state, tun, local, teid, remote, qfi)
-                .is_ok()
-        });
-        if !kept {
-            state.end_shortcut(tun);
-        }
-    }
-
-    /// A route lookup and two map entries, once the N3 interface has its
-    /// program.
-    fn try_shortcut(
-        &self,
-        state: &mut State,
-        tun: u32,
-        local: Ipv4Addr,
-        teid: u32,
-        remote: RemoteTunnel,
-        qfi: Option<u8>,
-    ) -> io::Result<()> {
-        let (peer, n3) = state.n3(local, remote)?;
-        if !state.tuns.contains_key(&tun) {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("interface {tun} is not on the fast path"),
-            ));
-        }
-        self.serve(state, n3)?;
-        state.write(tun, key(local, teid), peer, remote.teid, n3, qfi)
-    }
-
-    /// Have `decap` on N3 interface `n3`. Attaching it takes milliseconds,
-    /// which a blocking thread of the Tokio runtime spends, not the caller:
-    /// until it is done this fails with [`io::ErrorKind::WouldBlock`].
-    /// Outside a runtime the caller attaches it.
-    fn serve(&self, state: &mut State, n3: u32) -> io::Result<()> {
-        let attached = state.n3s.entry(n3).or_insert_with(|| {
-            let inner = self.inner.clone();
-            let attach = move || {
-                let attached = name_of(n3).and_then(|name| {
-                    let mut programs = lock(&inner.programs);
-                    attach(&mut programs, "decap", &name, TcAttachType::Ingress)
-                });
-                match attached {
-                    Ok(_) => N3::Attached,
-                    Err(error) => N3::Failed(error.to_string()),
-                }
-            };
-            match tokio::runtime::Handle::try_current() {
-                Ok(runtime) => {
-                    let inner = self.inner.clone();
-                    runtime.spawn_blocking(move || {
-                        let attached = attach();
-                        lock(&inner.state).n3s.insert(n3, attached);
-                    });
-                    N3::Attaching
-                }
-                Err(_) => attach(),
-            }
-        });
-        match attached {
-            N3::Attached => Ok(()),
-            N3::Attaching => Err(io::ErrorKind::WouldBlock.into()),
-            N3::Failed(error) => Err(io::Error::other(error.clone())),
-        }
+    /// Leave the tunnel of TUN interface `tun` to userspace again, until its
+    /// next short-cut: before the endpoint removes the tunnel, or when its UE
+    /// leaves for another endpoint.
+    pub fn end_shortcut(&self, tun: u32) {
+        lock(&self.inner.state).end_shortcut(tun);
     }
 }
 
@@ -635,6 +506,38 @@ impl fmt::Debug for FastPath {
 }
 
 impl State {
+    /// A route lookup and two map entries, once the N3 interface has its
+    /// program.
+    fn shortcut(
+        &mut self,
+        tun: u32,
+        local: SocketAddrV4,
+        local_teid: u32,
+        remote: RemoteTunnel,
+        qfi: Option<u8>,
+    ) -> io::Result<()> {
+        if local.port() != crate::PORT {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "the fast path needs an endpoint on the GTP-U port",
+            ));
+        }
+        let (peer, n3) = self.n3(*local.ip(), remote)?;
+        if !self.tuns.contains_key(&tun) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("interface {tun} is not on the fast path"),
+            ));
+        }
+        if !self.n3s.contains(&n3) {
+            let name = name_of(n3)?;
+            attach(&mut self.ebpf, "decap", &name, TcAttachType::Ingress)?;
+            self.n3s.insert(n3);
+        }
+        let key = key(*local.ip(), local_teid);
+        self.write(tun, key, peer, remote.teid, n3, qfi)
+    }
+
     /// The peer of a tunnel and its N3 interface, the one Linux routes the
     /// tunnel through. It need not hold `local`, and it is loopback for a
     /// peer on this host, whatever their addresses: the interface holding

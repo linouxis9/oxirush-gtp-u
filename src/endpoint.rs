@@ -22,10 +22,7 @@ mod paths;
 use paths::Paths;
 pub use paths::{PathEvent, PathState, PathTimers};
 mod routes;
-#[cfg(fast_path)]
-use routes::N3FastPath;
 use routes::RouteTable;
-use routes::Shortcuts;
 #[cfg(all(target_os = "linux", feature = "tun"))]
 use routes::{SessionKey, TunAttachment};
 
@@ -244,30 +241,12 @@ struct Shared {
     worker: AbortHandle,
     completion: tokio::sync::Mutex<Option<JoinHandle<io::Result<()>>>>,
     stopped: AtomicBool,
-    /// Owned here, so that it goes with the last clone of the endpoint, and
-    /// not with the tasks that hold the tunnels.
-    #[cfg(fast_path)]
-    fast_path: std::sync::OnceLock<N3FastPath>,
-}
-
-impl Shared {
-    #[cfg(fast_path)]
-    fn shortcuts(&self) -> Shortcuts<'_> {
-        self.fast_path.get()
-    }
-
-    #[cfg(not(fast_path))]
-    fn shortcuts(&self) -> Shortcuts<'_> {
-        Shortcuts::default()
-    }
 }
 
 impl Drop for Shared {
     fn drop(&mut self) {
         self.worker.abort();
         self.paths.end_supervisions();
-        #[cfg(fast_path)]
-        self.routes.end_shortcuts(self.shortcuts());
         // The TUNs' readers hold the routes, which hold them.
         self.routes.close_tuns();
     }
@@ -318,8 +297,6 @@ impl Endpoint {
             worker,
             completion: tokio::sync::Mutex::new(Some(completion)),
             stopped: AtomicBool::new(false),
-            #[cfg(fast_path)]
-            fast_path: std::sync::OnceLock::new(),
         };
         Ok((
             Self {
@@ -353,8 +330,6 @@ impl Endpoint {
         self.shared.stopped.store(true, Ordering::Relaxed);
         self.shared.worker.abort();
         self.shared.paths.end_supervisions();
-        #[cfg(fast_path)]
-        self.shared.routes.end_shortcuts(self.shared.shortcuts());
         self.shared.routes.close_tuns();
         let mut completion = self.shared.completion.lock().await;
         let result = match completion.as_mut() {
@@ -533,75 +508,9 @@ impl Endpoint {
         remote: RemoteTunnel,
         qfi: Option<u8>,
     ) -> io::Result<()> {
-        self.shared.routes.install_with_teid(
-            (ran_id, session_id),
-            local_teid,
-            remote,
-            qfi,
-            self.shared.shortcuts(),
-        )
-    }
-
-    /// Give the endpoint, bound to an IPv4 address and the GTP-U port, its
-    /// fast path: it then carries in the kernel the tunnels that
-    /// [`attach_tun`](Self::attach_tun) or [`shortcut`](Self::shortcut)
-    /// gives a TUN from now on, until they are removed or the endpoint is
-    /// shut down.
-    #[cfg(fast_path)]
-    #[cfg_attr(docsrs, doc(cfg(all(target_os = "linux", feature = "ebpf"))))]
-    pub fn set_fast_path(&self, fast_path: crate::ebpf::FastPath) -> io::Result<()> {
-        let local = match self.local_addr()? {
-            SocketAddr::V4(local) if local.port() == crate::PORT => *local.ip(),
-            _ => {
-                return Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "the fast path needs an IPv4 N3 address and the GTP-U port",
-                ));
-            }
-        };
-        self.shared.fast_path.set((fast_path, local)).map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "the endpoint has its fast path",
-            )
-        })
-    }
-
-    /// Carry a tunnel's packets in the kernel, between TUN interface `tun`
-    /// ([`TunPort::index`](crate::tun::TunPort::index)), which
-    /// [`FastPath::add_tun`](crate::ebpf::FastPath::add_tun) put on the fast
-    /// path, and the peer. This lasts until the tunnel is removed, `tun`
-    /// gets another tunnel, or
-    /// [`FastPath::end_shortcut`](crate::ebpf::FastPath::end_shortcut) or
-    /// [`remove_tun`](crate::ebpf::FastPath::remove_tun); later changes of
-    /// the tunnel's remote end and QFI apply to it. It asks Linux for the
-    /// route to the peer and writes two map entries.
-    ///
-    /// This is for a TUN the caller made: [`attach_tun`](Self::attach_tun)
-    /// short-cuts the tunnel of the TUN it makes.
-    ///
-    /// # Errors
-    ///
-    /// On an error the tunnel stays in userspace, and `tun` loses the
-    /// short-cut it had.
-    ///
-    /// - [`WouldBlock`](io::ErrorKind::WouldBlock): the N3 interface is
-    ///   still getting its program, attached off the caller's task when a
-    ///   first tunnel through it was installed. Ask again later, such as
-    ///   with the next packet.
-    /// - [`NotFound`](io::ErrorKind::NotFound): the endpoint has no such
-    ///   tunnel, or `tun` is not on the fast path.
-    /// - [`Unsupported`](io::ErrorKind::Unsupported): the endpoint has no
-    ///   fast path, or the peer is not IPv4 on the GTP-U port.
-    /// - Another error: the route lookup or a map write failed, or the N3
-    ///   interface could not get its program, which is not tried again.
-    #[cfg(fast_path)]
-    #[cfg_attr(docsrs, doc(cfg(all(target_os = "linux", feature = "ebpf"))))]
-    pub fn shortcut(&self, ran_id: u32, session_id: u8, tun: u32) -> io::Result<()> {
-        let fast_path = self.shared.fast_path.get().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::Unsupported, "the endpoint has no fast path")
-        })?;
-        shortcut(&self.shared.routes, fast_path, (ran_id, session_id), tun)
+        self.shared
+            .routes
+            .install_with_teid((ran_id, session_id), local_teid, remote, qfi)
     }
 
     /// Set up the tunnel of RAN UE `ran_id` and PDU session `session_id`
@@ -651,7 +560,7 @@ impl Endpoint {
         Ok(self
             .shared
             .routes
-            .install((ran_id, session_id), remote, qfi, self.shared.shortcuts()))
+            .install((ran_id, session_id), remote, qfi))
     }
 
     /// Give a tunnel a Linux TUN, made as `config` says: what Linux routes
@@ -666,14 +575,9 @@ impl Endpoint {
     /// and when the last clone of the endpoint is dropped. Installing the
     /// tunnel again, to change its remote end or QFI, keeps the TUN.
     ///
-    /// On an endpoint that has a fast path
-    /// ([`set_fast_path`](Self::set_fast_path)) the TUN is on it and the
-    /// kernel carries the tunnel's packets. The endpoint asks for the
-    /// tunnel's short-cut at once, and again when it carried a packet from
-    /// the TUN and the tunnel has no short-cut: each millisecond at most
-    /// while the tunnel's N3 interface is getting its program, and a second
-    /// after another failure. It carries the packets that come meanwhile,
-    /// and those the programs leave.
+    /// It returns the TUN's interface index, which
+    /// [`FastPath`](crate::ebpf::FastPath) takes to carry the tunnel in the
+    /// kernel.
     ///
     /// # Errors
     ///
@@ -686,41 +590,31 @@ impl Endpoint {
     /// - [`BrokenPipe`](io::ErrorKind::BrokenPipe): the endpoint is not
     ///   running.
     /// - Another error: the TUN or its routing could not be set up, as in
-    ///   [`TunPort::create`], or the TUN could not be put on the fast path.
+    ///   [`TunPort::create`].
     ///
     /// # Panics
     ///
     /// Outside a Tokio runtime.
     #[cfg(all(target_os = "linux", feature = "tun"))]
-    pub fn attach_tun(&self, ran_id: u32, session_id: u8, config: TunConfig) -> io::Result<()> {
+    pub fn attach_tun(&self, ran_id: u32, session_id: u8, config: TunConfig) -> io::Result<u32> {
         if !self.is_running() {
             return Err(io::ErrorKind::BrokenPipe.into());
         }
         let key = (ran_id, session_id);
         self.shared.routes.tun_slot(key)?;
         let port = TunPort::create(config)?;
-        #[cfg(fast_path)]
-        let fast_path = self.shared.fast_path.get().cloned();
-        #[cfg(fast_path)]
-        if let Some((fast_path, _)) = &fast_path {
-            fast_path.add_tun(port.index())?;
-        }
+        let index = port.index();
         let reader = tokio::spawn(forward_tun(
             port.clone(),
             self.shared.socket.clone(),
             self.shared.routes.clone(),
             key,
-            #[cfg(fast_path)]
-            fast_path.clone(),
         ));
-        let attachment = TunAttachment {
-            port,
-            reader,
-            #[cfg(fast_path)]
-            fast_path: fast_path.map(|(fast_path, _)| fast_path),
-        };
         // Unless the tunnel went away or got a TUN meanwhile.
-        self.shared.routes.attach_tun(key, attachment)
+        self.shared
+            .routes
+            .attach_tun(key, TunAttachment { port, reader })?;
+        Ok(index)
     }
 
     /// The local TEID of a tunnel.
@@ -734,17 +628,13 @@ impl Endpoint {
     /// Remove a tunnel, and close its TUN if it has one. Its G-PDUs then
     /// get an Error Indication.
     pub fn remove(&self, ran_id: u32, session_id: u8) {
-        self.shared
-            .routes
-            .remove((ran_id, session_id), self.shared.shortcuts());
+        self.shared.routes.remove((ran_id, session_id));
     }
 
     /// Remove every tunnel of RAN UE `ran_id`, as [`remove`](Self::remove)
     /// does.
     pub fn remove_ran(&self, ran_id: u32) {
-        self.shared
-            .routes
-            .remove_ran(ran_id, self.shared.shortcuts());
+        self.shared.routes.remove_ran(ran_id);
     }
 
     /// Send an owned or borrowed IP packet as an uplink G-PDU in a tunnel.
@@ -897,25 +787,9 @@ async fn forward_tun(
     socket: Arc<DatagramSocket>,
     routes: Arc<RouteTable>,
     key: SessionKey,
-    #[cfg(fast_path)] fast_path: Option<N3FastPath>,
 ) {
     let mut packet = vec![0; 65535];
-    #[cfg(fast_path)]
-    let mut asking = Asking::default();
     loop {
-        // At first, and when userspace carries a packet of a tunnel that
-        // has no short-cut: have the kernel carry the next ones.
-        #[cfg(fast_path)]
-        if let Some(fast_path) = &fast_path {
-            let now = std::time::Instant::now();
-            if asking.due(now) && !fast_path.0.has_shortcut(port.index()) {
-                let asked = shortcut(&routes, fast_path, key, port.index());
-                if let Err(error) = &asked {
-                    trace!("N3 TUN {} stays in userspace: {error}", port.name());
-                }
-                asking.answered(now, &asked);
-            }
-        }
         let Ok(length) = port.recv(&mut packet).await else {
             return;
         };
@@ -926,79 +800,5 @@ async fn forward_tun(
         if let Err(error) = socket.send(&uplink, route.remote.address).await {
             debug!("N3 TUN {} uplink failed: {error}", port.name());
         }
-    }
-}
-
-/// When the reader of a TUN asks for the short-cut of its tunnel, which
-/// has none: a route lookup under the lock of the tunnels. Not before an
-/// interval after a failure: a millisecond while the tunnel's N3 interface
-/// is getting its program, a second after another error, such as a tunnel
-/// whose peer the fast path cannot reach. Once the tunnel has its
-/// short-cut, the packets that userspace still carries, too long for N3 or
-/// not IPv4, ask nothing.
-#[cfg(fast_path)]
-#[derive(Debug, Default)]
-struct Asking {
-    not_before: Option<std::time::Instant>,
-}
-
-#[cfg(fast_path)]
-impl Asking {
-    const ATTACHING: std::time::Duration = std::time::Duration::from_millis(1);
-    const FAILED: std::time::Duration = std::time::Duration::from_secs(1);
-
-    fn due(&self, now: std::time::Instant) -> bool {
-        self.not_before.is_none_or(|not_before| now >= not_before)
-    }
-
-    fn answered(&mut self, now: std::time::Instant, answer: &io::Result<()>) {
-        self.not_before = match answer {
-            Ok(()) => None,
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => Some(now + Self::ATTACHING),
-            Err(_) => Some(now + Self::FAILED),
-        };
-    }
-}
-
-/// Short-cut tunnel `key` through TUN interface `tun`, on a route that
-/// cannot change or go away meanwhile.
-#[cfg(fast_path)]
-fn shortcut(
-    routes: &RouteTable,
-    (fast_path, local): &N3FastPath,
-    key: SessionKey,
-    tun: u32,
-) -> io::Result<()> {
-    routes
-        .with_route(key, |route| {
-            fast_path.shortcut(tun, *local, route.local_teid, route.remote, route.qfi)
-        })
-        .unwrap_or_else(|| Err(routes::no_tunnel(key)))
-}
-
-#[cfg(all(test, fast_path))]
-mod tests {
-    use super::*;
-    use std::time::{Duration, Instant};
-
-    /// A TUN whose tunnel cannot be short-cut asks once a second, and not
-    /// with each of its packets.
-    #[test]
-    fn a_tun_asks_for_its_short_cut_again_after_an_interval() {
-        let start = Instant::now();
-        let at = |ms| start + Duration::from_millis(ms);
-        let mut asking = Asking::default();
-        assert!(asking.due(start));
-        // The N3 interface is getting its program.
-        asking.answered(at(0), &Err(io::ErrorKind::WouldBlock.into()));
-        assert!(!asking.due(at(0)));
-        assert!(asking.due(at(1)));
-        // The peer is not on the GTP-U port, or has no route.
-        asking.answered(at(1), &Err(io::ErrorKind::Unsupported.into()));
-        assert!(!asking.due(at(2)));
-        assert!(!asking.due(at(1000)));
-        assert!(asking.due(at(1001)));
-        asking.answered(at(1001), &Ok(()));
-        assert!(asking.due(at(1001)));
     }
 }

@@ -134,9 +134,8 @@ async fn ping(args: &[&str]) {
     );
 }
 
-async fn bind(address: &str, fast_path: &FastPath) -> Endpoint {
+async fn bind(address: &str) -> Endpoint {
     let (endpoint, mut received) = Endpoint::bind(address.parse().unwrap()).await.unwrap();
-    endpoint.set_fast_path(fast_path.clone()).unwrap();
     // Nobody reads the receiver here: what the programs leave is dropped.
     tokio::spawn(async move { while received.recv().await.is_some() {} });
     endpoint
@@ -159,50 +158,41 @@ fn ue_tun(fast_path: &FastPath) -> TunPort {
     port
 }
 
-/// Short-cut a tunnel once its N3 interface has its program: installing the
-/// tunnel had it attached off the caller's task, and until it is there a
-/// short-cut leaves the tunnel to userspace.
-async fn shortcut(endpoint: &Endpoint, ran_id: u32, session_id: u8, tun: u32) {
-    let attached = async {
-        loop {
-            match endpoint.shortcut(ran_id, session_id, tun) {
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    tokio::time::sleep(Duration::from_millis(1)).await;
-                }
-                result => break result.unwrap(),
-            }
-        }
+/// Short-cut the tunnel of RAN UE `ran_id` and session `session_id`
+/// through `tun`, with the remote end and QFI that `install` gave it.
+fn shortcut(
+    fast_path: &FastPath,
+    endpoint: &Endpoint,
+    (ran_id, session_id): (u32, u8),
+    remote: RemoteTunnel,
+    qfi: Option<u8>,
+    tun: u32,
+) -> io::Result<()> {
+    let SocketAddr::V4(local) = endpoint.local_addr().unwrap() else {
+        panic!("an IPv4 endpoint");
     };
-    timeout(SECOND, attached)
-        .await
-        .expect("the N3 interface did not get its program");
+    let teid = endpoint.local_teid(ran_id, session_id).unwrap();
+    fast_path.shortcut(tun, local, teid, remote, qfi)
 }
 
-/// Attaching a program takes milliseconds, which a caller serving packets
-/// cannot spend on one: the N3 interface gets its program when a tunnel
-/// through it is installed, before any short-cut is asked for.
+/// Attaching a program blocks for milliseconds: the N3 interface gets its
+/// program with the first short-cut through it, and only then.
 #[tokio::test]
 #[ignore = "needs root"]
-async fn installing_a_tunnel_attaches_the_n3_program() {
+async fn the_first_short_cut_through_an_n3_interface_attaches_its_program() {
     isolate();
     let fast_path = FastPath::load().unwrap();
-    let gnb = bind("127.0.0.1:2152", &fast_path).await;
-    assert_eq!(ingress_programs("lo"), 0);
+    let gnb = bind("127.0.0.1:2152").await;
     let remote = RemoteTunnel {
         address: UPF.parse().unwrap(),
         teid: 0x1001,
     };
     gnb.install(1, 1, remote, Some(9)).unwrap();
-    let attached = async {
-        while ingress_programs("lo") == 0 {
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
-    };
-    timeout(SECOND, attached)
-        .await
-        .expect("the N3 interface did not get its program");
+    assert_eq!(ingress_programs("lo"), 0);
     let port = ue_tun(&fast_path);
-    shortcut(&gnb, 1, 1, port.index()).await;
+    shortcut(&fast_path, &gnb, (1, 1), remote, Some(9), port.index()).unwrap();
+    assert_eq!(ingress_programs("lo"), 1);
+    shortcut(&fast_path, &gnb, (1, 1), remote, Some(9), port.index()).unwrap();
     assert_eq!(ingress_programs("lo"), 1);
 }
 
@@ -278,7 +268,6 @@ async fn a_tunnel_is_carried_in_the_kernel_once_its_tun_sent_through_userspace()
     let (gnb, mut received) = Endpoint::bind("127.0.0.1:2152".parse().unwrap())
         .await
         .unwrap();
-    gnb.set_fast_path(fast_path.clone()).unwrap();
     let remote = RemoteTunnel {
         address: UPF.parse().unwrap(),
         teid: 0x1001,
@@ -288,22 +277,23 @@ async fn a_tunnel_is_carried_in_the_kernel_once_its_tun_sent_through_userspace()
     let port = ue_tun(&fast_path);
     assert_ne!(steering(port.name()), 0);
 
-    // The N3 interface has its program by the time a UE sends.
-    shortcut(&gnb, 1, 1, port.index()).await;
+    // The N3 interface gets its program with a first short-cut.
+    shortcut(&fast_path, &gnb, (1, 1), remote, Some(9), port.index()).unwrap();
     fast_path.end_shortcut(port.index());
 
     // The userspace path, as an application runs it: what the TUN's reader gets
-    // goes to N3, with the request to short-cut its tunnel, and what the
-    // endpoint's socket gets goes to the TUN.
+    // goes to N3, and short-cuts its tunnel, and what the endpoint's socket
+    // gets goes to the TUN.
     let (up, down) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
     let uplink = tokio::spawn({
         let (gnb, port, up) = (gnb.clone(), port.clone(), up.clone());
+        let fast_path = fast_path.clone();
         async move {
             let mut packet = vec![0; 65535];
             while let Ok(size) = port.recv(&mut packet).await {
                 up.fetch_add(1, Ordering::Relaxed);
                 gnb.send(1, 1, &packet[..size]).await.unwrap();
-                gnb.shortcut(1, 1, port.index()).unwrap();
+                shortcut(&fast_path, &gnb, (1, 1), remote, Some(9), port.index()).unwrap();
             }
         }
     });
@@ -379,8 +369,8 @@ async fn the_short_cut_follows_handover_modification_and_release() {
     isolate();
     ip(&["addr", "add", "198.18.0.1/32", "dev", "lo"]);
     let fast_path = FastPath::load().unwrap();
-    let source = bind("127.0.0.1:2152", &fast_path).await;
-    let target = bind("127.0.0.2:2152", &fast_path).await;
+    let source = bind("127.0.0.1:2152").await;
+    let target = bind("127.0.0.2:2152").await;
     let remote = RemoteTunnel {
         address: UPF.parse().unwrap(),
         teid: 0x2001,
@@ -388,7 +378,7 @@ async fn the_short_cut_follows_handover_modification_and_release() {
     let source_teid = source.install(1, 1, remote, Some(9)).unwrap();
     let (upf, mut observed) = upf(remote.teid, source_teid, &source).await;
     let port = ue_tun(&fast_path);
-    shortcut(&source, 1, 1, port.index()).await;
+    shortcut(&fast_path, &source, (1, 1), remote, Some(9), port.index()).unwrap();
     // The UPF sees the Echo Reply to its N6, from the serving node.
     let mut exchange = async |from: &str, qfi: u8| {
         ping(&["-I", "198.18.0.1", "198.18.0.2"]).await;
@@ -402,23 +392,25 @@ async fn the_short_cut_follows_handover_modification_and_release() {
     exchange("127.0.0.1:2152", 9).await;
 
     // Handover: the target's tunnel has another TEID and N3 address. The
-    // source's routes go later, which must leave the target's short-cut.
+    // source's routes go later, which leaves the target's short-cut.
     let target_teid = target.install(7, 1, remote, Some(9)).unwrap();
     fast_path.end_shortcut(port.index());
-    shortcut(&target, 7, 1, port.index()).await;
+    shortcut(&fast_path, &target, (7, 1), remote, Some(9), port.index()).unwrap();
     upf.switch_downlink(remote.teid, target.local_addr().unwrap(), target_teid)
         .await
         .unwrap();
     exchange("127.0.0.2:2152", 9).await;
     source.remove_ran(1);
     exchange("127.0.0.2:2152", 9).await;
-    // Modification: the uplink gets another QFI.
+    // Modification: the uplink gets another QFI, and its short-cut too.
     target.install(7, 1, remote, Some(5)).unwrap();
+    shortcut(&fast_path, &target, (7, 1), remote, Some(5), port.index()).unwrap();
     exchange("127.0.0.2:2152", 5).await;
     let stats = fast_path.stats();
     assert_eq!((stats.uplink_packets, stats.downlink_packets), (4, 4));
 
     // Release: the TUN's packets reach its reader again.
+    fast_path.end_shortcut(port.index());
     target.remove(7, 1);
     let socket = UdpSocket::bind("0.0.0.0:0").await.unwrap();
     socket.bind_device(Some(b"oxr1")).unwrap();
@@ -442,7 +434,6 @@ async fn tunnels_keep_their_teids_and_qfis_apart_and_match_the_encoder() {
     let (gnb, mut received) = Endpoint::bind("127.0.0.1:2152".parse().unwrap())
         .await
         .unwrap();
-    gnb.set_fast_path(fast_path.clone()).unwrap();
     let peer = UdpSocket::bind("127.0.0.9:2152").await.unwrap();
     let server = SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 9), 9);
     let mut ports = Vec::new();
@@ -462,10 +453,11 @@ async fn tunnels_keep_their_teids_and_qfis_apart_and_match_the_encoder() {
         };
         let port = TunPort::create(TunConfig::new(format!("oxm{i}"), routing)).unwrap();
         // Without the TUN on the fast path its tunnel stays in userspace.
-        let error = gnb.shortcut(u32::from(i), 1, port.index()).unwrap_err();
+        let key = (u32::from(i), 1);
+        let error = shortcut(&fast_path, &gnb, key, remote, qfi, port.index()).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
         fast_path.add_tun(port.index()).unwrap();
-        shortcut(&gnb, u32::from(i), 1, port.index()).await;
+        shortcut(&fast_path, &gnb, key, remote, qfi, port.index()).unwrap();
         ports.push((port, address, remote.teid, teid, qfi));
     }
     let mut datagram = vec![0; 2048];
@@ -546,7 +538,6 @@ async fn only_plain_ipv4_g_pdus_of_short_cut_tunnels_leave_userspace() {
     let (gnb, mut received) = Endpoint::bind("127.0.0.1:2152".parse().unwrap())
         .await
         .unwrap();
-    gnb.set_fast_path(fast_path.clone()).unwrap();
     let peer = UdpSocket::bind("127.0.0.9:2152").await.unwrap();
     let remote = RemoteTunnel {
         address: peer.local_addr().unwrap(),
@@ -561,12 +552,7 @@ async fn only_plain_ipv4_g_pdus_of_short_cut_tunnels_leave_userspace() {
     };
     let port = TunPort::create(TunConfig::new("oxu1", routing)).unwrap();
     fast_path.add_tun(port.index()).unwrap();
-    shortcut(&gnb, 1, 1, port.index()).await;
-    // A tunnel the endpoint does not have.
-    assert_eq!(
-        gnb.shortcut(9, 1, port.index()).unwrap_err().kind(),
-        io::ErrorKind::NotFound
-    );
+    shortcut(&fast_path, &gnb, (1, 1), remote, Some(9), port.index()).unwrap();
 
     let inner = ip::udp(SocketAddrV4::new(N6, 9), SocketAddrV4::new(UE, 9), b"x").unwrap();
     // What `decap` reads of an ICMP Echo Reply: protocol 1, and type 0 where
@@ -629,7 +615,6 @@ async fn short_cut_tunnel(fast_path: &FastPath, teid: u32) -> (Endpoint, UdpSock
     let (gnb, received) = Endpoint::bind("127.0.0.1:2152".parse().unwrap())
         .await
         .unwrap();
-    gnb.set_fast_path(fast_path.clone()).unwrap();
     // Nobody reads the receiver here: what the programs leave is dropped.
     tokio::spawn(async move {
         let mut received = received;
@@ -648,9 +633,7 @@ async fn short_cut_tunnel(fast_path: &FastPath, teid: u32) -> (Endpoint, UdpSock
     };
     let port = TunPort::create(TunConfig::new("oxu1", routing)).unwrap();
     fast_path.add_tun(port.index()).unwrap();
-    assert!(!fast_path.has_shortcut(port.index()));
-    shortcut(&gnb, 1, 1, port.index()).await;
-    assert!(fast_path.has_shortcut(port.index()));
+    shortcut(fast_path, &gnb, (1, 1), remote, Some(9), port.index()).unwrap();
     (gnb, peer, port, local_teid)
 }
 
@@ -690,56 +673,6 @@ async fn a_packet_that_no_longer_fits_n3_once_its_mtu_shrank_is_left_to_userspac
     let stats = fast_path.stats();
     assert_eq!((stats.uplink_packets, stats.uplink_oversized), (1, 1));
     fast_path.follows_mtus().unwrap();
-}
-
-/// Two threads that change one tunnel at once leave its short-cut with the
-/// change that the endpoint has last: the kernel sends the tunnel's
-/// G-PDUs with the remote TEID that the endpoint's socket sends them with.
-#[tokio::test]
-#[ignore = "needs root"]
-async fn a_tunnel_changed_by_two_threads_at_once_keeps_their_last_change_in_its_short_cut() {
-    isolate();
-    let fast_path = FastPath::load().unwrap();
-    let (gnb, peer, _port, _) = short_cut_tunnel(&fast_path, 0x6001).await;
-    let address = peer.local_addr().unwrap();
-    let server = SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 9), 9);
-    let application = UdpSocket::bind((UE, 4000)).await.unwrap();
-    let mut datagram = vec![0; 4096];
-    let mut received = async || {
-        let size = timeout(SECOND, peer.recv(&mut datagram))
-            .await
-            .expect("the G-PDU did not reach the peer")
-            .unwrap();
-        Packet::decode(&datagram[..size]).unwrap().teid
-    };
-    for round in 0..500u32 {
-        // Threads of this one, in its network namespace.
-        let barrier = Arc::new(std::sync::Barrier::new(2));
-        let threads: Vec<_> = [0, 1]
-            .map(|other| {
-                let (gnb, barrier) = (gnb.clone(), barrier.clone());
-                let teid = 0x7000_0000 + 2 * round + other;
-                std::thread::spawn(move || {
-                    barrier.wait();
-                    gnb.install(1, 1, RemoteTunnel::new(address, teid), Some(9))
-                        .unwrap();
-                })
-            })
-            .into_iter()
-            .collect();
-        for thread in threads {
-            thread.join().unwrap();
-        }
-        gnb.send(1, 1, b"by the socket".as_slice()).await.unwrap();
-        let by_the_socket = received().await;
-        application.send_to(b"by the kernel", server).await.unwrap();
-        let by_the_kernel = received().await;
-        assert_eq!(
-            by_the_kernel, by_the_socket,
-            "round {round}: the short-cut kept the change that came first"
-        );
-    }
-    assert_eq!(fast_path.stats().uplink_packets, 500);
 }
 
 /// Send `frame` out of the loopback interface, which receives it as from a
@@ -843,7 +776,6 @@ async fn a_peer_on_this_host_is_reached_through_loopback_whatever_its_address() 
     let (gnb, mut received) = Endpoint::bind("10.99.0.1:2152".parse().unwrap())
         .await
         .unwrap();
-    gnb.set_fast_path(fast_path.clone()).unwrap();
     let peer = UdpSocket::bind("10.99.0.2:2152").await.unwrap();
     let remote = RemoteTunnel {
         address: peer.local_addr().unwrap(),
@@ -857,7 +789,7 @@ async fn a_peer_on_this_host_is_reached_through_loopback_whatever_its_address() 
     };
     let port = TunPort::create(TunConfig::new("oxu1", routing)).unwrap();
     fast_path.add_tun(port.index()).unwrap();
-    shortcut(&gnb, 1, 1, port.index()).await;
+    shortcut(&fast_path, &gnb, (1, 1), remote, Some(9), port.index()).unwrap();
 
     let server = SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 9), 9);
     let application = UdpSocket::bind((UE, 4000)).await.unwrap();
@@ -916,7 +848,6 @@ async fn a_peer_on_another_host_is_reached_through_the_interface_of_its_route() 
     let (gnb, mut received) = Endpoint::bind("10.99.0.1:2152".parse().unwrap())
         .await
         .unwrap();
-    gnb.set_fast_path(fast_path.clone()).unwrap();
     let remote = RemoteTunnel {
         address: peer.local_addr().unwrap(),
         teid: 0x4001,
@@ -929,7 +860,7 @@ async fn a_peer_on_another_host_is_reached_through_the_interface_of_its_route() 
     };
     let port = TunPort::create(TunConfig::new("oxu1", routing)).unwrap();
     fast_path.add_tun(port.index()).unwrap();
-    shortcut(&gnb, 1, 1, port.index()).await;
+    shortcut(&fast_path, &gnb, (1, 1), remote, Some(9), port.index()).unwrap();
     let decap = ["oxn3a", "oxdummy", "lo"].map(ingress_programs);
     assert_eq!(decap, [1, 0, 0]);
 
@@ -974,7 +905,7 @@ async fn two_fast_paths_share_an_n3_interface() {
     let peer = UdpSocket::bind("127.0.0.9:2152").await.unwrap();
     let mut applications = Vec::new();
     for (i, fast_path) in (1u8..).zip(&fast_paths) {
-        let gnb = bind(&format!("127.0.0.{i}:2152"), fast_path).await;
+        let gnb = bind(&format!("127.0.0.{i}:2152")).await;
         let remote = RemoteTunnel {
             address: peer.local_addr().unwrap(),
             teid: 0x5000 + u32::from(i),
@@ -988,7 +919,7 @@ async fn two_fast_paths_share_an_n3_interface() {
         };
         let port = TunPort::create(TunConfig::new(format!("oxm{i}"), routing)).unwrap();
         fast_path.add_tun(port.index()).unwrap();
-        shortcut(&gnb, 1, 1, port.index()).await;
+        shortcut(fast_path, &gnb, (1, 1), remote, Some(9), port.index()).unwrap();
         let application = UdpSocket::bind((address, 4000)).await.unwrap();
         applications.push((gnb, port, teid, address, application));
     }
@@ -1033,7 +964,6 @@ async fn a_tun_given_another_tunnel_leaves_the_first() {
     let (gnb, mut received) = Endpoint::bind("127.0.0.1:2152".parse().unwrap())
         .await
         .unwrap();
-    gnb.set_fast_path(fast_path.clone()).unwrap();
     let peer = UdpSocket::bind("127.0.0.9:2152").await.unwrap();
     let tunnel = |teid| RemoteTunnel {
         address: peer.local_addr().unwrap(),
@@ -1043,8 +973,24 @@ async fn a_tun_given_another_tunnel_leaves_the_first() {
     gnb.install(2, 1, tunnel(0x6102), Some(9)).unwrap();
     let address = Ipv4Addr::new(198, 19, 4, 2);
     let port = policy_tun(&fast_path, "oxn1", address, 29103);
-    shortcut(&gnb, 1, 1, port.index()).await;
-    shortcut(&gnb, 2, 1, port.index()).await;
+    shortcut(
+        &fast_path,
+        &gnb,
+        (1, 1),
+        tunnel(0x6101),
+        Some(9),
+        port.index(),
+    )
+    .unwrap();
+    shortcut(
+        &fast_path,
+        &gnb,
+        (2, 1),
+        tunnel(0x6102),
+        Some(9),
+        port.index(),
+    )
+    .unwrap();
 
     let server = SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 9), 9);
     let downlink = ip::udp(server, SocketAddrV4::new(address, 4000), b"downlink").unwrap();
@@ -1059,9 +1005,9 @@ async fn a_tun_given_another_tunnel_leaves_the_first() {
     assert_eq!((delivered.ran_id, delivered.packet.teid), (1, first));
 }
 
-/// A tunnel given another local TEID leaves the short-cut of the old one: a
-/// downlink to the old TEID reaches no TUN, and is the endpoint's, which has
-/// no tunnel of it.
+/// A tunnel given another local TEID, and short-cut again, leaves the
+/// short-cut of the old one: a downlink to the old TEID reaches no TUN, and is
+/// the endpoint's, which has no tunnel of it.
 #[tokio::test]
 #[ignore = "needs root"]
 async fn a_tunnel_given_another_local_teid_leaves_the_short_cut_of_the_old_one() {
@@ -1070,7 +1016,6 @@ async fn a_tunnel_given_another_local_teid_leaves_the_short_cut_of_the_old_one()
     let (gnb, _received) = Endpoint::bind("127.0.0.1:2152".parse().unwrap())
         .await
         .unwrap();
-    gnb.set_fast_path(fast_path.clone()).unwrap();
     let peer = UdpSocket::bind("127.0.0.9:2152").await.unwrap();
     let remote = RemoteTunnel {
         address: peer.local_addr().unwrap(),
@@ -1080,9 +1025,10 @@ async fn a_tunnel_given_another_local_teid_leaves_the_short_cut_of_the_old_one()
         .unwrap();
     let address = Ipv4Addr::new(198, 19, 5, 2);
     let port = policy_tun(&fast_path, "oxt1", address, 29104);
-    shortcut(&gnb, 1, 1, port.index()).await;
+    shortcut(&fast_path, &gnb, (1, 1), remote, Some(9), port.index()).unwrap();
     gnb.install_with_teid(1, 1, 0x7002, remote, Some(9))
         .unwrap();
+    shortcut(&fast_path, &gnb, (1, 1), remote, Some(9), port.index()).unwrap();
 
     let application = UdpSocket::bind((address, 4000)).await.unwrap();
     let server = SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 9), 9);
@@ -1111,26 +1057,15 @@ async fn a_tunnel_given_another_local_teid_leaves_the_short_cut_of_the_old_one()
 async fn a_tunnel_to_another_port_gets_no_short_cut() {
     isolate();
     let fast_path = FastPath::load().unwrap();
-    let gnb = bind("127.0.0.1:2152", &fast_path).await;
+    let gnb = bind("127.0.0.1:2152").await;
     let remote = RemoteTunnel {
         address: "127.0.0.8:2153".parse().unwrap(),
         teid: 0x1001,
     };
     gnb.install(1, 1, remote, Some(9)).unwrap();
     let port = ue_tun(&fast_path);
-    let refused = async {
-        loop {
-            match gnb.shortcut(1, 1, port.index()) {
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    tokio::time::sleep(Duration::from_millis(1)).await;
-                }
-                result => break result,
-            }
-        }
-    };
-    let error = timeout(SECOND, refused).await.unwrap().unwrap_err();
+    let error = shortcut(&fast_path, &gnb, (1, 1), remote, Some(9), port.index()).unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::Unsupported, "{error}");
-    assert!(!fast_path.has_shortcut(port.index()));
 }
 
 /// Whether device `name` computes the checksums of what it sends, as
@@ -1176,7 +1111,7 @@ async fn the_stage_completes_the_checksums_of_what_it_sends() {
 
 /// A tunnel has one short-cut. Given to a second TUN, as when a UE's TUN is
 /// made anew before the old one closes, it leaves the first, whose closing
-/// then takes nothing from the second; removed, it leaves the second too.
+/// then takes nothing from the second; ended, it leaves the second too.
 #[tokio::test]
 #[ignore = "needs root"]
 async fn a_tunnel_given_to_another_tun_leaves_the_first() {
@@ -1185,7 +1120,6 @@ async fn a_tunnel_given_to_another_tun_leaves_the_first() {
     let (gnb, mut received) = Endpoint::bind("127.0.0.1:2152".parse().unwrap())
         .await
         .unwrap();
-    gnb.set_fast_path(fast_path.clone()).unwrap();
     let peer = UdpSocket::bind("127.0.0.9:2152").await.unwrap();
     let remote = RemoteTunnel {
         address: peer.local_addr().unwrap(),
@@ -1195,10 +1129,8 @@ async fn a_tunnel_given_to_another_tun_leaves_the_first() {
     let old = policy_tun(&fast_path, "oxm1", Ipv4Addr::new(198, 19, 3, 1), 29101);
     let address = Ipv4Addr::new(198, 19, 3, 2);
     let new = policy_tun(&fast_path, "oxm2", address, 29102);
-    shortcut(&gnb, 1, 1, old.index()).await;
-    shortcut(&gnb, 1, 1, new.index()).await;
-    assert!(!fast_path.has_shortcut(old.index()));
-    assert!(fast_path.has_shortcut(new.index()));
+    shortcut(&fast_path, &gnb, (1, 1), remote, Some(9), old.index()).unwrap();
+    shortcut(&fast_path, &gnb, (1, 1), remote, Some(9), new.index()).unwrap();
     fast_path.remove_tun(old.index());
 
     let server = SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 9), 9);
@@ -1216,26 +1148,26 @@ async fn a_tunnel_given_to_another_tun_leaves_the_first() {
     assert_eq!(&datagram[..size], b"downlink");
     assert!(received.try_recv().is_err(), "a G-PDU reached userspace");
 
+    fast_path.end_shortcut(new.index());
     gnb.remove(1, 1);
     application.send_to(b"uplink", server).await.unwrap();
     timeout(SECOND, new.recv(&mut datagram))
         .await
-        .expect("the removed tunnel still carried the new TUN's uplink")
+        .expect("the ended short-cut still carried the new TUN's uplink")
         .unwrap();
     assert_eq!(fast_path.stats().uplink_packets, 0);
 }
 
-/// On an endpoint with a fast path, `attach_tun` also puts the TUN on it
-/// and short-cuts its tunnel, and the tunnel's removal undoes both.
+/// The index of a TUN that the endpoint attached puts it on the fast path
+/// and short-cuts its tunnel.
 #[tokio::test]
 #[ignore = "needs root"]
-async fn an_attached_tun_is_short_cut_until_its_tunnel_is_removed() {
+async fn a_tun_that_the_endpoint_attached_is_short_cut_by_its_index() {
     isolate();
     let fast_path = FastPath::load().unwrap();
     let (gnb, mut received) = Endpoint::bind("127.0.0.1:2152".parse().unwrap())
         .await
         .unwrap();
-    gnb.set_fast_path(fast_path.clone()).unwrap();
     let peer = UdpSocket::bind("127.0.0.9:2152").await.unwrap();
     let remote = RemoteTunnel::new(peer.local_addr().unwrap(), 0x7001);
     let teid = gnb.install(1, 1, remote, Some(9)).unwrap();
@@ -1244,28 +1176,25 @@ async fn an_attached_tun_is_short_cut_until_its_tunnel_is_removed() {
         table: 29100,
         priority: 15100,
     };
-    gnb.attach_tun(1, 1, TunConfig::new("oxu1", routing))
+    let tun = gnb
+        .attach_tun(1, 1, TunConfig::new("oxu1", routing))
         .unwrap();
+    fast_path.add_tun(tun).unwrap();
     assert_eq!(programs("oxu1", TcAttachType::Egress), 1);
+    shortcut(&fast_path, &gnb, (1, 1), remote, Some(9), tun).unwrap();
 
-    // Userspace carries the uplink while the N3 interface, whose first
-    // tunnel was just installed, gets its program; then the kernel does.
     let server = SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 9), 9);
     let application = UdpSocket::bind((UE, 4000)).await.unwrap();
     let mut datagram = vec![0; 2048];
-    let carried = async {
-        while fast_path.stats().uplink_packets == 0 {
-            application.send_to(b"uplink", server).await.unwrap();
-            let (size, from) = peer.recv_from(&mut datagram).await.unwrap();
-            assert_eq!(from, gnb.local_addr().unwrap());
-            let packet = Packet::decode(&datagram[..size]).unwrap();
-            assert_eq!((packet.teid, packet.qfi()), (0x7001, Some(9)));
-            assert_eq!(ip::parse_udp(&packet.payload).unwrap().2, b"uplink");
-        }
-    };
-    timeout(SECOND, carried)
+    application.send_to(b"uplink", server).await.unwrap();
+    let (size, from) = timeout(SECOND, peer.recv_from(&mut datagram))
         .await
-        .expect("the kernel did not carry the attached TUN's uplink");
+        .unwrap()
+        .unwrap();
+    assert_eq!(from, gnb.local_addr().unwrap());
+    let packet = Packet::decode(&datagram[..size]).unwrap();
+    assert_eq!((packet.teid, packet.qfi()), (0x7001, Some(9)));
+    assert_eq!(ip::parse_udp(&packet.payload).unwrap().2, b"uplink");
     let reply = ip::udp(server, SocketAddrV4::new(UE, 4000), b"downlink").unwrap();
     let reply = Packet::downlink(teid, 9, reply).encode().unwrap();
     peer.send_to(&reply, gnb.local_addr().unwrap())
@@ -1276,9 +1205,11 @@ async fn an_attached_tun_is_short_cut_until_its_tunnel_is_removed() {
         .unwrap()
         .unwrap();
     assert_eq!(&datagram[..size], b"downlink");
-    assert_eq!(fast_path.stats().downlink_packets, 1);
+    let stats = fast_path.stats();
+    assert_eq!((stats.uplink_packets, stats.downlink_packets), (1, 1));
     assert!(received.try_recv().is_err(), "a G-PDU reached the receiver");
 
+    fast_path.remove_tun(tun);
     gnb.remove(1, 1);
     assert!(!exists("oxu1"));
     assert_eq!(format!("{fast_path:?}"), "FastPath { tuns: 0 }");
@@ -1287,45 +1218,13 @@ async fn an_attached_tun_is_short_cut_until_its_tunnel_is_removed() {
 /// The programs send from and receive on the GTP-U port only.
 #[tokio::test]
 #[ignore = "needs root"]
-async fn an_endpoint_on_another_port_gets_no_fast_path() {
+async fn an_endpoint_on_another_port_gets_no_short_cut() {
     isolate();
     let fast_path = FastPath::load().unwrap();
-    let (gnb, _received) = Endpoint::bind("127.0.0.1:2153".parse().unwrap())
-        .await
-        .unwrap();
-    let error = gnb.set_fast_path(fast_path).unwrap_err();
+    let local = "127.0.0.1:2153".parse().unwrap();
+    let remote = RemoteTunnel::new(UPF.parse().unwrap(), 0x1001);
+    let error = fast_path
+        .shortcut(1, local, 0x2001, remote, Some(9))
+        .unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::Unsupported);
-}
-
-/// A stopped endpoint answers nothing: its tunnels' packets must not go on
-/// flowing in the kernel.
-#[tokio::test]
-#[ignore = "needs root"]
-async fn shutting_an_endpoint_down_ends_its_short_cuts() {
-    isolate();
-    let fast_path = FastPath::load().unwrap();
-    let (gnb, _received) = Endpoint::bind("127.0.0.1:2152".parse().unwrap())
-        .await
-        .unwrap();
-    gnb.set_fast_path(fast_path.clone()).unwrap();
-    let peer = UdpSocket::bind("127.0.0.9:2152").await.unwrap();
-    let remote = RemoteTunnel {
-        address: peer.local_addr().unwrap(),
-        teid: 0x6003,
-    };
-    gnb.install(1, 1, remote, Some(9)).unwrap();
-    let address = Ipv4Addr::new(198, 19, 5, 1);
-    let port = policy_tun(&fast_path, "oxm1", address, 29100);
-    shortcut(&gnb, 1, 1, port.index()).await;
-    gnb.shutdown().await.unwrap();
-
-    let server = SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 9), 9);
-    let application = UdpSocket::bind((address, 4000)).await.unwrap();
-    application.send_to(b"uplink", server).await.unwrap();
-    let mut datagram = vec![0; 2048];
-    timeout(SECOND, port.recv(&mut datagram))
-        .await
-        .expect("the stopped endpoint's tunnel still carried the uplink")
-        .unwrap();
-    assert_eq!(fast_path.stats().uplink_packets, 0);
 }

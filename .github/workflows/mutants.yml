@@ -264,7 +264,7 @@ jobs:
             echo "skip=" >> "$GITHUB_OUTPUT"
           else
             echo "::warning::no vrf kernel module: the VRF tests are skipped"
-            echo "skip=--skip ue_vrf --skip carried_in_the_kernel --skip handover --skip installing_a_tunnel" >> "$GITHUB_OUTPUT"
+            echo "skip=--skip ue_vrf --skip carried_in_the_kernel --skip handover --skip first_short_cut --skip another_port" >> "$GITHUB_OUTPUT"
           fi
       - run: |
           cargo mutants --config .cargo/mutants-privileged.toml -j 1 \

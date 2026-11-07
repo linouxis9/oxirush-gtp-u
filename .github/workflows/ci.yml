@@ -92,7 +92,7 @@ jobs:
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: sudo
       # The fast path loads eBPF programs; three of its tests use a VRF.
-      - run: cargo test --locked --features ebpf --test ebpf_linux -- --ignored ${{ steps.vrf.outputs.skip && '--skip carried_in_the_kernel --skip handover --skip installing_a_tunnel' }}
+      - run: cargo test --locked --features ebpf --test ebpf_linux -- --ignored ${{ steps.vrf.outputs.skip && '--skip carried_in_the_kernel --skip handover --skip first_short_cut --skip another_port' }}
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: sudo
       # What the fast path hears of the links, in a network namespace.

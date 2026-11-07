@@ -52,7 +52,7 @@
 //! | Read and write extension headers | [`ExtensionHeader`], [`ExtensionHeaderType`] |
 //! | The headers of a handover | [`ExtensionHeader::PdcpPduNumber`], [`Packet::end_marker`] |
 //! | Give a tunnel a TUN, on Linux | [`tun::TunConfig`], [`tun::Routing`], [`Endpoint::attach_tun`] |
-//! | Carry the tunnel in the kernel, on Linux | [`ebpf::FastPath`], [`Endpoint::set_fast_path`] |
+//! | Carry the tunnel in the kernel, on Linux | [`ebpf::FastPath`], [`ebpf::FastPath::shortcut`] |
 //!
 // Without its feature an item of the tasks is plain text: the links are checked in the
 // build of every feature on Linux, which docs.rs makes.
