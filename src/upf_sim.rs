@@ -603,3 +603,20 @@ async fn forward_tun_downlink(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A UPF whose sessions stopped is not running, before its task ends too.
+    #[tokio::test]
+    async fn a_stopped_upf_is_not_running_before_its_task_ends() {
+        let (upf, _) = UpfSimulator::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        assert!(upf.is_running());
+        upf.shared.sessions.stop();
+        assert!(!upf.shared.worker.is_finished());
+        assert!(!upf.is_running());
+    }
+}

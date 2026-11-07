@@ -669,6 +669,22 @@ mod tests {
         assert_eq!(indication.information_elements().unwrap(), elements);
     }
 
+    /// A message has 16 extension headers at most: they encode and decode, and a 17th is
+    /// refused.
+    #[test]
+    fn a_message_has_sixteen_extension_headers_at_most() {
+        let mut packet = Packet::g_pdu(1, vec![0x45]);
+        packet.extension_headers = vec![ExtensionHeader::UdpPort(2152); MAX_EXTENSION_HEADERS];
+        let bytes = packet.encode().unwrap();
+        assert_eq!(packet.encoded_len(), Ok(bytes.len()));
+        assert_eq!(Packet::decode(&bytes).unwrap(), packet);
+        packet
+            .extension_headers
+            .push(ExtensionHeader::UdpPort(2152));
+        assert_eq!(packet.encode(), Err(TOO_MANY));
+        assert_eq!(packet.encoded_len(), Err(TOO_MANY));
+    }
+
     /// An extension header whose length octet says that it has none.
     const NO_OCTETS: Error = Error::InvalidLength {
         what: Part::ExtensionHeader,
