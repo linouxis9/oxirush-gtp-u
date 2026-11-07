@@ -115,7 +115,7 @@ fn endpoint(criterion: &mut Criterion) {
             .await
             .expect("the endpoint binds");
         let remote = RemoteTunnel::new(upf.local_addr().unwrap(), 0x1001);
-        let teid = gnb.install(1, 5, remote, QFI).expect("the tunnel");
+        let teid = gnb.install(1, 5, remote, Some(QFI)).expect("the tunnel");
         upf.set_session(Session::new(0x1001, teid, gnb.local_addr().unwrap(), QFI))
             .unwrap();
         (gnb, received, upf, observed)
@@ -175,7 +175,9 @@ fn tunnels(criterion: &mut Criterion) {
         let mut local_teid = 0;
         for ran_id in 0..tunnels {
             let remote = RemoteTunnel::new(upf, 0x1000_0000 + ran_id);
-            local_teid = gnb.install(ran_id, 5, remote, QFI).expect("the tunnel");
+            local_teid = gnb
+                .install(ran_id, 5, remote, Some(QFI))
+                .expect("the tunnel");
         }
         let to = gnb.local_addr().unwrap();
         let indication = Packet::error_indication(0x0bad_f00d, upf.ip())
@@ -199,7 +201,8 @@ fn tunnels(criterion: &mut Criterion) {
         group.bench_function(BenchmarkId::new("install-remove-ran", tunnels), |bencher| {
             let remote = RemoteTunnel::new(upf, 1);
             bencher.iter(|| {
-                gnb.install(u32::MAX, 5, remote, QFI).expect("the tunnel");
+                gnb.install(u32::MAX, 5, remote, Some(QFI))
+                    .expect("the tunnel");
                 gnb.remove_ran(black_box(u32::MAX))
             })
         });

@@ -21,7 +21,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (upf, _observed) = UpfSimulator::bind("127.0.0.8:2152".parse()?).await?;
     let (gnb, _received) = Endpoint::bind("127.0.0.1:2152".parse()?).await?;
-    let teid = gnb.install(1, 5, RemoteTunnel::new(upf.local_addr()?, 0x1001), 9)?;
+    let teid = gnb.install(1, 5, RemoteTunnel::new(upf.local_addr()?, 0x1001), Some(9))?;
     upf.set_session(Session::new(0x1001, teid, gnb.local_addr()?, 9))?;
 
     // The tunnel gets a TUN with the UE's address, and a rule that routes

@@ -1,12 +1,11 @@
 //! The paths of an endpoint: its Echo Requests and their responses
 //! (TS 29.281 §7.2, §11), the state of the paths it supervises (TS 23.007
-//! §20.3.1), and what its peers said of the extension headers they support
+//! §20.3.1), and its peers' Supported Extension Headers Notifications
 //! (§7.2.3).
 
 use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -23,13 +22,6 @@ use crate::{ExtensionHeaderType, InformationElement, Packet};
 ///
 /// [`Endpoint::path_events`]: super::Endpoint::path_events
 const EVENTS: usize = 64;
-
-/// The Echo Requests that `send_to` sent and whose responses are awaited,
-/// beside those of `echo` and of the supervised paths.
-const SENT_REQUESTS: usize = 1024;
-
-/// The peers whose Supported Extension Headers Notification is kept.
-const NOTIFYING_PEERS: usize = 256;
 
 /// The timers with which an endpoint sends Echo Requests (TS 29.281 §11,
 /// §12) and supervises a path (§7.2.1, TS 23.007 §20.3.1).
@@ -116,9 +108,9 @@ pub struct PathState {
 #[non_exhaustive]
 pub enum PathEvent {
     /// The Echo Response to an Echo Request of the endpoint: one of
-    /// [`echo`](super::Endpoint::echo), of a supervised path, or one that
-    /// [`send_to`](super::Endpoint::send_to) sent. A response that answers
-    /// none of them is a duplicate, which TS 29.281 §11 discards.
+    /// [`echo`](super::Endpoint::echo) or of a supervised path. A response
+    /// that answers none of them is a duplicate, which TS 29.281 §11
+    /// discards.
     EchoResponse {
         /// The peer, IPv4 rather than IPv4-mapped.
         from: SocketAddr,
@@ -132,9 +124,8 @@ pub enum PathEvent {
     },
     /// A Supported Extension Headers Notification (TS 29.281 §7.2.3): the
     /// peer could not interpret an extension header that it had to, and
-    /// lists those it supports. [`send_to`](super::Endpoint::send_to) then
-    /// refuses to send it a message with another one that it must
-    /// understand.
+    /// lists those it supports. §7.2.3 asks not to send it such a header
+    /// again, which is the program's to do.
     SupportedExtensionHeaders {
         /// The peer, IPv4 rather than IPv4-mapped.
         from: SocketAddr,
@@ -159,9 +150,6 @@ pub enum PathEvent {
 pub(super) struct Paths {
     events: broadcast::Sender<PathEvent>,
     state: Mutex<State>,
-    /// Whether a peer's notification is kept: `send_to` looks at them
-    /// only then.
-    notified: AtomicBool,
 }
 
 #[derive(Default)]
@@ -174,9 +162,6 @@ struct State {
     /// which is unique among them (TS 29.281 §11).
     outstanding: HashMap<u16, Outstanding>,
     supervised: HashMap<SocketAddr, Supervised>,
-    /// The types of the last Supported Extension Headers Notification of
-    /// each peer that sent one.
-    supported: HashMap<IpAddr, Vec<ExtensionHeaderType>>,
 }
 
 struct Outstanding {
@@ -184,9 +169,8 @@ struct Outstanding {
     peer: IpAddr,
     /// When the request was last sent.
     sent: Instant,
-    /// The call that waits for the response, if one does: `echo` or a
-    /// supervised path. One that `send_to` sent has none.
-    waiter: Option<oneshot::Sender<Duration>>,
+    /// The call that waits for the response: `echo` or a supervised path.
+    waiter: oneshot::Sender<Duration>,
 }
 
 struct Supervised {
@@ -199,7 +183,6 @@ impl Paths {
         Self {
             events: broadcast::channel(EVENTS).0,
             state: Mutex::default(),
-            notified: AtomicBool::new(false),
         }
     }
 
@@ -271,7 +254,7 @@ impl Paths {
                 entry.insert(Outstanding {
                     peer,
                     sent: Instant::now(),
-                    waiter: Some(sender),
+                    waiter: sender,
                 });
                 return Ok((sequence, receiver));
             }
@@ -291,28 +274,6 @@ impl Paths {
 
     fn unregister(&self, sequence: u16) {
         lock(&self.state).outstanding.remove(&sequence);
-    }
-
-    /// `send_to` sends an Echo Request with `sequence` to `peer`: its
-    /// response is awaited, unless a request of the endpoint has that
-    /// number. Those that waited longer than N3-REQUESTS times
-    /// T3-RESPONSE are no longer awaited.
-    pub(super) fn sent_request(&self, peer: IpAddr, sequence: u16) {
-        let mut state = lock(&self.state);
-        let unanswered = state.timers.t3_response * state.timers.n3_requests;
-        if state.outstanding.len() >= SENT_REQUESTS {
-            let now = Instant::now();
-            state
-                .outstanding
-                .retain(|_, request| request.waiter.is_some() || now - request.sent < unanswered);
-        }
-        if state.outstanding.len() < SENT_REQUESTS {
-            state.outstanding.entry(sequence).or_insert(Outstanding {
-                peer,
-                sent: Instant::now(),
-                waiter: None,
-            });
-        }
     }
 
     /// T3-RESPONSE expired for an Echo Request to `peer`: the counter of
@@ -349,9 +310,7 @@ impl Paths {
             return false;
         };
         let round_trip = request.sent.elapsed();
-        if let Some(waiter) = request.waiter {
-            let _ = waiter.send(round_trip);
-        }
+        let _ = request.waiter.send(round_trip);
         // The path counter is reset each time that an Echo Response comes on
         // the path.
         for (path, supervised) in &mut state.supervised {
@@ -388,63 +347,10 @@ impl Paths {
         let Some(types) = types else {
             return false;
         };
-        let peer = from.ip().to_canonical();
-        {
-            let mut state = lock(&self.state);
-            if state.supported.len() >= NOTIFYING_PEERS && !state.supported.contains_key(&peer) {
-                // Anyone can send one with the address of another: the
-                // table keeps its size.
-                if let Some(other) = state.supported.keys().next().copied() {
-                    state.supported.remove(&other);
-                }
-            }
-            state.supported.insert(peer, types.clone());
-            self.notified.store(true, Ordering::Relaxed);
-        }
         let _ = self
             .events
             .send(PathEvent::SupportedExtensionHeaders { from, types });
         true
-    }
-
-    pub(super) fn supported_extension_headers(
-        &self,
-        peer: IpAddr,
-    ) -> Option<Vec<ExtensionHeaderType>> {
-        lock(&self.state)
-            .supported
-            .get(&peer.to_canonical())
-            .cloned()
-    }
-
-    pub(super) fn forget_supported_extension_headers(&self, peer: IpAddr) {
-        let mut state = lock(&self.state);
-        state.supported.remove(&peer.to_canonical());
-        self.notified
-            .store(!state.supported.is_empty(), Ordering::Relaxed);
-    }
-
-    /// The first extension header of `packet` that `to` must understand and
-    /// said, in its last notification, that it does not support.
-    pub(super) fn refused<P: AsRef<[u8]>>(
-        &self,
-        packet: &Packet<P>,
-        to: IpAddr,
-    ) -> Option<ExtensionHeaderType> {
-        if !self.notified.load(Ordering::Relaxed) {
-            return None;
-        }
-        let mut required = packet
-            .extension_headers
-            .iter()
-            .filter(|header| header.comprehension_required())
-            .peekable();
-        required.peek()?;
-        let state = lock(&self.state);
-        let supported = state.supported.get(&to.to_canonical())?;
-        required
-            .map(|header| header.kind())
-            .find(|kind| !supported.contains(kind))
     }
 }
 
@@ -506,66 +412,6 @@ pub(super) async fn supervise(socket: Arc<DatagramSocket>, paths: Arc<Paths>, pe
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::Ipv4Addr;
-
-    /// The Echo Requests that are awaited are 1024 at most: one more, while all are
-    /// recent, is not awaited, and none of the others is forgotten for it.
-    #[test]
-    fn at_most_1024_echo_requests_are_awaited() {
-        let paths = Paths::new();
-        let peer: IpAddr = "192.0.2.1".parse().unwrap();
-        for sequence in 0..=1024 {
-            paths.sent_request(peer, sequence);
-        }
-        let state = lock(&paths.state);
-        assert_eq!(state.outstanding.len(), 1024);
-        assert!(!state.outstanding.contains_key(&1024));
-    }
-
-    /// The table of the peers that notified their extension headers keeps its size:
-    /// a new peer takes the place of another.
-    #[test]
-    fn the_notifying_peers_are_256_at_most() {
-        let paths = Paths::new();
-        let notification =
-            Packet::supported_extension_headers_notification(&[ExtensionHeaderType(0x85)])
-                .encode()
-                .unwrap();
-        let packet = Packet::decode_borrowed(&notification).unwrap();
-        for peer in 0..=256u32 {
-            let from = SocketAddr::new(Ipv4Addr::from(0x0a00_0000 | peer).into(), 2152);
-            assert!(paths.notification(&packet, from));
-        }
-        assert_eq!(lock(&paths.state).supported.len(), 256);
-    }
-
-    /// Forgetting what a peer supports leaves what the others said, which
-    /// still refuses what they do not support.
-    #[test]
-    fn a_forgotten_peer_leaves_what_the_others_said() {
-        let paths = Paths::new();
-        let notification =
-            Packet::supported_extension_headers_notification(&[ExtensionHeaderType(0x85)])
-                .encode()
-                .unwrap();
-        let packet = Packet::decode_borrowed(&notification).unwrap();
-        let (one, other) = ("192.0.2.1:2152", "192.0.2.2:2152");
-        for from in [one, other] {
-            assert!(paths.notification(&packet, from.parse().unwrap()));
-        }
-        let [one, other]: [SocketAddr; 2] = [one.parse().unwrap(), other.parse().unwrap()];
-        paths.forget_supported_extension_headers(one.ip());
-        let mut g_pdu = Packet::g_pdu(7, vec![0x45]);
-        g_pdu.extension_headers.push(crate::ExtensionHeader::Other {
-            kind: ExtensionHeaderType(0xc5),
-            content: vec![0, 0],
-        });
-        assert_eq!(
-            paths.refused(&g_pdu, other.ip()),
-            Some(ExtensionHeaderType(0xc5))
-        );
-        assert_eq!(paths.refused(&g_pdu, one.ip()), None);
-    }
 
     /// The round trip of an Echo Response counts from the last time that
     /// its request was sent, and not from the first.
@@ -583,52 +429,6 @@ mod tests {
         let response = Packet::decode_borrowed(&response).unwrap();
         assert!(paths.echo_response(&response, peer));
         assert_eq!(answer.await.unwrap(), Duration::from_millis(30));
-    }
-
-    /// Once 1024 Echo Requests are awaited, those that went unanswered for
-    /// N3-REQUESTS times T3-RESPONSE make room for a new one.
-    #[tokio::test(start_paused = true)]
-    async fn the_requests_that_waited_their_time_make_room_for_a_new_one() {
-        let paths = Paths::new();
-        let timers = PathTimers {
-            t3_response: Duration::from_secs(1),
-            n3_requests: 2,
-            ..PathTimers::default()
-        };
-        paths.set_timers(timers).unwrap();
-        let peer: IpAddr = "192.0.2.1".parse().unwrap();
-        for sequence in 0..1024 {
-            paths.sent_request(peer, sequence);
-        }
-        // Exactly the time that they are awaited
-        tokio::time::advance(Duration::from_secs(2)).await;
-        paths.sent_request(peer, 1024);
-        let state = lock(&paths.state);
-        assert_eq!(state.outstanding.len(), 1);
-        assert!(state.outstanding.contains_key(&1024));
-    }
-
-    /// Requests that have not yet waited N3-REQUESTS times T3-RESPONSE keep
-    /// their place: a new one finds no room among 1024 of them.
-    #[tokio::test(start_paused = true)]
-    async fn the_requests_that_have_not_waited_their_time_keep_their_place() {
-        let paths = Paths::new();
-        let timers = PathTimers {
-            t3_response: Duration::from_secs(1),
-            n3_requests: 2,
-            ..PathTimers::default()
-        };
-        paths.set_timers(timers).unwrap();
-        let peer: IpAddr = "192.0.2.1".parse().unwrap();
-        for sequence in 0..1024 {
-            paths.sent_request(peer, sequence);
-        }
-        // Longer than T3-RESPONSE, shorter than twice it
-        tokio::time::advance(Duration::from_millis(1500)).await;
-        paths.sent_request(peer, 1024);
-        let state = lock(&paths.state);
-        assert_eq!(state.outstanding.len(), 1024);
-        assert!(!state.outstanding.contains_key(&1024));
     }
 
     /// A request whose exchange has ended, here unanswered, is no longer

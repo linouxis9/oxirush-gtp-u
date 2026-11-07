@@ -2,7 +2,7 @@
 
 use std::fmt;
 use std::io;
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -19,7 +19,7 @@ use crate::limit::limited;
 #[cfg(all(target_os = "linux", feature = "tun"))]
 use crate::tun::{TunConfig, TunPort};
 use crate::types::Teid;
-use crate::{ExtensionHeaderType, MessageType, Packet};
+use crate::{MessageType, Packet};
 
 mod paths;
 use paths::Paths;
@@ -51,7 +51,7 @@ const QUEUE: usize = 256;
 /// // The gNB sends the session's uplink there, and receives its downlink on
 /// // the TEID that it assigns
 /// let (gnb, _received) = Endpoint::bind("127.0.0.1:0".parse()?).await?;
-/// let teid = gnb.install(1, 5, upf, 9)?;
+/// let teid = gnb.install(1, 5, upf, Some(9))?;
 /// assert_eq!(gnb.local_teid(1, 5), Some(teid));
 /// # Ok(())
 /// # }
@@ -99,8 +99,8 @@ impl fmt::Debug for RemoteTunnel {
 /// // Two endpoints with a tunnel between them
 /// let (gnb, _) = Endpoint::bind("127.0.0.1:0".parse()?).await?;
 /// let (peer, mut received) = Endpoint::bind("127.0.0.1:0".parse()?).await?;
-/// let peer_teid = peer.install(1, 5, RemoteTunnel::new(gnb.local_addr()?, 0), 9)?;
-/// gnb.install(1, 5, RemoteTunnel::new(peer.local_addr()?, peer_teid), 9)?;
+/// let peer_teid = peer.install(1, 5, RemoteTunnel::new(gnb.local_addr()?, 0), Some(9))?;
+/// gnb.install(1, 5, RemoteTunnel::new(peer.local_addr()?, peer_teid), Some(9))?;
 ///
 /// // A G-PDU comes with the tunnel that it was sent on
 /// gnb.send(1, 5, b"an IP packet".as_slice()).await?;
@@ -155,9 +155,9 @@ pub struct ReceivedPacket {
 /// let (gnb, _) = Endpoint::bind("127.0.0.1:0".parse().unwrap()).await?;
 /// let (peer, mut received) = Endpoint::bind("127.0.0.1:0".parse().unwrap()).await?;
 /// // Each side assigns the TEID it receives on; the other sends to it.
-/// let peer_teid = peer.install(1, 5, RemoteTunnel::new(gnb.local_addr()?, 0), 9)?;
-/// let gnb_teid = gnb.install(1, 5, RemoteTunnel::new(peer.local_addr()?, peer_teid), 9)?;
-/// peer.install(1, 5, RemoteTunnel::new(gnb.local_addr()?, gnb_teid), 9)?;
+/// let peer_teid = peer.install(1, 5, RemoteTunnel::new(gnb.local_addr()?, 0), Some(9))?;
+/// let gnb_teid = gnb.install(1, 5, RemoteTunnel::new(peer.local_addr()?, peer_teid), Some(9))?;
+/// peer.install(1, 5, RemoteTunnel::new(gnb.local_addr()?, gnb_teid), Some(9))?;
 ///
 /// gnb.send(1, 5, b"an IP packet".to_vec()).await?;
 /// let packet = received.recv().await.unwrap();
@@ -176,12 +176,11 @@ pub struct ReceivedPacket {
 /// than its F-TEID's. An End Marker or a Tunnel Status on a TEID without a
 /// tunnel is ignored (TS 29.281 §7.3.2.1, §7.3.3).
 ///
-/// - [`install`](Self::install) sets up the tunnel of a RAN UE and PDU session
-///   toward a remote TEID and returns the local TEID to give the peer; on an
-///   existing tunnel it updates the remote end and the QFI. Local TEIDs are
-///   drawn at random: one cannot be told from another. A QFI above 63 is
-///   `InvalidInput`. [`install_s1u`](Self::install_s1u) does so for an eNB's
-///   E-RAB, whose G-PDUs carry no PDU Session Container, and cannot fail.
+/// - [`install`](Self::install) sets up the tunnel of a RAN UE and PDU session,
+///   or of an eNB UE and E-RAB without a QFI, toward a remote TEID and returns
+///   the local TEID to give the peer; on an existing tunnel it updates the
+///   remote end and the QFI. Local TEIDs are drawn at random: one cannot be
+///   told from another. A QFI above 63 is `InvalidInput`.
 ///   [`install_with_teid`](Self::install_with_teid) takes a local TEID that
 ///   something else assigned.
 /// - [`send`](Self::send) sends an IP packet in a tunnel.
@@ -215,15 +214,8 @@ pub struct ReceivedPacket {
 ///   since its last response (TS 29.281 §9.2, TS 23.007 §20.3.1).
 /// - [`path_events`](Self::path_events) gives the Echo Responses, the
 ///   peers' Supported Extension Headers Notifications and the changes of the
-///   supervised paths. An Echo Response that answers no request of the
-///   endpoint is a duplicate, which §11 discards.
-/// - After a peer's notification, [`send_to`](Self::send_to) refuses to send
-///   it a message with an extension header that it must understand and does
-///   not support (§7.2.3), until
-///   [`forget_supported_extension_headers`](Self::forget_supported_extension_headers).
-///   The tunnels' own G-PDUs keep their PDU Session Container, which N3
-///   needs: a notification, which anyone can send with the peer's address,
-///   does not stop a tunnel.
+///   supervised paths. An Echo Response that answers no request of `echo` or
+///   of a supervised path is a duplicate, which §11 discards.
 ///
 /// A peer needs no tunnel to cause these replies, and GTP-U has no
 /// authentication: whoever can send from an address can have them sent to
@@ -393,48 +385,16 @@ impl Endpoint {
         result
     }
 
-    /// Send a custom message from this endpoint's bound socket. This preserves
-    /// its sequence number and extension headers and does not require a route.
-    ///
-    /// The response to an Echo Request with a sequence number comes on
-    /// [`path_events`](Self::path_events), unless one of the endpoint's
-    /// Echo Requests has that number.
+    /// Send any message from this endpoint's socket, with its sequence number
+    /// and extension headers, without a tunnel. The response to an Echo
+    /// Request that it sends is not awaited: [`echo`](Self::echo) sends one
+    /// and waits for its response.
     ///
     /// # Errors
     ///
-    /// [`Unsupported`](io::ErrorKind::Unsupported) for a message with an
-    /// extension header that `to` must understand and that, in its last
-    /// Supported Extension Headers Notification, it said it does not
-    /// support: TS 29.281 §7.2.3 asks to avoid such repeated attempts.
-    /// [`forget_supported_extension_headers`](Self::forget_supported_extension_headers)
-    /// tries the peer again. [`BrokenPipe`](io::ErrorKind::BrokenPipe) once
-    /// the endpoint is shut down.
+    /// [`BrokenPipe`](io::ErrorKind::BrokenPipe) once the endpoint is shut
+    /// down.
     pub async fn send_to<P: AsRef<[u8]>>(
-        &self,
-        packet: &Packet<P>,
-        to: SocketAddr,
-    ) -> io::Result<()> {
-        if let Some(kind) = self.shared.paths.refused(packet, to.ip()) {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                format!(
-                    "{} said that it does not support extension header {kind}, \
-                     which it must understand",
-                    to.ip().to_canonical()
-                ),
-            ));
-        }
-        if packet.message_type == MessageType::ECHO_REQUEST
-            && let Some(sequence) = packet.sequence
-        {
-            self.shared
-                .paths
-                .sent_request(to.ip().to_canonical(), sequence);
-        }
-        self.send_packet(packet, to).await
-    }
-
-    async fn send_packet<P: AsRef<[u8]>>(
         &self,
         packet: &Packet<P>,
         to: SocketAddr,
@@ -575,23 +535,10 @@ impl Endpoint {
         self.shared.paths.events()
     }
 
-    /// The extension header types that `peer` said it supports, in the
-    /// last Supported Extension Headers Notification that it sent. The
-    /// endpoint keeps those of 256 peers at most.
-    pub fn supported_extension_headers(&self, peer: IpAddr) -> Option<Vec<ExtensionHeaderType>> {
-        self.shared.paths.supported_extension_headers(peer)
-    }
-
-    /// Forget what `peer` said of the extension headers it supports:
-    /// [`send_to`](Self::send_to) sends it every one again, as TS 29.281
-    /// §7.2.3 allows to find out whether it was upgraded.
-    pub fn forget_supported_extension_headers(&self, peer: IpAddr) {
-        self.shared.paths.forget_supported_extension_headers(peer);
-    }
-
-    /// Provision an explicitly assigned, nonzero local TEID. `qfi=None` selects
-    /// S1-U framing. A TEID owned by another session is rejected; validation
-    /// errors leave the existing route unchanged. A local TEID of 0 and a QFI
+    /// Set up a tunnel as [`install`](Self::install) does, with a nonzero
+    /// local TEID that something else assigned. A TEID owned by another
+    /// session is rejected; validation errors leave the existing route
+    /// unchanged. A local TEID of 0 and a QFI
     /// above 63 are [`InvalidInput`](io::ErrorKind::InvalidInput), the
     /// second as for [`install`](Self::install).
     pub fn install_with_teid(
@@ -676,7 +623,8 @@ impl Endpoint {
     /// Set up the tunnel of RAN UE `ran_id` and PDU session `session_id`
     /// toward `remote`, with uplink QoS flow `qfi` (0..=63), and return its
     /// local TEID. For an existing tunnel this updates the remote end and
-    /// QFI and keeps the TEID.
+    /// QFI and keeps the TEID. The S1-U tunnel of an eNB UE and E-RAB has no
+    /// QFI: its uplink G-PDUs carry no PDU Session Container.
     ///
     /// ```
     /// # #[tokio::main(flavor = "current_thread")]
@@ -688,13 +636,13 @@ impl Endpoint {
     ///
     /// // RAN UE 1, PDU session 5: the uplink goes to TEID 0x1001 of the UPF, in QoS
     /// // flow 9, and the downlink comes on the TEID that the endpoint chose
-    /// let teid = gnb.install(1, 5, RemoteTunnel::new(upf, 0x1001), 9)?;
+    /// let teid = gnb.install(1, 5, RemoteTunnel::new(upf, 0x1001), Some(9))?;
     ///
     /// // The UPF moves the session to another TEID: the local one stays
-    /// assert_eq!(gnb.install(1, 5, RemoteTunnel::new(upf, 0x2002), 9)?, teid);
+    /// assert_eq!(gnb.install(1, 5, RemoteTunnel::new(upf, 0x2002), Some(9))?, teid);
     ///
     /// // A QFI has six bits
-    /// let refused = gnb.install(1, 5, RemoteTunnel::new(upf, 0x2002), 64).unwrap_err();
+    /// let refused = gnb.install(1, 5, RemoteTunnel::new(upf, 0x2002), Some(64)).unwrap_err();
     /// assert_eq!(refused.kind(), std::io::ErrorKind::InvalidInput);
     /// # Ok(())
     /// # }
@@ -711,30 +659,15 @@ impl Endpoint {
         ran_id: u32,
         session_id: u8,
         remote: RemoteTunnel,
-        qfi: u8,
-    ) -> io::Result<u32> {
-        crate::path::qfi(qfi)?;
-        Ok(self.install_route(ran_id, session_id, remote, Some(qfi)))
-    }
-
-    /// Set up the S1-U tunnel of eNB UE `ran_id` and E-RAB `erab_id`
-    /// toward `remote`, and return its local TEID. Its uplink G-PDUs carry
-    /// no PDU Session Container. For an existing tunnel this updates the
-    /// remote end and keeps the TEID.
-    pub fn install_s1u(&self, ran_id: u32, erab_id: u8, remote: RemoteTunnel) -> u32 {
-        self.install_route(ran_id, erab_id, remote, None)
-    }
-
-    fn install_route(
-        &self,
-        ran_id: u32,
-        session_id: u8,
-        remote: RemoteTunnel,
         qfi: Option<u8>,
-    ) -> u32 {
-        self.shared
+    ) -> io::Result<u32> {
+        if let Some(qfi) = qfi {
+            crate::path::qfi(qfi)?;
+        }
+        Ok(self
+            .shared
             .routes
-            .install((ran_id, session_id), remote, qfi, self.shared.shortcuts())
+            .install((ran_id, session_id), remote, qfi, self.shared.shortcuts()))
     }
 
     /// Give a tunnel a Linux TUN, made as `config` says: what Linux routes
@@ -840,7 +773,7 @@ impl Endpoint {
     ///
     /// let (upf, mut observed) = UpfSimulator::bind("127.0.0.1:0".parse().unwrap()).await?;
     /// let (gnb, _received) = Endpoint::bind("127.0.0.1:0".parse().unwrap()).await?;
-    /// let teid = gnb.install(1, 5, RemoteTunnel::new(upf.local_addr()?, 0x1001), 9)?;
+    /// let teid = gnb.install(1, 5, RemoteTunnel::new(upf.local_addr()?, 0x1001), Some(9))?;
     /// upf.set_session(Session::new(0x1001, teid, gnb.local_addr()?, 9))?;
     ///
     /// // An IP packet of the UE in the tunnel of RAN UE 1, PDU session 5
@@ -867,7 +800,7 @@ impl Endpoint {
             .routes
             .route(key)
             .ok_or_else(|| routes::no_tunnel(key))?;
-        self.send_packet(&route.uplink(payload), route.remote.address)
+        self.send_to(&route.uplink(payload), route.remote.address)
             .await
     }
 }

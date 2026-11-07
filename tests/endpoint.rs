@@ -197,7 +197,7 @@ async fn setup() -> (Endpoint, Receiver<ReceivedPacket>, UdpSocket, u32) {
         address: peer.local_addr().unwrap(),
         teid: 44,
     };
-    let local_teid = endpoint.install(7, 1, remote, 9).unwrap();
+    let local_teid = endpoint.install(7, 1, remote, Some(9)).unwrap();
     (endpoint, received, peer, local_teid)
 }
 
@@ -654,7 +654,7 @@ async fn s1u_tunnels_send_plain_g_pdus() {
         address: peer.local_addr().unwrap(),
         teid: 60,
     };
-    let local_teid = endpoint.install_s1u(9, 5, remote);
+    let local_teid = endpoint.install(9, 5, remote, None).unwrap();
     assert_eq!(endpoint.local_teid(9, 5), Some(local_teid));
     endpoint.send(9, 5, vec![0x45]).await.unwrap();
     let uplink = reply(&peer).await;
@@ -676,13 +676,13 @@ async fn install_and_remove_tunnels() {
         teid: 50,
     };
     // Reinstalling keeps the TEID and moves the uplink.
-    assert_eq!(endpoint.install(7, 1, moved, 5).unwrap(), local_teid);
+    assert_eq!(endpoint.install(7, 1, moved, Some(5)).unwrap(), local_teid);
     endpoint.send(7, 1, vec![0x45]).await.unwrap();
     let uplink = reply(&other).await;
     assert_eq!((uplink.teid, uplink.qfi()), (50, Some(5)));
 
-    let second = endpoint.install(7, 2, moved, 5).unwrap();
-    let third = endpoint.install(8, 1, moved, 5).unwrap();
+    let second = endpoint.install(7, 2, moved, Some(5)).unwrap();
+    let third = endpoint.install(8, 1, moved, Some(5)).unwrap();
     assert_eq!(
         [local_teid, second, third].len(),
         std::collections::HashSet::from([local_teid, second, third]).len()
@@ -722,7 +722,9 @@ async fn a_qfi_above_63_is_refused_and_leaves_the_tunnel_as_it_was() {
         // caller does: the error of the codec, which a G-PDU with that QFI
         // gets.
         for error in [
-            endpoint.install(ran_id, session_id, other, 64).unwrap_err(),
+            endpoint
+                .install(ran_id, session_id, other, Some(64))
+                .unwrap_err(),
             endpoint
                 .install_with_teid(ran_id, session_id, 900, other, Some(64))
                 .unwrap_err(),
@@ -741,7 +743,7 @@ async fn a_qfi_above_63_is_refused_and_leaves_the_tunnel_as_it_was() {
     let uplink = reply(&peer).await;
     assert_eq!((uplink.teid, uplink.qfi()), (44, Some(9)));
     // 63 is the highest QFI.
-    endpoint.install(8, 1, other, 63).unwrap();
+    endpoint.install(8, 1, other, Some(63)).unwrap();
 }
 
 /// Both are refused before anything is made, so without any right to.
@@ -770,7 +772,7 @@ async fn works_over_ipv6() {
         address: peer.local_addr().unwrap(),
         teid: 45,
     };
-    let local_teid = endpoint.install(3, 2, remote, 1).unwrap();
+    let local_teid = endpoint.install(3, 2, remote, Some(1)).unwrap();
     endpoint.send(3, 2, vec![0x60, 0]).await.unwrap();
     assert_eq!(reply(&peer).await.teid, 45);
     send(
@@ -795,7 +797,7 @@ async fn ipv4_mapped_socket_serves_ipv4_peers() {
         address: peer.local_addr().unwrap(),
         teid: 46,
     };
-    let local_teid = endpoint.install(4, 1, remote, 2).unwrap();
+    let local_teid = endpoint.install(4, 1, remote, Some(2)).unwrap();
     endpoint.send(4, 1, vec![0x45]).await.unwrap();
     assert_eq!(reply(&peer).await.teid, 46);
     let port = endpoint.local_addr().unwrap().port();

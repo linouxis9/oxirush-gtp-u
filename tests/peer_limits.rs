@@ -174,7 +174,7 @@ fn a_peer_without_a_tunnel_gets_replies_within_a_rate_and_few_lines() {
                 1,
                 5,
                 RemoteTunnel::new("127.0.0.61:2152".parse().unwrap(), 9),
-                9,
+                Some(9),
             )
             .unwrap();
         // The replies go to port 2152 of the sender.
@@ -327,7 +327,7 @@ async fn a_flood_from_one_address_leaves_their_error_indications_to_the_others()
     let mut removed = Vec::new();
     for (ran, peer) in (1..).zip(&peers) {
         let remote = RemoteTunnel::new(peer.local_addr().unwrap(), 9);
-        removed.push(endpoint.install(ran, 5, remote, 9).unwrap());
+        removed.push(endpoint.install(ran, 5, remote, Some(9)).unwrap());
         endpoint.remove(ran, 5);
     }
     let stats = || endpoint.stats();

@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 
 use oxirush_gtp_u::upf_sim::UpfSimulator;
 use oxirush_gtp_u::{
-    Endpoint, ExtensionHeader, ExtensionHeaderType, InformationElement, InformationElementType,
-    MessageType, Packet, PathEvent, PathTimers, RemoteTunnel,
+    Endpoint, ExtensionHeaderType, InformationElement, InformationElementType, MessageType, Packet,
+    PathEvent, PathTimers, RemoteTunnel,
 };
 use tokio::net::UdpSocket;
 use tokio::sync::broadcast;
@@ -176,27 +176,6 @@ async fn a_supervised_path_goes_down_and_comes_back() {
     assert_eq!(upf.requests.lock().unwrap().len(), sent);
 }
 
-/// The reviewer's first attempt: an Echo Request through `send_to`.
-#[tokio::test]
-async fn the_response_to_an_echo_request_of_send_to_comes_on_the_path_events() {
-    let (gnb, _) = Endpoint::bind("127.0.0.1:0".parse().unwrap())
-        .await
-        .unwrap();
-    let (upf, _) = UpfSimulator::bind("127.0.0.1:0".parse().unwrap())
-        .await
-        .unwrap();
-    let mut events = gnb.path_events();
-    gnb.send_to(&Packet::echo_request(42), upf.local_addr().unwrap())
-        .await
-        .unwrap();
-    match event(&mut events).await {
-        PathEvent::EchoResponse { sequence, from, .. } => {
-            assert_eq!((sequence, from), (42, upf.local_addr().unwrap()));
-        }
-        other => panic!("{other:?}"),
-    }
-}
-
 /// A response that answers no request is a duplicate (TS 29.281 §11).
 #[tokio::test]
 async fn an_echo_response_without_its_request_is_discarded() {
@@ -228,17 +207,16 @@ async fn an_echo_response_without_its_request_is_discarded() {
     assert_eq!(gnb.stats().ignored_messages, 2);
 }
 
-/// A peer's notification is delivered, and `send_to` does not send it again
-/// an extension header that it must understand and does not support; the
-/// tunnels go on.
+/// A peer's notification is delivered, and the tunnels go on.
 #[tokio::test]
-async fn a_peers_notification_is_delivered_and_honoured() {
-    let (gnb, mut received) = Endpoint::bind("127.0.0.1:0".parse().unwrap())
+async fn a_peers_notification_is_delivered() {
+    let (gnb, _received) = Endpoint::bind("127.0.0.1:0".parse().unwrap())
         .await
         .unwrap();
     let upf = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let (to, address) = (gnb.local_addr().unwrap(), upf.local_addr().unwrap());
-    gnb.install(1, 5, RemoteTunnel::new(address, 7), 9).unwrap();
+    gnb.install(1, 5, RemoteTunnel::new(address, 7), Some(9))
+        .unwrap();
     let mut events = gnb.path_events();
     let notification =
         Packet::supported_extension_headers_notification(&[ExtensionHeaderType::UDP_PORT]);
@@ -252,42 +230,10 @@ async fn a_peers_notification_is_delivered_and_honoured() {
             types: vec![ExtensionHeaderType::UDP_PORT]
         }
     );
-    assert_eq!(
-        gnb.supported_extension_headers(address.ip()),
-        Some(vec![ExtensionHeaderType::UDP_PORT])
-    );
-
-    // A header that it must understand and does not support, and one that
-    // it does.
-    let mut unknown = Packet::g_pdu(7, vec![0x45]);
-    unknown.extension_headers.push(ExtensionHeader::Other {
-        kind: ExtensionHeaderType(0xc5),
-        content: vec![0, 0],
-    });
-    let error = gnb.send_to(&unknown, address).await.unwrap_err();
-    assert_eq!(error.kind(), io::ErrorKind::Unsupported);
-    assert_eq!(
-        error.to_string(),
-        "127.0.0.1 said that it does not support extension header 0xc5, which it must understand"
-    );
-    let uplink = Packet::uplink(7, 9, vec![0x45]);
-    assert!(gnb.send_to(&uplink, address).await.is_err());
-    let mut port = Packet::g_pdu(7, vec![0x45]);
-    port.extension_headers.push(ExtensionHeader::UdpPort(2152));
-    gnb.send_to(&port, address).await.unwrap();
-    // The tunnel's G-PDUs keep their container.
     gnb.send(1, 5, vec![0x45]).await.unwrap();
     let mut buffer = [0; 256];
-    for expected in [None, Some(9)] {
-        let size = timeout(WAIT, upf.recv(&mut buffer)).await.unwrap().unwrap();
-        assert_eq!(Packet::decode(&buffer[..size]).unwrap().qfi(), expected);
-    }
-
-    // Tried again.
-    gnb.forget_supported_extension_headers(address.ip());
-    assert_eq!(gnb.supported_extension_headers(address.ip()), None);
-    gnb.send_to(&uplink, address).await.unwrap();
-    assert!(received.try_recv().is_err());
+    let size = timeout(WAIT, upf.recv(&mut buffer)).await.unwrap().unwrap();
+    assert_eq!(Packet::decode(&buffer[..size]).unwrap().qfi(), Some(9));
 }
 
 /// A Tunnel Status on a tunnel's TEID goes to the receiver with the
@@ -299,7 +245,12 @@ async fn a_tunnel_status_is_delivered_with_its_tunnel() {
         .unwrap();
     let upf = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let teid = gnb
-        .install(1, 5, RemoteTunnel::new(upf.local_addr().unwrap(), 7), 9)
+        .install(
+            1,
+            5,
+            RemoteTunnel::new(upf.local_addr().unwrap(), 7),
+            Some(9),
+        )
         .unwrap();
     let status = |teid| {
         let information = InformationElement::Other {

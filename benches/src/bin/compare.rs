@@ -157,9 +157,10 @@ fn round_trip(iterations: u64, payload: &[u8]) -> Measured {
         let (gnb, mut received) = Endpoint::bind(address).await.unwrap();
         let (upf, mut uplinks) = Endpoint::bind(address).await.unwrap();
         let (gnb_address, upf_address) = (gnb.local_addr().unwrap(), upf.local_addr().unwrap());
-        let upf_teid = upf.install_s1u(1, 5, RemoteTunnel::new(gnb_address, 0));
-        let gnb_teid = gnb.install_s1u(1, 5, RemoteTunnel::new(upf_address, upf_teid));
-        upf.install_s1u(1, 5, RemoteTunnel::new(gnb_address, gnb_teid));
+        let s1u = |endpoint: &Endpoint, remote| endpoint.install(1, 5, remote, None).unwrap();
+        let upf_teid = s1u(&upf, RemoteTunnel::new(gnb_address, 0));
+        let gnb_teid = s1u(&gnb, RemoteTunnel::new(upf_address, upf_teid));
+        s1u(&upf, RemoteTunnel::new(gnb_address, gnb_teid));
         let reflector = tokio::spawn(async move {
             while let Some(uplink) = uplinks.recv().await {
                 upf.send(uplink.ran_id, uplink.session_id, uplink.packet.payload)

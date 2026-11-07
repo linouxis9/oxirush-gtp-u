@@ -82,7 +82,7 @@ async fn n3_packets_follow_the_target_after_a_path_switch() {
         address: upf.local_addr().unwrap(),
         teid: 0x1234_5678,
     };
-    let source_teid = source.install(1, 1, remote, 9).unwrap();
+    let source_teid = source.install(1, 1, remote, Some(9)).unwrap();
     upf.set_session(Session::new(
         remote.teid,
         source_teid,
@@ -102,7 +102,7 @@ async fn n3_packets_follow_the_target_after_a_path_switch() {
         Some(&PduSessionContainer::downlink(9))
     );
 
-    let target_teid = target.install(2, 1, remote, 9).unwrap();
+    let target_teid = target.install(2, 1, remote, Some(9)).unwrap();
     upf.switch_downlink(remote.teid, target.local_addr().unwrap(), target_teid)
         .await
         .unwrap();
@@ -447,7 +447,7 @@ async fn error_indication_from_the_upf_reaches_the_tunnel() {
         address: upf.local_addr().unwrap(),
         teid: 0x3030,
     };
-    let downlink_teid = gnb.install(4, 2, remote, 9).unwrap();
+    let downlink_teid = gnb.install(4, 2, remote, Some(9)).unwrap();
     upf.set_session(Session::new(
         remote.teid,
         downlink_teid,
@@ -480,7 +480,7 @@ async fn built_in_n6_reflects_icmp_echo() {
         address: upf.local_addr().unwrap(),
         teid: 0x1020,
     };
-    let downlink_teid = gnb.install(1, 1, remote, 9).unwrap();
+    let downlink_teid = gnb.install(1, 1, remote, Some(9)).unwrap();
     upf.set_session(Session::new(
         remote.teid,
         downlink_teid,
@@ -624,7 +624,7 @@ async fn a_program_that_answers_for_n6_turns_the_echo_service_off() {
             1,
             5,
             RemoteTunnel::new(upf.local_addr().unwrap(), 0x1001),
-            9,
+            Some(9),
         )
         .unwrap();
     upf.set_session(Session::new(0x1001, teid, gnb.local_addr().unwrap(), 9))

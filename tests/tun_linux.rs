@@ -620,7 +620,7 @@ async fn upf_tun_routes_the_kernel_s_reply_back_to_n3() {
         address: upf.local_addr().unwrap(),
         teid: 0x1001,
     };
-    let downlink_teid = gnb.install(1, 1, remote, 9).unwrap();
+    let downlink_teid = gnb.install(1, 1, remote, Some(9)).unwrap();
     upf.set_session(Session::new(
         remote.teid,
         downlink_teid,
@@ -684,7 +684,7 @@ async fn upf_routes_32_tun_sessions_without_crossing_teids() {
             address: upf.local_addr().unwrap(),
             teid: uplink_teid,
         };
-        let downlink_teid = gnb.install(u32::from(i), 1, remote, 9).unwrap();
+        let downlink_teid = gnb.install(u32::from(i), 1, remote, Some(9)).unwrap();
         upf.set_session(Session::new(
             uplink_teid,
             downlink_teid,
@@ -753,7 +753,7 @@ async fn an_endpoint_carries_a_tunnel_s_tun_and_closes_it_with_the_tunnel() {
     let error = gnb.attach_tun(1, 1, ue_tun("oxe1", 1)).unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::NotFound);
     assert!(!exists("oxe1"));
-    let teid = gnb.install(1, 1, remote, 9).unwrap();
+    let teid = gnb.install(1, 1, remote, Some(9)).unwrap();
     upf.set_session(Session::new(
         remote.teid,
         teid,
@@ -791,7 +791,7 @@ async fn an_endpoint_carries_a_tunnel_s_tun_and_closes_it_with_the_tunnel() {
 
     // The tunnel keeps its TUN when it is installed again, here with
     // another QFI, and its removal closes the TUN.
-    assert_eq!(gnb.install(1, 1, remote, 5).unwrap(), teid);
+    assert_eq!(gnb.install(1, 1, remote, Some(5)).unwrap(), teid);
     ping(&["-I", "198.19.1.1", "203.0.113.1"]).await;
     gnb.remove(1, 1);
     assert!(!exists("oxe1"));
@@ -809,7 +809,7 @@ async fn an_endpoint_s_tuns_close_with_a_ue_s_tunnels_shutdown_and_the_last_clon
     for (ran_id, session_id, name, host) in
         [(1, 1, "oxe1", 1), (1, 2, "oxe2", 2), (2, 1, "oxe3", 3)]
     {
-        gnb.install(ran_id, session_id, remote, 9).unwrap();
+        gnb.install(ran_id, session_id, remote, Some(9)).unwrap();
         gnb.attach_tun(ran_id, session_id, ue_tun(name, host))
             .unwrap();
     }
@@ -825,7 +825,7 @@ async fn an_endpoint_s_tuns_close_with_a_ue_s_tunnels_shutdown_and_the_last_clon
     let (gnb, _received) = Endpoint::bind("127.0.0.2:0".parse().unwrap())
         .await
         .unwrap();
-    gnb.install(1, 1, remote, 9).unwrap();
+    gnb.install(1, 1, remote, Some(9)).unwrap();
     gnb.attach_tun(1, 1, ue_tun("oxe4", 4)).unwrap();
     let clone = gnb.clone();
     drop(gnb);

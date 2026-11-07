@@ -90,7 +90,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // What the control plane negotiates: the UPF receives the session's
     // uplink on TEID 0x1001, the gNB its downlink on the TEID it assigns
     // to RAN UE 1, PDU session 5, whose QoS flow is 9
-    let teid = gnb.install(1, 5, RemoteTunnel::new(upf.local_addr()?, 0x1001), 9)?;
+    let teid = gnb.install(1, 5, RemoteTunnel::new(upf.local_addr()?, 0x1001), Some(9))?;
     upf.set_session(Session::new(0x1001, teid, gnb.local_addr()?, 9))?;
 
     // Uplink: an IP packet of the UE, which the UPF's echo service reflects
@@ -168,7 +168,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // The UPF has no session with TEID 0x1001. It answers the G-PDU with an
     // Error Indication, which the receiver gets with its tunnel
-    gnb.install(1, 5, RemoteTunnel::new(upf.local_addr()?, 0x1001), 9)?;
+    gnb.install(1, 5, RemoteTunnel::new(upf.local_addr()?, 0x1001), Some(9))?;
     gnb.send(1, 5, b"an IP packet".as_slice()).await?;
     let indication = received.recv().await.expect("the endpoint is running");
     println!(
@@ -258,7 +258,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (upf, _observed) = UpfSimulator::bind("127.0.0.8:2152".parse()?).await?;
     let (gnb, _received) = Endpoint::bind("127.0.0.1:2152".parse()?).await?;
-    let teid = gnb.install(1, 5, RemoteTunnel::new(upf.local_addr()?, 0x1001), 9)?;
+    let teid = gnb.install(1, 5, RemoteTunnel::new(upf.local_addr()?, 0x1001), Some(9))?;
     upf.set_session(Session::new(0x1001, teid, gnb.local_addr()?, 9))?;
 
     // The tunnel gets a TUN with the UE's address, and a rule that routes
@@ -324,7 +324,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let fast_path = FastPath::load()?;
     gnb.set_fast_path(fast_path.clone())?;
 
-    let teid = gnb.install(1, 5, RemoteTunnel::new(upf.local_addr()?, 0x1001), 9)?;
+    let teid = gnb.install(1, 5, RemoteTunnel::new(upf.local_addr()?, 0x1001), Some(9))?;
     upf.set_session(Session::new(0x1001, teid, gnb.local_addr()?, 9))?;
 
     // As in the `tun` example. The endpoint has a fast path: the TUN is on
