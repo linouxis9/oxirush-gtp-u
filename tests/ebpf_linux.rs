@@ -18,7 +18,7 @@ use aya::programs::{SchedClassifier, TcAttachType};
 use oxirush_gtp_u::ebpf::FastPath;
 use oxirush_gtp_u::tun::{Routing, TunConfig, TunPort};
 use oxirush_gtp_u::upf_sim::{Session, UpfSimulator};
-use oxirush_gtp_u::{Endpoint, Packet, RemoteTunnel, ipv4_udp, parse_ipv4_udp};
+use oxirush_gtp_u::{Endpoint, Packet, RemoteTunnel, ip};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpSocket, UdpSocket};
 use tokio::process::Command;
@@ -428,7 +428,7 @@ async fn the_short_cut_follows_handover_modification_and_release() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(parse_ipv4_udp(&packet[..size]).unwrap().2, b"released");
+    assert_eq!(ip::parse_udp(&packet[..size]).unwrap().2, b"released");
     assert_eq!(fast_path.stats().uplink_packets, 4);
 }
 
@@ -487,14 +487,14 @@ async fn tunnels_keep_their_teids_and_qfis_apart_and_match_the_encoder() {
             None => Packet::g_pdu(*uplink_teid, packet.payload.clone()),
         };
         assert_eq!(expected.encode().unwrap(), &datagram[..size]);
-        let (source, destination, payload) = parse_ipv4_udp(&packet.payload).unwrap();
+        let (source, destination, payload) = ip::parse_udp(&packet.payload).unwrap();
         assert_eq!(
             (source, destination),
             (SocketAddrV4::new(*address, 4000), server)
         );
         assert_eq!(payload, b"uplink");
 
-        let reply = ipv4_udp(server, source, b"downlink").unwrap();
+        let reply = ip::udp(server, source, b"downlink").unwrap();
         let reply = match qfi {
             Some(qfi) => Packet::downlink(*downlink_teid, *qfi, reply),
             None => Packet::g_pdu(*downlink_teid, reply),
@@ -520,7 +520,7 @@ async fn tunnels_keep_their_teids_and_qfis_apart_and_match_the_encoder() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(parse_ipv4_udp(&datagram[..size]).unwrap().2, [7; 1472]);
+    assert_eq!(ip::parse_udp(&datagram[..size]).unwrap().2, [7; 1472]);
     let stats = fast_path.stats();
     assert_eq!((stats.uplink_packets, stats.uplink_oversized), (6, 1));
 
@@ -536,7 +536,7 @@ async fn tunnels_keep_their_teids_and_qfis_apart_and_match_the_encoder() {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(parse_ipv4_udp(&datagram[..size]).unwrap().2, b"closed");
+        assert_eq!(ip::parse_udp(&datagram[..size]).unwrap().2, b"closed");
     }
     assert_eq!(fast_path.stats().uplink_packets, 6);
 }
@@ -571,11 +571,13 @@ async fn only_plain_ipv4_g_pdus_of_short_cut_tunnels_leave_userspace() {
         io::ErrorKind::NotFound
     );
 
-    let inner = ipv4_udp(SocketAddrV4::new(N6, 9), SocketAddrV4::new(UE, 9), b"x").unwrap();
-    let echo_reply = oxirush_gtp_u::ipv4_icmp_echo_reply(
-        &oxirush_gtp_u::ipv4_icmp_echo_request(UE, N6, 1, 1, b"ping").unwrap(),
-    )
-    .unwrap();
+    let inner = ip::udp(SocketAddrV4::new(N6, 9), SocketAddrV4::new(UE, 9), b"x").unwrap();
+    // What `decap` reads of an ICMP Echo Reply: protocol 1, and type 0 where
+    // the source port of a UDP datagram is.
+    let udp = ip::udp(SocketAddrV4::new(N6, 0), SocketAddrV4::new(UE, 0), b"ping");
+    let mut echo_reply = udp.unwrap();
+    echo_reply[9] = 1;
+    let echo_reply = checksummed(echo_reply);
     let mut sequenced = Packet::downlink(teid, 9, inner.clone());
     sequenced.sequence = Some(7);
     let mut ipv6 = vec![0x60; 40];
@@ -613,7 +615,7 @@ async fn only_plain_ipv4_g_pdus_of_short_cut_tunnels_leave_userspace() {
         loop {
             let size = peer.recv(&mut datagram).await.unwrap();
             let packet = Packet::decode(&datagram[..size]).unwrap();
-            if parse_ipv4_udp(&packet.payload).is_ok_and(|(.., payload)| payload == [5; 4000]) {
+            if ip::parse_udp(&packet.payload).is_ok_and(|(.., payload)| payload == [5; 4000]) {
                 break;
             }
         }
@@ -687,7 +689,7 @@ async fn a_packet_that_no_longer_fits_n3_once_its_mtu_shrank_is_left_to_userspac
         .await
         .expect("the TUN's reader did not get the packet")
         .unwrap();
-    assert_eq!(parse_ipv4_udp(&datagram[..size]).unwrap().2, [8; 1472]);
+    assert_eq!(ip::parse_udp(&datagram[..size]).unwrap().2, [8; 1472]);
     let stats = fast_path.stats();
     assert_eq!((stats.uplink_packets, stats.uplink_oversized), (1, 1));
     fast_path.follows_mtus().unwrap();
@@ -797,13 +799,13 @@ async fn a_g_pdu_whose_ipv4_header_linux_refuses_is_not_carried() {
     let (_gnb, _peer, _port, teid) = short_cut_tunnel(&fast_path, 0x6001).await;
     let application = UdpSocket::bind((UE, 4000)).await.unwrap();
     let server = SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 9), 9);
-    let inner = ipv4_udp(server, SocketAddrV4::new(UE, 4000), b"downlink").unwrap();
+    let inner = ip::udp(server, SocketAddrV4::new(UE, 4000), b"downlink").unwrap();
     let gtp = Packet::downlink(teid, 9, inner).encode().unwrap();
     let (peer, local) = (
         SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 9), 2152),
         SocketAddrV4::new(Ipv4Addr::LOCALHOST, 2152),
     );
-    let outer = ipv4_udp(peer, local, &gtp).unwrap();
+    let outer = ip::udp(peer, local, &gtp).unwrap();
     let frame = |ip: &[u8]| [&[0; 12][..], &[0x08, 0x00], ip].concat();
     let mut datagram = [0; 64];
 
@@ -870,8 +872,8 @@ async fn a_peer_on_this_host_is_reached_through_loopback_whatever_its_address() 
         .unwrap();
     assert_eq!(from, gnb.local_addr().unwrap());
     let packet = Packet::decode(&datagram[..size]).unwrap();
-    assert_eq!(parse_ipv4_udp(&packet.payload).unwrap().2, b"uplink");
-    let reply = ipv4_udp(server, SocketAddrV4::new(UE, 4000), b"downlink").unwrap();
+    assert_eq!(ip::parse_udp(&packet.payload).unwrap().2, b"uplink");
+    let reply = ip::udp(server, SocketAddrV4::new(UE, 4000), b"downlink").unwrap();
     let reply = Packet::downlink(teid, 9, reply).encode().unwrap();
     peer.send_to(&reply, from).await.unwrap();
     let size = timeout(SECOND, application.recv(&mut datagram))
@@ -944,10 +946,10 @@ async fn a_peer_on_another_host_is_reached_through_the_interface_of_its_route() 
         .unwrap();
     assert_eq!(from, gnb.local_addr().unwrap());
     let packet = Packet::decode(&datagram[..size]).unwrap();
-    assert_eq!(parse_ipv4_udp(&packet.payload).unwrap().2, b"uplink");
+    assert_eq!(ip::parse_udp(&packet.payload).unwrap().2, b"uplink");
     // As through the TUN's writer, Linux checks the inner packet: one whose
     // payload changed on the way does not reach the application.
-    let reply = ipv4_udp(server, SocketAddrV4::new(UE, 4000), b"downlink").unwrap();
+    let reply = ip::udp(server, SocketAddrV4::new(UE, 4000), b"downlink").unwrap();
     let mut damaged = reply.clone();
     *damaged.last_mut().unwrap() ^= 1;
     for inner in [damaged, reply] {
@@ -996,7 +998,7 @@ async fn two_fast_paths_share_an_n3_interface() {
     let server = SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 9), 9);
     let mut datagram = vec![0; 2048];
     for (gnb, _, teid, address, application) in &applications {
-        let reply = ipv4_udp(server, SocketAddrV4::new(*address, 4000), b"downlink").unwrap();
+        let reply = ip::udp(server, SocketAddrV4::new(*address, 4000), b"downlink").unwrap();
         let reply = Packet::downlink(*teid, 9, reply).encode().unwrap();
         peer.send_to(&reply, gnb.local_addr().unwrap())
             .await
@@ -1048,7 +1050,7 @@ async fn a_tun_given_another_tunnel_leaves_the_first() {
     shortcut(&gnb, 2, 1, port.index()).await;
 
     let server = SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 9), 9);
-    let downlink = ipv4_udp(server, SocketAddrV4::new(address, 4000), b"downlink").unwrap();
+    let downlink = ip::udp(server, SocketAddrV4::new(address, 4000), b"downlink").unwrap();
     let downlink = Packet::downlink(first, 9, downlink).encode().unwrap();
     peer.send_to(&downlink, gnb.local_addr().unwrap())
         .await
@@ -1087,7 +1089,7 @@ async fn a_tunnel_given_another_local_teid_leaves_the_short_cut_of_the_old_one()
 
     let application = UdpSocket::bind((address, 4000)).await.unwrap();
     let server = SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 9), 9);
-    let downlink = ipv4_udp(server, SocketAddrV4::new(address, 4000), b"old TEID").unwrap();
+    let downlink = ip::udp(server, SocketAddrV4::new(address, 4000), b"old TEID").unwrap();
     let downlink = Packet::downlink(0x7001, 9, downlink).encode().unwrap();
     peer.send_to(&downlink, gnb.local_addr().unwrap())
         .await
@@ -1204,7 +1206,7 @@ async fn a_tunnel_given_to_another_tun_leaves_the_first() {
 
     let server = SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 9), 9);
     let application = UdpSocket::bind((address, 4000)).await.unwrap();
-    let reply = ipv4_udp(server, SocketAddrV4::new(address, 4000), b"downlink").unwrap();
+    let reply = ip::udp(server, SocketAddrV4::new(address, 4000), b"downlink").unwrap();
     let reply = Packet::downlink(teid, 9, reply).encode().unwrap();
     peer.send_to(&reply, gnb.local_addr().unwrap())
         .await
@@ -1261,13 +1263,13 @@ async fn an_attached_tun_is_short_cut_until_its_tunnel_is_removed() {
             assert_eq!(from, gnb.local_addr().unwrap());
             let packet = Packet::decode(&datagram[..size]).unwrap();
             assert_eq!((packet.teid, packet.qfi()), (0x7001, Some(9)));
-            assert_eq!(parse_ipv4_udp(&packet.payload).unwrap().2, b"uplink");
+            assert_eq!(ip::parse_udp(&packet.payload).unwrap().2, b"uplink");
         }
     };
     timeout(SECOND, carried)
         .await
         .expect("the kernel did not carry the attached TUN's uplink");
-    let reply = ipv4_udp(server, SocketAddrV4::new(UE, 4000), b"downlink").unwrap();
+    let reply = ip::udp(server, SocketAddrV4::new(UE, 4000), b"downlink").unwrap();
     let reply = Packet::downlink(teid, 9, reply).encode().unwrap();
     peer.send_to(&reply, gnb.local_addr().unwrap())
         .await

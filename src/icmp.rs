@@ -1,210 +1,93 @@
-//! IPv4 ICMP Echo packets, for pings through a tunnel and the test UPF's
-//! echo service.
+//! The ICMP Echo Reply of the test UPF's echo service.
 
 use std::net::Ipv4Addr;
 
-use crate::error::truncated;
-use crate::ipv4::{checksum, header, parse, total_length};
-use crate::{Error, Expected, Part};
+use crate::ip::{checksum, header, parse, total_length};
 
 const ICMP: u8 = 1;
 const ECHO_REQUEST: u8 = 8;
 const ECHO_REPLY: u8 = 0;
 
-/// Whether an ICMP Echo message is a request or a reply.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum EchoKind {
-    /// Echo Request (type 8).
-    Request,
-    /// Echo Reply (type 0).
-    Reply,
-}
-
-/// A parsed IPv4 ICMP Echo message.
-#[derive(Clone, Debug, Eq, PartialEq)]
-#[non_exhaustive]
-pub struct IcmpEcho<'a> {
-    /// IPv4 source address.
-    pub source: Ipv4Addr,
-    /// IPv4 destination address.
-    pub destination: Ipv4Addr,
-    /// Request or reply.
-    pub kind: EchoKind,
-    /// Identifier.
-    pub identifier: u16,
-    /// Sequence number.
-    pub sequence: u16,
-    /// Data.
-    pub payload: &'a [u8],
-}
-
-fn build(
+/// An IPv4 ICMP Echo message of `kind` (8 a request, 0 a reply).
+fn echo(
     source: Ipv4Addr,
     destination: Ipv4Addr,
-    kind: EchoKind,
-    identifier: u16,
-    sequence: u16,
+    kind: u8,
+    identifier_and_sequence: &[u8],
     payload: &[u8],
-) -> Result<Vec<u8>, Error> {
-    let total_length = total_length(20 + 8 + payload.len())?;
+) -> Option<Vec<u8>> {
+    let total_length = total_length(20 + 8 + payload.len()).ok()?;
     let mut bytes = header(source, destination, ICMP, total_length);
-    let icmp_type = match kind {
-        EchoKind::Request => ECHO_REQUEST,
-        EchoKind::Reply => ECHO_REPLY,
-    };
-    bytes.extend_from_slice(&[icmp_type, 0, 0, 0]);
-    bytes.extend_from_slice(&identifier.to_be_bytes());
-    bytes.extend_from_slice(&sequence.to_be_bytes());
+    bytes.extend_from_slice(&[kind, 0, 0, 0]);
+    bytes.extend_from_slice(identifier_and_sequence);
     bytes.extend_from_slice(payload);
     let icmp_checksum = checksum(&[&bytes[20..]]);
     bytes[22..24].copy_from_slice(&icmp_checksum.to_be_bytes());
-    Ok(bytes)
+    Some(bytes)
 }
 
-/// Build an IPv4 ICMP Echo Request.
-pub fn ipv4_icmp_echo_request(
-    source: Ipv4Addr,
-    destination: Ipv4Addr,
-    identifier: u16,
-    sequence: u16,
-    payload: &[u8],
-) -> Result<Vec<u8>, Error> {
-    build(
-        source,
-        destination,
-        EchoKind::Request,
-        identifier,
-        sequence,
-        payload,
-    )
-}
-
-/// Build the IPv4 ICMP Echo Reply to an Echo Request.
-pub fn ipv4_icmp_echo_reply(request: &[u8]) -> Result<Vec<u8>, Error> {
-    let echo = parse_ipv4_icmp_echo(request)?;
-    if echo.kind != EchoKind::Request {
-        return Err(Error::UnexpectedPacket(Expected::IcmpEchoRequest));
-    }
-    build(
-        echo.destination,
-        echo.source,
-        EchoKind::Reply,
-        echo.identifier,
-        echo.sequence,
-        echo.payload,
-    )
-}
-
-/// Parse an IPv4 ICMP Echo Request or Reply. The IPv4 header and ICMP
-/// checksums must be valid.
-pub fn parse_ipv4_icmp_echo(bytes: &[u8]) -> Result<IcmpEcho<'_>, Error> {
-    let packet = parse(bytes, ICMP)?;
+/// The IPv4 ICMP Echo Reply to `request`, if it is an Echo Request whose
+/// IPv4 header and ICMP checksums are valid.
+pub(crate) fn echo_reply(request: &[u8]) -> Option<Vec<u8>> {
+    let packet = parse(request).ok()?;
     let icmp = packet.payload;
-    let Some(icmp_header) = icmp.first_chunk::<8>() else {
-        return Err(truncated(Part::IcmpHeader, 8, icmp));
-    };
-    if checksum(&[icmp]) != 0 {
-        return Err(Error::InvalidChecksum {
-            what: Part::IcmpMessage,
-            received: u16::from_be_bytes([icmp_header[2], icmp_header[3]]),
-            computed: checksum(&[&icmp[..2], &icmp[4..]]),
-        });
+    let icmp_header = icmp.first_chunk::<8>()?;
+    if packet.protocol != ICMP || icmp_header[..2] != [ECHO_REQUEST, 0] || checksum(&[icmp]) != 0 {
+        return None;
     }
-    let kind = match (icmp_header[0], icmp_header[1]) {
-        (ECHO_REQUEST, 0) => EchoKind::Request,
-        (ECHO_REPLY, 0) => EchoKind::Reply,
-        _ => return Err(Error::UnexpectedPacket(Expected::IcmpEcho)),
-    };
-    Ok(IcmpEcho {
-        source: packet.source,
-        destination: packet.destination,
-        kind,
-        identifier: u16::from_be_bytes([icmp_header[4], icmp_header[5]]),
-        sequence: u16::from_be_bytes([icmp_header[6], icmp_header[7]]),
-        payload: &icmp[8..],
-    })
+    echo(
+        packet.destination,
+        packet.source,
+        ECHO_REPLY,
+        &icmp_header[4..],
+        &icmp[8..],
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn echo_request_reply_round_trip_and_checksums() {
-        let source = Ipv4Addr::new(10, 60, 0, 2);
-        let destination = Ipv4Addr::new(192, 0, 2, 1);
-        let request = ipv4_icmp_echo_request(source, destination, 0x1234, 7, b"ping").unwrap();
-        let parsed = parse_ipv4_icmp_echo(&request).unwrap();
-        assert_eq!(
-            (parsed.source, parsed.destination, parsed.kind),
-            (source, destination, EchoKind::Request)
-        );
-        assert_eq!(
-            (parsed.identifier, parsed.sequence, parsed.payload),
-            (0x1234, 7, b"ping".as_slice())
-        );
-        let reply = ipv4_icmp_echo_reply(&request).unwrap();
-        let parsed = parse_ipv4_icmp_echo(&reply).unwrap();
-        assert_eq!(
-            (parsed.source, parsed.destination, parsed.kind),
-            (destination, source, EchoKind::Reply)
-        );
-        assert_eq!(parsed.payload, b"ping");
-        assert_eq!(
-            ipv4_icmp_echo_reply(&reply),
-            Err(Error::UnexpectedPacket(Expected::IcmpEchoRequest))
-        );
-        assert_eq!(
-            parse_ipv4_icmp_echo(
-                &crate::ipv4_udp(
-                    "10.60.0.2:1".parse().unwrap(),
-                    "192.0.2.1:2".parse().unwrap(),
-                    b"x"
-                )
-                .unwrap()
-            ),
-            Err(Error::UnexpectedPacket(Expected::Icmp))
-        );
+    fn request(payload: &[u8]) -> Vec<u8> {
+        let (source, destination) = (Ipv4Addr::new(10, 60, 0, 2), Ipv4Addr::new(192, 0, 2, 1));
+        echo(
+            source,
+            destination,
+            ECHO_REQUEST,
+            &[0x12, 0x34, 0, 7],
+            payload,
+        )
+        .unwrap()
     }
 
     #[test]
-    fn rejects_corrupt_icmp_checksum() {
-        let mut packet =
-            ipv4_icmp_echo_request(Ipv4Addr::LOCALHOST, Ipv4Addr::new(192, 0, 2, 1), 1, 1, b"x")
-                .unwrap();
-        packet[28] ^= 1;
-        // The checksum that these octets give is that of a request made
-        // with them.
-        let made =
-            ipv4_icmp_echo_request(Ipv4Addr::LOCALHOST, Ipv4Addr::new(192, 0, 2, 1), 1, 1, b"y")
-                .unwrap();
-        assert_eq!(packet[24..], made[24..]);
-        let field = |packet: &[u8]| u16::from_be_bytes([packet[22], packet[23]]);
-        assert_eq!(
-            parse_ipv4_icmp_echo(&packet),
-            Err(Error::InvalidChecksum {
-                what: Part::IcmpMessage,
-                received: field(&packet),
-                computed: field(&made)
-            })
+    fn an_echo_request_has_its_reply() {
+        let request = request(b"ping");
+        let reply = echo_reply(&request).unwrap();
+        // The addresses swapped, type 0, the identifier, sequence number and
+        // data of the request, and valid checksums.
+        assert_eq!(reply[12..16], request[16..20]);
+        assert_eq!(reply[16..20], request[12..16]);
+        assert_eq!(reply[20..22], [ECHO_REPLY, 0]);
+        assert_eq!(reply[24..], request[24..]);
+        assert_eq!(checksum(&[&reply[..20]]), 0);
+        assert_eq!(checksum(&[&reply[20..]]), 0);
+        // A reply, a UDP packet, a cut or a corrupt request have none.
+        assert_eq!(echo_reply(&reply), None);
+        let udp = crate::ip::udp(
+            "10.60.0.2:1".parse().unwrap(),
+            "192.0.2.1:2".parse().unwrap(),
+            b"x",
         );
-        // Another type than the two of an echo, with its checksum.
-        let mut unreachable = made.clone();
-        unreachable[20] = 3;
-        unreachable[22..24].copy_from_slice(&[0, 0]);
-        let sum = checksum(&[&unreachable[20..]]);
-        unreachable[22..24].copy_from_slice(&sum.to_be_bytes());
-        assert_eq!(
-            parse_ipv4_icmp_echo(&unreachable),
-            Err(Error::UnexpectedPacket(Expected::IcmpEcho))
-        );
-        assert_eq!(
-            parse_ipv4_icmp_echo(&made[..27]),
-            Err(Error::Truncated {
-                what: Part::Ipv4Packet,
-                needed: 29,
-                available: 27
-            })
-        );
+        assert_eq!(echo_reply(&udp.unwrap()), None);
+        assert_eq!(echo_reply(&request[..27]), None);
+        let mut corrupt = request.clone();
+        corrupt[28] ^= 1;
+        assert_eq!(echo_reply(&corrupt), None);
+        let mut code = request.clone();
+        code[21] = 1;
+        let sum = checksum(&[&code[20..22], &code[24..]]);
+        code[22..24].copy_from_slice(&sum.to_be_bytes());
+        assert_eq!(echo_reply(&code), None);
     }
 }

@@ -18,11 +18,95 @@ use std::time::Duration;
 
 use oxirush_gtp_u::tun::{Routing, TunConfig, TunPort};
 use oxirush_gtp_u::upf_sim::{Session, UpfSimulator};
-use oxirush_gtp_u::{
-    EchoKind, Endpoint, ExtensionHeader, Packet, RemoteTunnel, ipv4_icmp_echo_reply,
-    ipv4_icmp_echo_request, parse_ipv4_icmp_echo,
-};
+use oxirush_gtp_u::{Endpoint, ExtensionHeader, Packet, RemoteTunnel};
 use tokio::process::Command;
+
+/// The ICMP Echo messages of the tests, which Linux answers.
+mod icmp {
+    use std::net::Ipv4Addr;
+
+    pub const REQUEST: u8 = 8;
+    pub const REPLY: u8 = 0;
+
+    /// The Internet checksum (RFC 1071) of `bytes`.
+    fn checksum(bytes: &[u8]) -> u16 {
+        let words = bytes
+            .chunks(2)
+            .map(|pair| [pair[0], *pair.get(1).unwrap_or(&0)]);
+        let mut sum: u32 = words.map(|word| u32::from(u16::from_be_bytes(word))).sum();
+        while sum > 0xffff {
+            sum = (sum & 0xffff) + (sum >> 16);
+        }
+        !(sum as u16)
+    }
+
+    /// An ICMP Echo Request or Reply, in an IPv4 packet without options.
+    pub fn echo(
+        (source, destination): (Ipv4Addr, Ipv4Addr),
+        kind: u8,
+        identifier: u16,
+        sequence: u16,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let length = (28 + payload.len()) as u16;
+        let mut bytes = vec![0x45, 0];
+        bytes.extend_from_slice(&length.to_be_bytes());
+        bytes.extend_from_slice(&[0, 0, 0x40, 0, 64, 1, 0, 0]);
+        bytes.extend_from_slice(&source.octets());
+        bytes.extend_from_slice(&destination.octets());
+        let sum = checksum(&bytes);
+        bytes[10..12].copy_from_slice(&sum.to_be_bytes());
+        bytes.extend_from_slice(&[kind, 0, 0, 0]);
+        bytes.extend_from_slice(&identifier.to_be_bytes());
+        bytes.extend_from_slice(&sequence.to_be_bytes());
+        bytes.extend_from_slice(payload);
+        let sum = checksum(&bytes[20..]);
+        bytes[22..24].copy_from_slice(&sum.to_be_bytes());
+        bytes
+    }
+
+    /// What the tests read of an ICMP Echo.
+    pub struct Echo<'a> {
+        pub source: Ipv4Addr,
+        pub destination: Ipv4Addr,
+        pub kind: u8,
+        pub identifier: u16,
+        pub sequence: u16,
+        pub payload: &'a [u8],
+    }
+
+    impl Echo<'_> {
+        /// The reply to this request.
+        pub fn reply(&self) -> Vec<u8> {
+            let addresses = (self.destination, self.source);
+            echo(
+                addresses,
+                REPLY,
+                self.identifier,
+                self.sequence,
+                self.payload,
+            )
+        }
+    }
+
+    /// An ICMP Echo Request or Reply in an IPv4 packet without options.
+    pub fn parse(bytes: &[u8]) -> Option<Echo<'_>> {
+        let total = usize::from(u16::from_be_bytes([*bytes.get(2)?, *bytes.get(3)?]));
+        let packet = bytes.get(..total).filter(|packet| packet.len() >= 28)?;
+        if packet[0] != 0x45 || packet[9] != 1 || ![REQUEST, REPLY].contains(&packet[20]) {
+            return None;
+        }
+        let address = |at: usize| Ipv4Addr::from(<[u8; 4]>::try_from(&packet[at..at + 4]).unwrap());
+        Some(Echo {
+            source: address(12),
+            destination: address(16),
+            kind: packet[20],
+            identifier: u16::from_be_bytes([packet[24], packet[25]]),
+            sequence: u16::from_be_bytes([packet[26], packet[27]]),
+            payload: &packet[28..],
+        })
+    }
+}
 
 /// Move this thread, and the processes it starts, to a new network
 /// namespace with loopback up.
@@ -363,11 +447,10 @@ async fn answer_ping(port: &TunPort, source: Ipv4Addr, destination: Ipv4Addr) {
         .await
         .unwrap()
         .unwrap();
-    let echo = parse_ipv4_icmp_echo(&buffer[..size]).unwrap();
-    assert_eq!(echo.kind, EchoKind::Request);
+    let echo = icmp::parse(&buffer[..size]).unwrap();
+    assert_eq!(echo.kind, icmp::REQUEST);
     assert_eq!((echo.source, echo.destination), (source, destination));
-    let reply = ipv4_icmp_echo_reply(&buffer[..size]).unwrap();
-    port.send(&reply).await.unwrap();
+    port.send(&echo.reply()).await.unwrap();
 }
 
 async fn ping(args: &[&str]) {
@@ -559,14 +642,8 @@ async fn upf_tun_routes_the_kernel_s_reply_back_to_n3() {
         .unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
     assert!(!exists("oxn1"));
-    let request = ipv4_icmp_echo_request(
-        ue_address,
-        Ipv4Addr::new(198, 18, 0, 1),
-        0x1234,
-        1,
-        b"upf-tun",
-    )
-    .unwrap();
+    let addresses = (ue_address, Ipv4Addr::new(198, 18, 0, 1));
+    let request = icmp::echo(addresses, icmp::REQUEST, 0x1234, 1, b"upf-tun");
     gnb.send(1, 1, request).await.unwrap();
     let received = tokio::time::timeout(Duration::from_secs(3), upf_rx.recv())
         .await
@@ -578,13 +655,11 @@ async fn upf_tun_routes_the_kernel_s_reply_back_to_n3() {
             .await
             .unwrap()
             .unwrap();
-        if parse_ipv4_icmp_echo(&packet.packet.payload)
-            .is_ok_and(|echo| echo.kind == EchoKind::Reply)
-        {
+        if icmp::parse(&packet.packet.payload).is_some_and(|echo| echo.kind == icmp::REPLY) {
             break packet;
         }
     };
-    let echo = parse_ipv4_icmp_echo(&downlink.packet.payload).unwrap();
+    let echo = icmp::parse(&downlink.packet.payload).unwrap();
     assert_eq!(echo.payload, b"upf-tun");
     upf.remove_session(remote.teid);
     assert!(!exists("oxn0"));
@@ -625,14 +700,11 @@ async fn upf_routes_32_tun_sessions_without_crossing_teids() {
         .unwrap();
     }
     for i in 1..=32u8 {
-        let request = ipv4_icmp_echo_request(
+        let addresses = (
             Ipv4Addr::new(198, 18, 64, i),
             Ipv4Addr::new(198, 18, 64, 254),
-            0x5000 + u16::from(i),
-            1,
-            &[i],
-        )
-        .unwrap();
+        );
+        let request = icmp::echo(addresses, icmp::REQUEST, 0x5000 + u16::from(i), 1, &[i]);
         gnb.send(u32::from(i), 1, request).await.unwrap();
     }
     let mut replied = HashSet::new();
@@ -641,7 +713,7 @@ async fn upf_routes_32_tun_sessions_without_crossing_teids() {
             .await
             .unwrap()
             .unwrap();
-        let echo = parse_ipv4_icmp_echo(&packet.packet.payload).unwrap();
+        let echo = icmp::parse(&packet.packet.payload).unwrap();
         let i = echo.destination.octets()[3];
         assert_eq!(packet.ran_id, u32::from(i));
         assert_eq!(echo.identifier, 0x5000 + u16::from(i));

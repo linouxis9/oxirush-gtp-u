@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use oxirush_gtp_u::{
     Cause, DownlinkPduSessionInformation, DownlinkPduSetInformation, ExtensionHeader,
     ExtensionHeaderType, InformationElement, Packet, PduSessionContainer,
-    PduSetInformationContainer, UplinkPduSessionInformation, UplinkTimeStamps, ipv4_udp,
+    PduSetInformationContainer, UplinkPduSessionInformation, UplinkTimeStamps,
 };
 
 /// The first version of tshark whose GTP dissector has every field that
@@ -58,7 +58,7 @@ fn dissect(packet: &Packet, fields: &[&str]) -> (Vec<String>, String) {
         panic!("{error}");
     }
     let gtp = packet.encode().unwrap();
-    let ip = ipv4_udp(
+    let ip = oxirush_gtp_u::ip::udp(
         SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 2152),
         SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 2), 2152),
         &gtp,

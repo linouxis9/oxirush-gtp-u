@@ -54,23 +54,16 @@ pub enum InformationElement {
         /// Extension Value.
         value: Vec<u8>,
     },
-    /// A TV information element defined by TS 29.060 table 37, but not
-    /// expected in GTP-U signalling. Its known fixed length allows the
-    /// receiver to skip it (TS 29.060 section 11.1.11).
-    OtherTv {
-        /// Type, excluding Cause, Recovery and TEID Data I.
-        kind: InformationElementType,
-        /// The fixed-length value, kept as received.
-        value: Vec<u8>,
-    },
-    /// Any other TLV information element, kept as received: a type of 128
-    /// or more, and not one with a variant above (133, 141 or 255). A later
-    /// version may decode more types into variants of their own, which the
-    /// encoder then refuses as `Other`.
+    /// Any other information element, kept as received, and not one with a
+    /// variant above. Below type 128 it is a TV element of TS 29.060 table
+    /// 37, which GTP-U signalling does not expect and whose fixed length lets
+    /// a receiver skip it (TS 29.060 §11.1.11); from 128 on it is a TLV
+    /// element. A later version may decode more types into variants of
+    /// their own, which the encoder then refuses as `Other`.
     Other {
         /// Type.
         kind: InformationElementType,
-        /// Value.
+        /// Value: the fixed length of a TV type, any length of a TLV one.
         value: Vec<u8>,
     },
 }
@@ -97,7 +90,6 @@ impl InformationElement {
             InformationElement::PrivateExtension { .. } => {
                 InformationElementType::PRIVATE_EXTENSION
             }
-            InformationElement::OtherTv { kind, .. } => *kind,
             InformationElement::Other { kind, .. } => *kind,
         }
     }
@@ -159,7 +151,7 @@ impl InformationElement {
                         .split_at_checked(length)
                         .ok_or_else(|| truncated(Part::InformationElement, length, rest))?;
                     (
-                        InformationElement::OtherTv {
+                        InformationElement::Other {
                             kind: InformationElementType(kind),
                             value: value.to_vec(),
                         },
@@ -242,35 +234,33 @@ impl InformationElement {
             InformationElement::PrivateExtension { identifier, value } => {
                 push_tlv(out, &[&identifier.to_be_bytes(), value])?;
             }
-            InformationElement::OtherTv { kind, value } => {
-                let length = tv_length(kind.0)
-                    .filter(|_| !matches!(kind.0, CAUSE | RECOVERY | TEID_DATA_I))
-                    .ok_or(Error::InvalidType {
-                        what: Part::InformationElement,
-                        kind: kind.0,
-                    })?;
-                if value.len() != length {
-                    return Err(Error::InvalidLength {
-                        what: Part::InformationElement,
-                        length: value.len(),
-                        expected: length,
-                    });
-                }
-                out.extend_from_slice(value);
-            }
             InformationElement::Other { kind, value } => {
-                if kind.0 < 128
-                    || matches!(
-                        kind.0,
-                        GTP_U_PEER_ADDRESS | EXTENSION_HEADER_TYPE_LIST | PRIVATE_EXTENSION
-                    )
-                {
-                    return Err(Error::InvalidType {
-                        what: Part::InformationElement,
-                        kind: kind.0,
-                    });
+                let refused = Error::InvalidType {
+                    what: Part::InformationElement,
+                    kind: kind.0,
+                };
+                // The types with a variant are refused, as a TV type of an
+                // unknown length.
+                match kind.0 {
+                    CAUSE
+                    | RECOVERY
+                    | TEID_DATA_I
+                    | GTP_U_PEER_ADDRESS
+                    | EXTENSION_HEADER_TYPE_LIST
+                    | PRIVATE_EXTENSION => return Err(refused),
+                    128.. => push_tlv(out, &[value])?,
+                    tv => {
+                        let length = tv_length(tv).ok_or(refused)?;
+                        if value.len() != length {
+                            return Err(Error::InvalidLength {
+                                what: Part::InformationElement,
+                                length: value.len(),
+                                expected: length,
+                            });
+                        }
+                        out.extend_from_slice(value);
+                    }
                 }
-                push_tlv(out, &[value])?;
             }
         }
         Ok(())
@@ -297,11 +287,6 @@ impl fmt::Debug for InformationElement {
             InformationElement::PrivateExtension { identifier, value } => f
                 .debug_struct("PrivateExtension")
                 .field("identifier", identifier)
-                .field("value", &Octets(value))
-                .finish(),
-            InformationElement::OtherTv { kind, value } => f
-                .debug_struct("OtherTv")
-                .field("kind", kind)
                 .field("value", &Octets(value))
                 .finish(),
             InformationElement::Other { kind, value } => f
@@ -400,7 +385,7 @@ mod tests {
             (127, 4),
         ];
         for (kind, length) in types {
-            let element = InformationElement::OtherTv {
+            let element = InformationElement::Other {
                 kind: InformationElementType(kind),
                 value: vec![0xaa; length],
             };
@@ -426,7 +411,7 @@ mod tests {
             }
             for wrong in [length - 1, length + 1] {
                 assert_eq!(
-                    InformationElement::encode_all(&[InformationElement::OtherTv {
+                    InformationElement::encode_all(&[InformationElement::Other {
                         kind: InformationElementType(kind),
                         value: vec![0xaa; wrong]
                     }]),
@@ -438,9 +423,9 @@ mod tests {
                 );
             }
         }
-        for kind in [0, 6, 7, 10, 30, 116, 117, 126, 128, 255, 1, 14, 16] {
+        for kind in [0, 6, 7, 10, 30, 116, 117, 126, 255, 133, 141, 1, 14, 16] {
             assert_eq!(
-                InformationElement::encode_all(&[InformationElement::OtherTv {
+                InformationElement::encode_all(&[InformationElement::Other {
                     kind: InformationElementType(kind),
                     value: vec![]
                 }]),

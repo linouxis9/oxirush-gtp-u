@@ -3,7 +3,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use oxirush_gtp_u::{InformationElement, Packet, parse_ipv4_icmp_echo, parse_ipv4_udp};
+use oxirush_gtp_u::{InformationElement, Packet, ip};
 
 fuzz_target!(|bytes: &[u8]| {
     let borrowed = Packet::decode_borrowed(bytes).map(|packet| packet.into_owned());
@@ -32,6 +32,5 @@ fuzz_target!(|bytes: &[u8]| {
             assert_eq!(encoded, packet.payload);
         }
     }
-    let _ = parse_ipv4_udp(bytes);
-    let _ = parse_ipv4_icmp_echo(bytes);
+    let _ = ip::parse_udp(bytes);
 });

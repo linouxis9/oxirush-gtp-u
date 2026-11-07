@@ -4,7 +4,7 @@ use oxirush_gtp_u::{
     Cause, DownlinkPduSessionInformation, DownlinkPduSetInformation, Error, ExtensionHeader,
     ExtensionHeaderType, InformationElement, InformationElementType, MessageType, Packet, Part,
     PduSessionContainer, PduSetInformationContainer, UplinkPduSessionInformation, UplinkTimeStamps,
-    parse_ipv4_icmp_echo, parse_ipv4_udp,
+    ip,
 };
 use proptest::collection::vec;
 use proptest::option::of;
@@ -236,7 +236,7 @@ fn information_element() -> impl Strategy<Value = InformationElement> {
             (127, 4),
         ])
         .prop_flat_map(|(kind, length)| {
-            vec(any::<u8>(), length).prop_map(move |value| InformationElement::OtherTv {
+            vec(any::<u8>(), length).prop_map(move |value| InformationElement::Other {
                 kind: InformationElementType(kind),
                 value,
             })
@@ -358,7 +358,6 @@ proptest! {
             let encoded = InformationElement::encode_all(&elements).unwrap();
             prop_assert_eq!(encoded, bytes.clone());
         }
-        let _ = parse_ipv4_udp(&bytes);
-        let _ = parse_ipv4_icmp_echo(&bytes);
+        let _ = ip::parse_udp(&bytes);
     }
 }

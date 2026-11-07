@@ -20,9 +20,7 @@
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use oxirush_gtp_u::upf_sim::{Session, UpfSimulator};
-use oxirush_gtp_u::{
-    Endpoint, ExtensionHeader, ExtensionHeaderType, Packet, RemoteTunnel, ipv4_udp,
-};
+use oxirush_gtp_u::{Endpoint, ExtensionHeader, ExtensionHeaderType, Packet, RemoteTunnel, ip};
 use oxirush_gtp_u_benches::payload;
 use pprof::criterion::{Output, PProfProfiler};
 use std::hint::black_box;
@@ -130,7 +128,7 @@ fn endpoint(criterion: &mut Criterion) {
     );
     for octets in SIZES {
         // The inner packet is IPv4 and UDP around the octets
-        let inner = ipv4_udp(ue, server, &payload(octets - 28)).expect("an inner packet");
+        let inner = ip::udp(ue, server, &payload(octets - 28)).expect("an inner packet");
         group.throughput(Throughput::Bytes(octets as u64));
         group.bench_function(BenchmarkId::new("round-trip", octets), |bencher| {
             bencher.iter(|| {

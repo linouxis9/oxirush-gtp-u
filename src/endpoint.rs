@@ -836,7 +836,7 @@ impl Endpoint {
     /// # #[tokio::main(flavor = "current_thread")]
     /// # async fn main() -> std::io::Result<()> {
     /// use oxirush_gtp_u::upf_sim::{Session, UpfSimulator};
-    /// use oxirush_gtp_u::{Endpoint, RemoteTunnel, ipv4_udp};
+    /// use oxirush_gtp_u::{Endpoint, RemoteTunnel, ip};
     ///
     /// let (upf, mut observed) = UpfSimulator::bind("127.0.0.1:0".parse().unwrap()).await?;
     /// let (gnb, _received) = Endpoint::bind("127.0.0.1:0".parse().unwrap()).await?;
@@ -845,12 +845,12 @@ impl Endpoint {
     ///
     /// // An IP packet of the UE in the tunnel of RAN UE 1, PDU session 5
     /// let (ue, server) = ("10.45.0.2:4000".parse().unwrap(), "192.0.2.1:7".parse().unwrap());
-    /// gnb.send(1, 5, ipv4_udp(ue, server, b"hello")?).await?;
+    /// gnb.send(1, 5, ip::udp(ue, server, b"hello")?).await?;
     /// let uplink = observed.recv().await.unwrap();
     /// assert_eq!((uplink.uplink_teid, uplink.packet.qfi()), (0x1001, Some(9)));
     ///
     /// // A session without a tunnel
-    /// let missing = gnb.send(2, 1, ipv4_udp(ue, server, b"hello")?).await.unwrap_err();
+    /// let missing = gnb.send(2, 1, ip::udp(ue, server, b"hello")?).await.unwrap_err();
     /// assert_eq!(missing.kind(), std::io::ErrorKind::NotFound);
     /// # Ok(())
     /// # }

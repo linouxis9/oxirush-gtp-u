@@ -1,27 +1,52 @@
-//! IPv4 UDP packets, to exercise a tunnel without a TUN device.
+//! Inner IPv4 UDP packets, to exercise a tunnel without a TUN. They are
+//! IPv4 only; the codec and the endpoint carry any payload, IPv6 included.
 
+use std::fmt;
 use std::net::{Ipv4Addr, SocketAddrV4};
 
 use crate::error::truncated;
-use crate::{Error, Expected, Part};
+use crate::{Error, Part};
 
 const HEADER_LEN: usize = 20;
 const UDP_HEADER_LEN: usize = 8;
 const UDP: u8 = 17;
 
+/// What a helper expected of a packet that is something else
+/// ([`Error::UnexpectedPacket`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Expected {
+    /// IP version 4.
+    Ipv4,
+    /// A packet that is no fragment.
+    Unfragmented,
+    /// Protocol 17, UDP.
+    Udp,
+}
+
+impl fmt::Display for Expected {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Expected::Ipv4 => "not IPv4",
+            Expected::Unfragmented => "fragmented",
+            Expected::Udp => "not UDP",
+        })
+    }
+}
+
 /// Build an IPv4 UDP packet from `source` to `destination`.
 ///
 /// ```
-/// use oxirush_gtp_u::{ipv4_udp, parse_ipv4_udp};
+/// use oxirush_gtp_u::ip;
 ///
 /// // A packet of a UE, and what a receiver reads of it
 /// let (ue, server) = ("10.45.0.2:4000".parse().unwrap(), "192.0.2.1:7".parse().unwrap());
-/// let packet = ipv4_udp(ue, server, b"hello")?;
+/// let packet = ip::udp(ue, server, b"hello")?;
 /// assert_eq!(packet.len(), 20 + 8 + 5);
-/// assert_eq!(parse_ipv4_udp(&packet)?, (ue, server, b"hello".as_slice()));
+/// assert_eq!(ip::parse_udp(&packet)?, (ue, server, b"hello".as_slice()));
 /// # Ok::<(), oxirush_gtp_u::Error>(())
 /// ```
-pub fn ipv4_udp(
+pub fn udp(
     source: SocketAddrV4,
     destination: SocketAddrV4,
     payload: &[u8],
@@ -46,19 +71,22 @@ pub fn ipv4_udp(
 /// IPv4 header checksum, and the UDP checksum when not 0, must be valid.
 ///
 /// ```
-/// use oxirush_gtp_u::{ipv4_udp, parse_ipv4_udp};
+/// use oxirush_gtp_u::ip;
 ///
 /// let (ue, server) = ("10.45.0.2:4000".parse().unwrap(), "192.0.2.1:7".parse().unwrap());
-/// let mut packet = ipv4_udp(ue, server, b"hello")?;
-/// assert_eq!(parse_ipv4_udp(&packet)?.2, b"hello");
+/// let mut packet = ip::udp(ue, server, b"hello")?;
+/// assert_eq!(ip::parse_udp(&packet)?.2, b"hello");
 ///
 /// // An octet changed in transit fails the UDP checksum
 /// packet[30] ^= 1;
-/// assert!(parse_ipv4_udp(&packet).is_err());
+/// assert!(ip::parse_udp(&packet).is_err());
 /// # Ok::<(), oxirush_gtp_u::Error>(())
 /// ```
-pub fn parse_ipv4_udp(bytes: &[u8]) -> Result<(SocketAddrV4, SocketAddrV4, &[u8]), Error> {
-    let packet = parse(bytes, UDP)?;
+pub fn parse_udp(bytes: &[u8]) -> Result<(SocketAddrV4, SocketAddrV4, &[u8]), Error> {
+    let packet = parse(bytes)?;
+    if packet.protocol != UDP {
+        return Err(Error::UnexpectedPacket(Expected::Udp));
+    }
     let udp = packet.payload;
     let Some(udp_header) = udp.first_chunk::<UDP_HEADER_LEN>() else {
         return Err(truncated(Part::UdpHeader, UDP_HEADER_LEN, udp));
@@ -102,13 +130,13 @@ pub fn parse_ipv4_udp(bytes: &[u8]) -> Result<(SocketAddrV4, SocketAddrV4, &[u8]
 pub(crate) struct Ipv4Packet<'a> {
     pub source: Ipv4Addr,
     pub destination: Ipv4Addr,
+    pub protocol: u8,
     /// The payload, without link padding after the total length.
     pub payload: &'a [u8],
 }
 
-/// Parse an unfragmented IPv4 packet of `protocol` with a valid header
-/// checksum.
-pub(crate) fn parse(bytes: &[u8], protocol: u8) -> Result<Ipv4Packet<'_>, Error> {
+/// Parse an unfragmented IPv4 packet with a valid header checksum.
+pub(crate) fn parse(bytes: &[u8]) -> Result<Ipv4Packet<'_>, Error> {
     let Some(header) = bytes.first_chunk::<HEADER_LEN>() else {
         return Err(truncated(Part::Ipv4Header, HEADER_LEN, bytes));
     };
@@ -134,12 +162,6 @@ pub(crate) fn parse(bytes: &[u8], protocol: u8) -> Result<Ipv4Packet<'_>, Error>
     if total > bytes.len() {
         return Err(truncated(Part::Ipv4Packet, total, bytes));
     }
-    if header[9] != protocol {
-        return Err(Error::UnexpectedPacket(match protocol {
-            UDP => Expected::Udp,
-            _ => Expected::Icmp,
-        }));
-    }
     // More Fragments, or a fragment offset.
     if header[6] & 0x3f != 0 || header[7] != 0 {
         return Err(Error::UnexpectedPacket(Expected::Unfragmented));
@@ -154,6 +176,7 @@ pub(crate) fn parse(bytes: &[u8], protocol: u8) -> Result<Ipv4Packet<'_>, Error>
     Ok(Ipv4Packet {
         source: Ipv4Addr::from([header[12], header[13], header[14], header[15]]),
         destination: Ipv4Addr::from([header[16], header[17], header[18], header[19]]),
+        protocol: header[9],
         payload: &bytes[header_len..total],
     })
 }
@@ -229,21 +252,21 @@ mod tests {
     fn udp_round_trip_with_checksums() {
         let source = SocketAddrV4::new(Ipv4Addr::new(10, 60, 0, 2), 1234);
         let destination = SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 40900);
-        let packet = ipv4_udp(source, destination, b"odd").unwrap();
+        let packet = udp(source, destination, b"odd").unwrap();
         assert_eq!(
-            parse_ipv4_udp(&packet).unwrap(),
+            parse_udp(&packet).unwrap(),
             (source, destination, b"odd".as_slice())
         );
         // The error has the checksum of the packet and the one that its
         // octets give: that of a packet made with them.
         let mut corrupt = packet.clone();
         *corrupt.last_mut().unwrap() ^= 1;
-        let made = ipv4_udp(source, destination, b"ode").unwrap();
+        let made = udp(source, destination, b"ode").unwrap();
         assert_eq!(corrupt[28..], made[28..]);
         let field = |packet: &[u8]| u16::from_be_bytes([packet[26], packet[27]]);
         assert_ne!(field(&packet), field(&made));
         assert_eq!(
-            parse_ipv4_udp(&corrupt),
+            parse_udp(&corrupt),
             Err(Error::InvalidChecksum {
                 what: Part::UdpDatagram,
                 received: field(&packet),
@@ -257,7 +280,7 @@ mod tests {
         // of the sum, whose carry comes back at its low end.
         let more = u32::from(received) + 0x100;
         assert_eq!(
-            parse_ipv4_udp(&header),
+            parse_udp(&header),
             Err(Error::InvalidChecksum {
                 what: Part::Ipv4Header,
                 received,
@@ -268,7 +291,7 @@ mod tests {
         let mut unchecked = packet;
         unchecked[26..28].copy_from_slice(&[0, 0]);
         *unchecked.last_mut().unwrap() ^= 1;
-        assert!(parse_ipv4_udp(&unchecked).is_ok());
+        assert!(parse_udp(&unchecked).is_ok());
     }
 
     /// RFC 768: the checksum of a UDP datagram covers the pseudo header, the source
@@ -278,7 +301,7 @@ mod tests {
     fn the_udp_checksum_covers_the_pseudo_header() {
         let source = SocketAddrV4::new(Ipv4Addr::new(10, 60, 0, 2), 1234);
         let destination = SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 40900);
-        let packet = ipv4_udp(source, destination, b"odd").unwrap();
+        let packet = udp(source, destination, b"odd").unwrap();
         assert_eq!(packet[26..28], [0xbb, 0x9d]);
         // A sum whose carry, folded once, carries again: 0xffff + 0xffff + 1
         assert_eq!(checksum(&[&[0xff, 0xff, 0xff, 0xff, 0x00, 0x01]]), 0xfffe);
@@ -298,7 +321,7 @@ mod tests {
     #[test]
     fn rejects_malformed_ipv4() {
         let source = SocketAddrV4::new(Ipv4Addr::new(10, 60, 0, 2), 1);
-        let packet = ipv4_udp(source, source, b"x").unwrap();
+        let packet = udp(source, source, b"x").unwrap();
         for length in 0..packet.len() {
             // The input ends in the header, or before the end that the
             // header says.
@@ -314,7 +337,7 @@ mod tests {
                     available: length,
                 },
             };
-            assert_eq!(parse_ipv4_udp(&packet[..length]), Err(error));
+            assert_eq!(parse_udp(&packet[..length]), Err(error));
         }
         // A packet whose total length ends inside the UDP header, and one
         // whose UDP length says more than the packet has, or less than a
@@ -326,7 +349,7 @@ mod tests {
             bytes[10..12].copy_from_slice(&[0, 0]);
             let sum = checksum(&[&bytes[..20]]);
             bytes[10..12].copy_from_slice(&sum.to_be_bytes());
-            parse_ipv4_udp(&bytes).unwrap_err()
+            parse_udp(&bytes).unwrap_err()
         };
         assert_eq!(
             shorter(27, 9),
@@ -370,12 +393,12 @@ mod tests {
             }
         );
         // A datagram of its header alone has an empty payload
-        let empty = ipv4_udp(source, source, b"").unwrap();
-        assert_eq!(parse_ipv4_udp(&empty), Ok((source, source, &b""[..])));
+        let empty = udp(source, source, b"").unwrap();
+        assert_eq!(parse_udp(&empty), Ok((source, source, &b""[..])));
         let mut options = packet.clone();
         options[0] = 0x44;
         assert_eq!(
-            parse_ipv4_udp(&options),
+            parse_udp(&options),
             Err(Error::InvalidLength {
                 what: Part::Ipv4Header,
                 length: 16,
@@ -385,30 +408,33 @@ mod tests {
         let mut version = packet.clone();
         version[0] = 0x65;
         assert_eq!(
-            parse_ipv4_udp(&version),
+            parse_udp(&version),
             Err(Error::UnexpectedPacket(Expected::Ipv4))
         );
         let mut fragment = packet.clone();
         fragment[6] |= 0x20; // More Fragments
         assert_eq!(
-            parse_ipv4_udp(&fragment),
+            parse_udp(&fragment),
             Err(Error::UnexpectedPacket(Expected::Unfragmented))
         );
         let mut icmp = packet;
         icmp[9] = 1;
+        icmp[10..12].fill(0);
+        let sum = checksum(&[&icmp[..20]]);
+        icmp[10..12].copy_from_slice(&sum.to_be_bytes());
         assert_eq!(
-            parse_ipv4_udp(&icmp),
+            parse_udp(&icmp),
             Err(Error::UnexpectedPacket(Expected::Udp))
         );
         // More than the Total Length holds.
         assert_eq!(
-            ipv4_udp(source, source, &[0; 65508]),
+            udp(source, source, &[0; 65508]),
             Err(Error::OutOfRange {
                 what: Part::Ipv4Packet,
                 value: 65536,
                 max: 65535
             })
         );
-        assert!(ipv4_udp(source, source, &[0; 65507]).is_ok());
+        assert!(udp(source, source, &[0; 65507]).is_ok());
     }
 }

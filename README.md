@@ -57,7 +57,7 @@ tokio = { version = "1", features = ["macros", "rt", "net"] } # for the endpoint
 
 | Feature | Adds | Needs |
 | ------- | ---- | ----- |
-| none | the codec and the IPv4 helpers | no dependency |
+| none | the codec and the IPv4 helpers of `ip` | no dependency |
 | `endpoint`, the default | `Endpoint`, `upf_sim` | a Tokio runtime |
 | `tun` | `tun`, and `attach_tun` of `Endpoint` and `UpfSimulator` | Linux, `CAP_NET_ADMIN` |
 | `ebpf` | `ebpf` | Linux 6.6, `CAP_BPF` and `CAP_NET_ADMIN` |
@@ -80,7 +80,7 @@ negotiate.
 
 ```rust
 use oxirush_gtp_u::upf_sim::{Session, UpfSimulator};
-use oxirush_gtp_u::{Endpoint, PathEvent, RemoteTunnel, ipv4_udp, parse_ipv4_udp};
+use oxirush_gtp_u::{Endpoint, PathEvent, RemoteTunnel, ip};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -96,7 +96,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Uplink: an IP packet of the UE, which the UPF's echo service reflects
     let ue = "10.45.0.2:4000".parse()?;
     let server = "192.0.2.1:7".parse()?;
-    gnb.send(1, 5, ipv4_udp(ue, server, b"hello")?).await?;
+    gnb.send(1, 5, ip::udp(ue, server, b"hello")?).await?;
     let uplink = observed.recv().await.expect("the UPF is running");
     println!(
         "UPF: TEID {:#x}, QFI {:?}",
@@ -106,7 +106,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Downlink: the reply, with the tunnel it arrived on
     let downlink = received.recv().await.expect("the endpoint is running");
-    let (from, to, payload) = parse_ipv4_udp(&downlink.packet.payload)?;
+    let (from, to, payload) = ip::parse_udp(&downlink.packet.payload)?;
     println!(
         "gNB: RAN UE {} session {}, QFI {:?}: {from} to {to}",
         downlink.ran_id,

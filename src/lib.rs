@@ -46,7 +46,7 @@
 //! | Task | Items |
 //! |------|-------|
 //! | Encode and decode a G-PDU | [`Packet`], [`Packet::uplink`], [`Packet::decode_borrowed`], [`PduSessionContainer`] |
-//! | Carry a PDU session between a gNB and the test UPF | [`Endpoint`], [`Endpoint::install`], [`Endpoint::send`], [`upf_sim::UpfSimulator`], [`upf_sim::Session`], [`ipv4_udp`] |
+//! | Carry a PDU session between a gNB and the test UPF | [`Endpoint`], [`Endpoint::install`], [`Endpoint::send`], [`upf_sim::UpfSimulator`], [`upf_sim::Session`], [`ip::udp`] |
 //! | Supervise the path to a peer | [`Endpoint::echo`], [`Endpoint::supervise`], [`Endpoint::path_state`], [`Endpoint::path_events`], [`PathEvent`] |
 //! | Answer a peer: Echo and Error Indication | [`Packet::echo_request`], [`InformationElement`] |
 //! | Read and write extension headers | [`ExtensionHeader`], [`ExtensionHeaderType`] |
@@ -69,7 +69,7 @@
 //!
 //! | Part | Feature | Needs |
 //! | ---- | ------- | ----- |
-//! | The codec ([`Packet`], [`ExtensionHeader`], [`InformationElement`]) and the IPv4 helpers | none | no dependency |
+//! | The codec ([`Packet`], [`ExtensionHeader`], [`InformationElement`]) and the IPv4 helpers of [`ip`] | none | no dependency |
 //! | [`Endpoint`], [`upf_sim`] | `endpoint`, the default | a Tokio runtime |
 //! | [`tun`], and `attach_tun` of [`Endpoint`] and [`UpfSimulator`](upf_sim::UpfSimulator) | `tun` | Linux, `CAP_NET_ADMIN` |
 //! | [`ebpf`] | `ebpf` | Linux 6.6, `CAP_BPF` and `CAP_NET_ADMIN` |
@@ -123,15 +123,16 @@
 
 mod error;
 mod extension;
-mod icmp;
 mod ie;
-mod ipv4;
+pub mod ip;
 mod packet;
 mod pdu_set;
 mod types;
 
 #[cfg(feature = "endpoint")]
 mod datagram;
+#[cfg(feature = "endpoint")]
+mod icmp;
 // The `ebpf` feature on Linux, on a little-endian architecture of aya: see
 // build.rs.
 #[cfg(fast_path)]
@@ -157,16 +158,12 @@ pub mod upf_sim;
 
 #[cfg(feature = "endpoint")]
 pub use endpoint::{Endpoint, PathEvent, PathState, PathTimers, ReceivedPacket, RemoteTunnel};
-pub use error::{Error, Expected, Part};
+pub use error::{Error, Part};
 pub use extension::{
     DownlinkPduSessionInformation, ExtensionHeader, PduSessionContainer, UnknownNewIes,
     UplinkPduSessionInformation, UplinkTimeStamps,
 };
-pub use icmp::{
-    EchoKind, IcmpEcho, ipv4_icmp_echo_reply, ipv4_icmp_echo_request, parse_ipv4_icmp_echo,
-};
 pub use ie::InformationElement;
-pub use ipv4::{ipv4_udp, parse_ipv4_udp};
 pub use packet::Packet;
 pub use pdu_set::{DownlinkPduSetInformation, PduSetInformationContainer};
 #[cfg(feature = "endpoint")]

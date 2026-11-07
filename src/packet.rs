@@ -661,7 +661,7 @@ mod tests {
         ];
         indication.set_information_elements(&elements).unwrap();
         assert_eq!(indication.information_elements().unwrap(), elements);
-        let refused = [InformationElement::OtherTv {
+        let refused = [InformationElement::Other {
             kind: InformationElementType::RECOVERY,
             value: vec![0],
         }];

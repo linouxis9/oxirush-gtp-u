@@ -40,9 +40,7 @@ use crate::limit::limited;
 #[cfg(all(target_os = "linux", feature = "tun"))]
 use crate::tun::{TunConfig, TunPort};
 use crate::types::Teid;
-use crate::{
-    MessageType, Packet, ReceiveStats, RemoteTunnel, ipv4_icmp_echo_reply, ipv4_udp, parse_ipv4_udp,
-};
+use crate::{MessageType, Packet, ReceiveStats, RemoteTunnel, icmp, ip};
 
 mod sessions;
 #[cfg(all(target_os = "linux", feature = "tun"))]
@@ -151,7 +149,7 @@ impl fmt::Debug for UplinkPacket {
 ///
 /// ```
 /// use oxirush_gtp_u::upf_sim::{Session, UpfSimulator};
-/// use oxirush_gtp_u::{Packet, ipv4_udp, parse_ipv4_udp};
+/// use oxirush_gtp_u::{Packet, ip};
 ///
 /// # #[tokio::main(flavor = "current_thread")]
 /// # async fn main() -> std::io::Result<()> {
@@ -161,7 +159,7 @@ impl fmt::Debug for UplinkPacket {
 /// upf.set_session(Session::new(0x1001, 0x2001, gnb.local_addr()?, 9))?;
 ///
 /// let (ue, server) = ("10.45.0.2:4000".parse().unwrap(), "192.0.2.1:7".parse().unwrap());
-/// let uplink = Packet::uplink(0x1001, 9, ipv4_udp(ue, server, b"hello")?);
+/// let uplink = Packet::uplink(0x1001, 9, ip::udp(ue, server, b"hello")?);
 /// gnb.send_to(&uplink.encode()?, upf.local_addr()?).await?;
 /// assert_eq!(observed.recv().await.unwrap().packet, uplink);
 ///
@@ -170,7 +168,7 @@ impl fmt::Debug for UplinkPacket {
 /// let length = gnb.recv(&mut datagram).await?;
 /// let downlink = Packet::decode(&datagram[..length])?;
 /// assert_eq!((downlink.teid, downlink.qfi()), (0x2001, Some(9)));
-/// assert_eq!(parse_ipv4_udp(&downlink.payload)?, (server, ue, b"hello".as_slice()));
+/// assert_eq!(ip::parse_udp(&downlink.payload)?, (server, ue, b"hello".as_slice()));
 /// # Ok(())
 /// # }
 /// ```
@@ -588,10 +586,10 @@ async fn echo(
 
 /// The echo service's reply to an uplink T-PDU, if it answers it.
 fn echo_service(packet: &[u8]) -> Option<Vec<u8>> {
-    if let Ok((source, destination, payload)) = parse_ipv4_udp(packet) {
-        return ipv4_udp(destination, source, payload).ok();
+    if let Ok((source, destination, payload)) = ip::parse_udp(packet) {
+        return ip::udp(destination, source, payload).ok();
     }
-    ipv4_icmp_echo_reply(packet).ok()
+    icmp::echo_reply(packet)
 }
 
 async fn receive(
@@ -756,7 +754,7 @@ mod tests {
         let echoed = |teid| {
             let server = "192.0.2.1:7".parse().unwrap();
             let ue = "10.45.0.2:4000".parse().unwrap();
-            Packet::uplink(teid, 9, ipv4_udp(ue, server, b"hello").unwrap())
+            Packet::uplink(teid, 9, ip::udp(ue, server, b"hello").unwrap())
                 .encode()
                 .unwrap()
         };

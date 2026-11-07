@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use oxirush_gtp_u::upf_sim::{Session, UpfSimulator};
 use oxirush_gtp_u::{
-    EchoKind, Endpoint, Error, InformationElement, MessageType, Packet, Part, PduSessionContainer,
-    RemoteTunnel, ipv4_icmp_echo_request, ipv4_udp, parse_ipv4_icmp_echo, parse_ipv4_udp,
+    Endpoint, Error, InformationElement, MessageType, Packet, Part, PduSessionContainer,
+    RemoteTunnel, ip,
 };
 use tokio::net::UdpSocket;
 use tokio::time::timeout;
@@ -46,7 +46,7 @@ async fn on_port_2152<T, F: Future<Output = std::io::Result<T>>>(mut bind: impl 
 const WAIT: Duration = Duration::from_secs(2);
 
 fn udp(payload: &[u8]) -> Vec<u8> {
-    ipv4_udp(
+    ip::udp(
         SocketAddrV4::new(Ipv4Addr::new(10, 60, 0, 2), 1234),
         SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 40900),
         payload,
@@ -94,7 +94,7 @@ async fn n3_packets_follow_the_target_after_a_path_switch() {
     assert_eq!(next(&mut upf_rx).await.uplink_teid, remote.teid);
     let before = next(&mut source_rx).await;
     assert_eq!(
-        parse_ipv4_udp(&before.packet.payload).unwrap().2,
+        ip::parse_udp(&before.packet.payload).unwrap().2,
         b"before handover"
     );
     assert_eq!(
@@ -121,7 +121,7 @@ async fn n3_packets_follow_the_target_after_a_path_switch() {
     assert_eq!(next(&mut upf_rx).await.from, target.local_addr().unwrap());
     let after = next(&mut target_rx).await;
     assert_eq!(
-        parse_ipv4_udp(&after.packet.payload).unwrap().2,
+        ip::parse_udp(&after.packet.payload).unwrap().2,
         b"after handover"
     );
     assert!(
@@ -488,20 +488,22 @@ async fn built_in_n6_reflects_icmp_echo() {
         9,
     ))
     .unwrap();
-    let request = ipv4_icmp_echo_request(
-        Ipv4Addr::new(10, 60, 0, 2),
-        Ipv4Addr::new(192, 0, 2, 1),
-        0x1234,
-        4,
-        b"echo",
-    )
-    .unwrap();
+    // An ICMP Echo Request of 10.60.0.2 to 192.0.2.1, identifier 0x1234,
+    // sequence number 4, with its checksums.
+    let request = [
+        0x45, 0, 0, 32, 0, 0, 0x40, 0, 64, 1, 0x6e, 0x9e, 10, 60, 0, 2, 192, 0, 2, 1, // IPv4
+        8, 0, 0x17, 0xf5, 0x12, 0x34, 0, 4, b'e', b'c', b'h', b'o', // ICMP
+    ];
     gnb.send(1, 1, request).await.unwrap();
-    let reply = next(&mut received).await;
-    let echo = parse_ipv4_icmp_echo(&reply.packet.payload).unwrap();
-    assert_eq!(echo.kind, EchoKind::Reply);
-    assert_eq!((echo.identifier, echo.sequence), (0x1234, 4));
-    assert_eq!(echo.payload, b"echo");
+    let reply = next(&mut received).await.packet.payload;
+    // The addresses swapped, type 0, and the identifier, the sequence
+    // number and the data of the request.
+    assert_eq!(
+        (&reply[12..16], &reply[16..20]),
+        (&request[16..20], &request[12..16])
+    );
+    assert_eq!(reply[20..22], [0, 0]);
+    assert_eq!(reply[24..], request[24..]);
 }
 
 #[tokio::test]
@@ -629,13 +631,13 @@ async fn a_program_that_answers_for_n6_turns_the_echo_service_off() {
         .unwrap();
     gnb.send(1, 5, udp(b"ping")).await.unwrap();
     let uplink = next(&mut uplinks).await;
-    let (from, to, payload) = parse_ipv4_udp(&uplink.packet.payload).unwrap();
+    let (from, to, payload) = ip::parse_udp(&uplink.packet.payload).unwrap();
     assert_eq!(payload, b"ping");
-    upf.send_downlink(0x1001, ipv4_udp(to, from, b"pong").unwrap())
+    upf.send_downlink(0x1001, ip::udp(to, from, b"pong").unwrap())
         .await
         .unwrap();
     let downlink = next(&mut downlinks).await;
-    assert_eq!(parse_ipv4_udp(&downlink.packet.payload).unwrap().2, b"pong");
+    assert_eq!(ip::parse_udp(&downlink.packet.payload).unwrap().2, b"pong");
     assert!(
         timeout(Duration::from_millis(200), downlinks.recv())
             .await
@@ -645,7 +647,7 @@ async fn a_program_that_answers_for_n6_turns_the_echo_service_off() {
     upf.set_echo_service(true);
     gnb.send(1, 5, udp(b"ping")).await.unwrap();
     let downlink = next(&mut downlinks).await;
-    assert_eq!(parse_ipv4_udp(&downlink.packet.payload).unwrap().2, b"ping");
+    assert_eq!(ip::parse_udp(&downlink.packet.payload).unwrap().2, b"ping");
 }
 
 /// The program says how it is called when asked.

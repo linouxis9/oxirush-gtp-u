@@ -1,5 +1,6 @@
 use std::fmt;
 
+use crate::ip::Expected;
 use crate::{InformationElementType, MessageType};
 
 /// Why a GTP-U message, or an inner IPv4 packet, cannot be decoded or encoded.
@@ -174,10 +175,6 @@ pub enum Part {
     UdpHeader,
     /// A UDP datagram: what its Length counts.
     UdpDatagram,
-    /// The header of an ICMP message.
-    IcmpHeader,
-    /// An ICMP message.
-    IcmpMessage,
 }
 
 impl fmt::Display for Part {
@@ -217,40 +214,6 @@ impl fmt::Display for Part {
             Part::Ipv4Packet => "IPv4 packet",
             Part::UdpHeader => "UDP header",
             Part::UdpDatagram => "UDP datagram",
-            Part::IcmpHeader => "ICMP header",
-            Part::IcmpMessage => "ICMP message",
-        })
-    }
-}
-
-/// What an IPv4 helper expected of a packet that is something else
-/// ([`Error::UnexpectedPacket`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum Expected {
-    /// IP version 4.
-    Ipv4,
-    /// A packet that is no fragment.
-    Unfragmented,
-    /// Protocol 17, UDP.
-    Udp,
-    /// Protocol 1, ICMP.
-    Icmp,
-    /// An ICMP Echo Request or Echo Reply, with code 0.
-    IcmpEcho,
-    /// An ICMP Echo Request.
-    IcmpEchoRequest,
-}
-
-impl fmt::Display for Expected {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Expected::Ipv4 => "not IPv4",
-            Expected::Unfragmented => "fragmented",
-            Expected::Udp => "not UDP",
-            Expected::Icmp => "not ICMP",
-            Expected::IcmpEcho => "not an ICMP Echo message",
-            Expected::IcmpEchoRequest => "not an ICMP Echo Request",
         })
     }
 }
