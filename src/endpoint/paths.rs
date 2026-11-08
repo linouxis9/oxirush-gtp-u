@@ -428,7 +428,11 @@ mod tests {
         let response = Packet::echo_response(sequence).encode().unwrap();
         let response = Packet::decode_borrowed(&response).unwrap();
         assert!(paths.echo_response(&response, peer));
-        assert_eq!(answer.await.unwrap(), Duration::from_millis(30));
+        let answer = tokio::time::timeout(Duration::from_secs(1), answer).await;
+        assert_eq!(
+            answer.expect("the answer comes").unwrap(),
+            Duration::from_millis(30)
+        );
     }
 
     /// A request whose exchange has ended, here unanswered, is no longer
@@ -446,6 +450,8 @@ mod tests {
             ..PathTimers::default()
         };
         paths.set_timers(timers).unwrap();
+        // Otherwise the exchange waits 3 s five times
+        assert_eq!(paths.timers(), timers);
         let peer = silent.local_addr().unwrap();
         let error = exchange(&socket, &paths, peer, true).await.unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
@@ -458,6 +464,7 @@ mod tests {
         let paths = Paths::new();
         let task = tokio::spawn(std::future::pending::<()>());
         paths.supervise("192.0.2.1:2152".parse().unwrap(), || task.abort_handle());
+        assert_eq!(lock(&paths.state).supervised.len(), 1);
         paths.end_supervisions();
         assert!(lock(&paths.state).supervised.is_empty());
         assert!(task.await.unwrap_err().is_cancelled());

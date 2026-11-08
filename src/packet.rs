@@ -614,75 +614,82 @@ mod tests {
     /// program changes before it sends it again.
     #[test]
     fn what_has_a_getter_has_a_setter() {
-        let wire = hex(
-            "34ff0029 11223344 00000085 01100900 45000021 00004000 40116e9c \
-             0a2d0002 c0000201 0fa00007 000de02a 68656c6c 6f",
-        );
-        let mut packet = Packet::decode(&wire).unwrap();
-        packet.teid = 0x5566_7788;
-        assert_eq!(packet.set_qfi(5), Some(9));
-        assert_eq!(packet.qfi(), Some(5));
-        let mut changed = wire.clone();
-        changed[4..8].copy_from_slice(&[0x55, 0x66, 0x77, 0x88]);
-        changed[14] = 5;
-        assert_eq!(packet.encode().unwrap(), changed);
-        // The container itself, as its getter gives it.
-        if let Some(PduSessionContainer::Uplink(information)) = packet.pdu_session_container_mut() {
-            information.qfi = 7;
-            information.ul_qfi_sequence_number = Some(3);
-        }
-        assert_eq!(packet.qfi(), Some(7));
-        assert_eq!(
-            packet.pdu_session_container().unwrap(),
-            &PduSessionContainer::Uplink({
-                let mut information = UplinkPduSessionInformation::new(7);
+        crate::bounded(|| {
+            let wire = hex(
+                "34ff0029 11223344 00000085 01100900 45000021 00004000 40116e9c \
+                 0a2d0002 c0000201 0fa00007 000de02a 68656c6c 6f",
+            );
+            let mut packet = Packet::decode(&wire).unwrap();
+            packet.teid = 0x5566_7788;
+            assert_eq!(packet.set_qfi(5), Some(9));
+            assert_eq!(packet.qfi(), Some(5));
+            let mut changed = wire.clone();
+            changed[4..8].copy_from_slice(&[0x55, 0x66, 0x77, 0x88]);
+            changed[14] = 5;
+            assert_eq!(packet.encode().unwrap(), changed);
+            // The container itself, as its getter gives it.
+            if let Some(PduSessionContainer::Uplink(information)) =
+                packet.pdu_session_container_mut()
+            {
+                information.qfi = 7;
                 information.ul_qfi_sequence_number = Some(3);
-                information
-            })
-        );
-        // A message without a container, and a container of another type,
-        // have no QFI to change.
-        let mut plain = Packet::g_pdu(1, vec![0x45]);
-        assert_eq!(plain.set_qfi(5), None);
-        assert_eq!(plain, Packet::g_pdu(1, vec![0x45]));
-        let mut other = PduSessionContainer::Other(vec![0x20, 0]);
-        assert_eq!(other.set_qfi(5), None);
-        let mut downlink = PduSessionContainer::downlink(1);
-        assert_eq!(downlink.set_qfi(2), Some(1));
-        assert_eq!(downlink.qfi(), Some(2));
-        let mut pdu_set = PduSetInformationContainer::Downlink(DownlinkPduSetInformation::new(3));
-        assert_eq!(pdu_set.set_qfi(4), Some(3));
-        assert_eq!(pdu_set.qfi(), Some(4));
-        // A signalling message's elements, as `information_elements` reads them.
-        let mut indication = Packet::new(MessageType::ERROR_INDICATION, 0, Vec::new());
-        let elements = [
-            InformationElement::TeidDataI(0x1001),
-            InformationElement::GtpUPeerAddress(Ipv4Addr::new(192, 0, 2, 1).into()),
-        ];
-        indication.set_information_elements(&elements).unwrap();
-        assert_eq!(indication.information_elements().unwrap(), elements);
-        let refused = [InformationElement::Other {
-            kind: InformationElementType::RECOVERY,
-            value: vec![0],
-        }];
-        assert!(indication.set_information_elements(&refused).is_err());
-        assert_eq!(indication.information_elements().unwrap(), elements);
+            }
+            assert_eq!(packet.qfi(), Some(7));
+            assert_eq!(
+                packet.pdu_session_container().unwrap(),
+                &PduSessionContainer::Uplink({
+                    let mut information = UplinkPduSessionInformation::new(7);
+                    information.ul_qfi_sequence_number = Some(3);
+                    information
+                })
+            );
+            // A message without a container, and a container of another type,
+            // have no QFI to change.
+            let mut plain = Packet::g_pdu(1, vec![0x45]);
+            assert_eq!(plain.set_qfi(5), None);
+            assert_eq!(plain, Packet::g_pdu(1, vec![0x45]));
+            let mut other = PduSessionContainer::Other(vec![0x20, 0]);
+            assert_eq!(other.set_qfi(5), None);
+            let mut downlink = PduSessionContainer::downlink(1);
+            assert_eq!(downlink.set_qfi(2), Some(1));
+            assert_eq!(downlink.qfi(), Some(2));
+            let mut pdu_set =
+                PduSetInformationContainer::Downlink(DownlinkPduSetInformation::new(3));
+            assert_eq!(pdu_set.set_qfi(4), Some(3));
+            assert_eq!(pdu_set.qfi(), Some(4));
+            // A signalling message's elements, as `information_elements` reads them.
+            let mut indication = Packet::new(MessageType::ERROR_INDICATION, 0, Vec::new());
+            let elements = [
+                InformationElement::TeidDataI(0x1001),
+                InformationElement::GtpUPeerAddress(Ipv4Addr::new(192, 0, 2, 1).into()),
+            ];
+            indication.set_information_elements(&elements).unwrap();
+            assert_eq!(indication.information_elements().unwrap(), elements);
+            let refused = [InformationElement::Other {
+                kind: InformationElementType::RECOVERY,
+                value: vec![0],
+            }];
+            assert!(indication.set_information_elements(&refused).is_err());
+            assert_eq!(indication.information_elements().unwrap(), elements);
+        });
     }
 
     /// A message has 16 extension headers at most: they encode and decode, and a 17th is
     /// refused.
     #[test]
     fn a_message_has_sixteen_extension_headers_at_most() {
-        let mut packet = Packet::g_pdu(1, vec![0x45]);
-        packet.extension_headers = vec![ExtensionHeader::UdpPort(2152); MAX_EXTENSION_HEADERS];
-        let bytes = packet.encode().unwrap();
-        assert_eq!(packet.encoded_len(), Ok(bytes.len()));
-        assert_eq!(Packet::decode(&bytes).unwrap(), packet);
-        packet
-            .extension_headers
-            .push(ExtensionHeader::UdpPort(2152));
-        assert_eq!(packet.encode(), Err(TOO_MANY));
-        assert_eq!(packet.encoded_len(), Err(TOO_MANY));
+        crate::bounded(|| {
+            let mut packet = Packet::g_pdu(1, vec![0x45]);
+            packet.extension_headers = vec![ExtensionHeader::UdpPort(2152); MAX_EXTENSION_HEADERS];
+            let bytes = packet.encode().unwrap();
+            assert_eq!(packet.encoded_len(), Ok(bytes.len()));
+            assert_eq!(Packet::decode(&bytes).unwrap(), packet);
+            packet
+                .extension_headers
+                .push(ExtensionHeader::UdpPort(2152));
+            assert_eq!(packet.encode(), Err(TOO_MANY));
+            assert_eq!(packet.encoded_len(), Err(TOO_MANY));
+        });
     }
 
     /// An extension header whose length octet says that it has none.
@@ -748,26 +755,28 @@ mod tests {
 
     #[test]
     fn invalid_encoding_leaves_reusable_buffer_unchanged() {
-        let mut invalid_extension = Packet::g_pdu(1, vec![1]);
-        invalid_extension
-            .extension_headers
-            .push(ExtensionHeader::Other {
-                kind: ExtensionHeaderType(0x21),
-                content: vec![0; 1022],
-            });
-        for packet in [
-            Packet::g_pdu(1, vec![0; 65536]),
-            invalid_extension,
-            Packet::uplink(1, 64, vec![]),
-        ] {
-            let mut buffer = Vec::with_capacity(32);
-            buffer.extend_from_slice(&[0xaa, 0xbb]);
-            let capacity = buffer.capacity();
-            assert!(packet.encoded_len().is_err());
-            assert!(packet.encode_into(&mut buffer).is_err());
-            assert_eq!(buffer, [0xaa, 0xbb]);
-            assert_eq!(buffer.capacity(), capacity);
-        }
+        crate::bounded(|| {
+            let mut invalid_extension = Packet::g_pdu(1, vec![1]);
+            invalid_extension
+                .extension_headers
+                .push(ExtensionHeader::Other {
+                    kind: ExtensionHeaderType(0x21),
+                    content: vec![0; 1022],
+                });
+            for packet in [
+                Packet::g_pdu(1, vec![0; 65536]),
+                invalid_extension,
+                Packet::uplink(1, 64, vec![]),
+            ] {
+                let mut buffer = Vec::with_capacity(32);
+                buffer.extend_from_slice(&[0xaa, 0xbb]);
+                let capacity = buffer.capacity();
+                assert!(packet.encoded_len().is_err());
+                assert!(packet.encode_into(&mut buffer).is_err());
+                assert_eq!(buffer, [0xaa, 0xbb]);
+                assert_eq!(buffer.capacity(), capacity);
+            }
+        });
     }
 
     #[test]
@@ -794,104 +803,108 @@ mod tests {
 
     #[test]
     fn g_pdus_on_the_wire() {
-        round_trip(
-            &Packet::g_pdu(0x1234_5678, vec![0x45]),
-            "30 ff 0001 12345678 45",
-        );
-        round_trip(
-            &Packet::uplink(0x1234_5678, 9, vec![0x45]),
-            "34 ff 0009 12345678 0000 00 85 01 10 09 00 45",
-        );
-        round_trip(
-            &Packet::downlink(1, 63, vec![0x60]),
-            "34 ff 0009 00000001 0000 00 85 01 00 3f 00 60",
-        );
-        let packet = Packet::uplink(1, 9, vec![]);
-        assert_eq!(packet.qfi(), Some(9));
-        assert_eq!(Packet::g_pdu(1, vec![]).qfi(), None);
+        crate::bounded(|| {
+            round_trip(
+                &Packet::g_pdu(0x1234_5678, vec![0x45]),
+                "30 ff 0001 12345678 45",
+            );
+            round_trip(
+                &Packet::uplink(0x1234_5678, 9, vec![0x45]),
+                "34 ff 0009 12345678 0000 00 85 01 10 09 00 45",
+            );
+            round_trip(
+                &Packet::downlink(1, 63, vec![0x60]),
+                "34 ff 0009 00000001 0000 00 85 01 00 3f 00 60",
+            );
+            let packet = Packet::uplink(1, 9, vec![]);
+            assert_eq!(packet.qfi(), Some(9));
+            assert_eq!(Packet::g_pdu(1, vec![]).qfi(), None);
+        });
     }
 
     #[test]
     fn every_pdu_session_container_field() {
-        let mut downlink = DownlinkPduSessionInformation::new(5);
-        downlink.rqi = true;
-        downlink.ppi = Some(3);
-        downlink.dl_sending_time_stamp = Some(0x0102_0304_0506_0708);
-        downlink.dl_qfi_sequence_number = Some(0x0a_0b0c);
-        downlink.dl_mbs_qfi_sequence_number = Some(0x1122_3344);
-        let mut packet = Packet::g_pdu(1, vec![]);
-        packet
-            .extension_headers
-            .push(ExtensionHeader::PduSessionContainer(
-                PduSessionContainer::Downlink(downlink),
-            ));
-        round_trip(
-            &packet,
-            "34 ff 0018 00000001 0000 00 85
-             05 0e c5 60 0102030405060708 0a0b0c 11223344 00",
-        );
+        crate::bounded(|| {
+            let mut downlink = DownlinkPduSessionInformation::new(5);
+            downlink.rqi = true;
+            downlink.ppi = Some(3);
+            downlink.dl_sending_time_stamp = Some(0x0102_0304_0506_0708);
+            downlink.dl_qfi_sequence_number = Some(0x0a_0b0c);
+            downlink.dl_mbs_qfi_sequence_number = Some(0x1122_3344);
+            let mut packet = Packet::g_pdu(1, vec![]);
+            packet
+                .extension_headers
+                .push(ExtensionHeader::PduSessionContainer(
+                    PduSessionContainer::Downlink(downlink),
+                ));
+            round_trip(
+                &packet,
+                "34 ff 0018 00000001 0000 00 85
+                 05 0e c5 60 0102030405060708 0a0b0c 11223344 00",
+            );
 
-        let mut uplink = UplinkPduSessionInformation::new(7);
-        uplink.time_stamps = Some(UplinkTimeStamps {
-            dl_sending_repeated: 1,
-            dl_received: 2,
-            ul_sending: 3,
-        });
-        uplink.dl_delay_result = Some(4);
-        uplink.ul_delay_result = Some(5);
-        uplink.ul_qfi_sequence_number = Some(6);
-        uplink.n3_n9_delay_result = Some(7);
-        uplink.d1_ul_pdcp_delay_result_ind = Some(true);
-        uplink.ul_congestion_information = Some(9574);
-        uplink.dl_congestion_information = Some(1000);
-        packet.extension_headers = vec![ExtensionHeader::PduSessionContainer(
-            PduSessionContainer::Uplink(uplink.clone()),
-        )];
-        // New IE Flags 0 to 2, D1 UL PDCP Delay Result Ind, UL and DL
-        // Congestion Information, padding.
-        round_trip(
-            &packet,
-            "34 ff 0038 00000001 0000 00 85
-             0d 1f c7 0000000000000001 0000000000000002 0000000000000003
-             00000004 00000005 000006 00000007 07 01 2566 03e8 000000 00",
-        );
+            let mut uplink = UplinkPduSessionInformation::new(7);
+            uplink.time_stamps = Some(UplinkTimeStamps {
+                dl_sending_repeated: 1,
+                dl_received: 2,
+                ul_sending: 3,
+            });
+            uplink.dl_delay_result = Some(4);
+            uplink.ul_delay_result = Some(5);
+            uplink.ul_qfi_sequence_number = Some(6);
+            uplink.n3_n9_delay_result = Some(7);
+            uplink.d1_ul_pdcp_delay_result_ind = Some(true);
+            uplink.ul_congestion_information = Some(9574);
+            uplink.dl_congestion_information = Some(1000);
+            packet.extension_headers = vec![ExtensionHeader::PduSessionContainer(
+                PduSessionContainer::Uplink(uplink.clone()),
+            )];
+            // New IE Flags 0 to 2, D1 UL PDCP Delay Result Ind, UL and DL
+            // Congestion Information, padding.
+            round_trip(
+                &packet,
+                "34 ff 0038 00000001 0000 00 85
+                 0d 1f c7 0000000000000001 0000000000000002 0000000000000003
+                 00000004 00000005 000006 00000007 07 01 2566 03e8 000000 00",
+            );
 
-        // A later release's New IE Flag 5 and an extension octet.
-        let mut uplink = UplinkPduSessionInformation::new(7);
-        uplink.d1_ul_pdcp_delay_result_ind = Some(false);
-        uplink.unknown_new_ies = Some(Box::new(UnknownNewIes {
-            flags: vec![0xa0, 0x01],
-            // A new IE of three octets, and the padding.
-            content: vec![0xaa, 0xbb, 0xcc, 0x00, 0x00],
-        }));
-        packet.extension_headers = vec![ExtensionHeader::PduSessionContainer(
-            PduSessionContainer::Uplink(uplink.clone()),
-        )];
-        round_trip(
-            &packet,
-            "34 ff 0010 00000001 0000 00 85 03 10 47 a1 01 00 aabbcc0000 00",
-        );
-        // No octet, a first octet without a flag, one with a flag that has a
-        // field of its own (0, 3 or 4), an E bit without the octet that it
-        // announces, and an octet that no E bit announces.
-        for flags in [
-            vec![],
-            vec![0x00],
-            vec![0x21],
-            vec![0x28],
-            vec![0x30],
-            vec![0xa0],
-            vec![0x20, 0x01],
-        ] {
+            // A later release's New IE Flag 5 and an extension octet.
+            let mut uplink = UplinkPduSessionInformation::new(7);
+            uplink.d1_ul_pdcp_delay_result_ind = Some(false);
             uplink.unknown_new_ies = Some(Box::new(UnknownNewIes {
-                flags,
-                content: vec![],
+                flags: vec![0xa0, 0x01],
+                // A new IE of three octets, and the padding.
+                content: vec![0xaa, 0xbb, 0xcc, 0x00, 0x00],
             }));
             packet.extension_headers = vec![ExtensionHeader::PduSessionContainer(
                 PduSessionContainer::Uplink(uplink.clone()),
             )];
-            assert_eq!(packet.encode(), Err(Error::Malformed(Part::NewIeFlags)));
-        }
+            round_trip(
+                &packet,
+                "34 ff 0010 00000001 0000 00 85 03 10 47 a1 01 00 aabbcc0000 00",
+            );
+            // No octet, a first octet without a flag, one with a flag that has a
+            // field of its own (0, 3 or 4), an E bit without the octet that it
+            // announces, and an octet that no E bit announces.
+            for flags in [
+                vec![],
+                vec![0x00],
+                vec![0x21],
+                vec![0x28],
+                vec![0x30],
+                vec![0xa0],
+                vec![0x20, 0x01],
+            ] {
+                uplink.unknown_new_ies = Some(Box::new(UnknownNewIes {
+                    flags,
+                    content: vec![],
+                }));
+                packet.extension_headers = vec![ExtensionHeader::PduSessionContainer(
+                    PduSessionContainer::Uplink(uplink.clone()),
+                )];
+                assert_eq!(packet.encode(), Err(Error::Malformed(Part::NewIeFlags)));
+            }
+        });
     }
 
     /// The UL and DL Available Bitrate of TS 38.415 V19.1.0, which figure
@@ -899,101 +912,105 @@ mod tests {
     /// 4, four octets each, in kbit/s.
     #[test]
     fn uplink_available_bitrates_on_the_wire() {
-        let container = |uplink: &UplinkPduSessionInformation| {
-            Packet::g_pdu(1, vec![])
-                .with_pdu_session_container(PduSessionContainer::Uplink(uplink.clone()))
-        };
-        let mut uplink = UplinkPduSessionInformation::new(7);
-        uplink.ul_available_bitrate = Some(1_000_000);
-        uplink.dl_available_bitrate = Some(4_000_000_000);
-        // The New IE Flag, flags 3 and 4, the two bitrates, padding.
-        round_trip(
-            &container(&uplink),
-            "34 ff 0014 00000001 0000 00 85
-             04 10 47 18 000f4240 ee6b2800 000000 00",
-        );
-        // Each alone.
-        uplink.dl_available_bitrate = None;
-        round_trip(
-            &container(&uplink),
-            "34 ff 0010 00000001 0000 00 85  03 10 47 08 000f4240 000000 00",
-        );
-        uplink.ul_available_bitrate = None;
-        uplink.dl_available_bitrate = Some(u32::MAX);
-        round_trip(
-            &container(&uplink),
-            "34 ff 0010 00000001 0000 00 85  03 10 47 10 ffffffff 000000 00",
-        );
-        // After the three IEs of the flags before theirs, and before those
-        // of a later release.
-        uplink.d1_ul_pdcp_delay_result_ind = Some(true);
-        uplink.ul_congestion_information = Some(9574);
-        uplink.dl_congestion_information = Some(1000);
-        uplink.ul_available_bitrate = Some(0x0102_0304);
-        uplink.dl_available_bitrate = Some(0x0506_0708);
-        uplink.unknown_new_ies = Some(Box::new(UnknownNewIes {
-            flags: vec![0x20],
-            // A new IE of three octets, and the padding.
-            content: vec![0xaa, 0xbb, 0xcc, 0, 0, 0],
-        }));
-        round_trip(
-            &container(&uplink),
-            "34 ff 001c 00000001 0000 00 85
-             06 10 47 3f 01 2566 03e8 01020304 05060708 aabbcc 000000 00",
-        );
-        // Flag 4 announces a bitrate where the container has its padding.
-        assert_eq!(
-            Packet::decode(&hex(
-                "34 ff 0010 00000001 0000 00 85  03 10 47 18 000f4240 000000 00"
-            )),
-            Err(Error::Truncated {
-                what: Part::PduSessionContainer,
-                needed: 4,
-                available: 3
-            })
-        );
+        crate::bounded(|| {
+            let container = |uplink: &UplinkPduSessionInformation| {
+                Packet::g_pdu(1, vec![])
+                    .with_pdu_session_container(PduSessionContainer::Uplink(uplink.clone()))
+            };
+            let mut uplink = UplinkPduSessionInformation::new(7);
+            uplink.ul_available_bitrate = Some(1_000_000);
+            uplink.dl_available_bitrate = Some(4_000_000_000);
+            // The New IE Flag, flags 3 and 4, the two bitrates, padding.
+            round_trip(
+                &container(&uplink),
+                "34 ff 0014 00000001 0000 00 85
+                 04 10 47 18 000f4240 ee6b2800 000000 00",
+            );
+            // Each alone.
+            uplink.dl_available_bitrate = None;
+            round_trip(
+                &container(&uplink),
+                "34 ff 0010 00000001 0000 00 85  03 10 47 08 000f4240 000000 00",
+            );
+            uplink.ul_available_bitrate = None;
+            uplink.dl_available_bitrate = Some(u32::MAX);
+            round_trip(
+                &container(&uplink),
+                "34 ff 0010 00000001 0000 00 85  03 10 47 10 ffffffff 000000 00",
+            );
+            // After the three IEs of the flags before theirs, and before those
+            // of a later release.
+            uplink.d1_ul_pdcp_delay_result_ind = Some(true);
+            uplink.ul_congestion_information = Some(9574);
+            uplink.dl_congestion_information = Some(1000);
+            uplink.ul_available_bitrate = Some(0x0102_0304);
+            uplink.dl_available_bitrate = Some(0x0506_0708);
+            uplink.unknown_new_ies = Some(Box::new(UnknownNewIes {
+                flags: vec![0x20],
+                // A new IE of three octets, and the padding.
+                content: vec![0xaa, 0xbb, 0xcc, 0, 0, 0],
+            }));
+            round_trip(
+                &container(&uplink),
+                "34 ff 001c 00000001 0000 00 85
+                 06 10 47 3f 01 2566 03e8 01020304 05060708 aabbcc 000000 00",
+            );
+            // Flag 4 announces a bitrate where the container has its padding.
+            assert_eq!(
+                Packet::decode(&hex(
+                    "34 ff 0010 00000001 0000 00 85  03 10 47 18 000f4240 000000 00"
+                )),
+                Err(Error::Truncated {
+                    what: Part::PduSessionContainer,
+                    needed: 4,
+                    available: 3
+                })
+            );
+        });
     }
 
     #[test]
     fn downlink_burst_information_round_trips() {
-        // TS 38.415 V19.1.0 figure 5.5.2.1-1: PPP=1, PPI=3,
-        // BSSI=1, TTNBI=1, BSSize=0x010203, TTNB=0x0405.
-        let wire = hex("34 ff 0010 00000001 0000 00 85
-             03 00 85 63 010203 0405 0000 00");
-        let packet = Packet::decode(&wire).unwrap();
-        assert_eq!(packet.encode().unwrap(), wire);
-        let Some(PduSessionContainer::Downlink(information)) = packet.pdu_session_container()
-        else {
-            panic!("not DL PDU Session Information");
-        };
-        assert_eq!(information.burst_size, Some(0x01_0203));
-        assert_eq!(information.time_to_next_burst, Some(0x0405));
+        crate::bounded(|| {
+            // TS 38.415 V19.1.0 figure 5.5.2.1-1: PPP=1, PPI=3,
+            // BSSI=1, TTNBI=1, BSSize=0x010203, TTNB=0x0405.
+            let wire = hex("34 ff 0010 00000001 0000 00 85
+                 03 00 85 63 010203 0405 0000 00");
+            let packet = Packet::decode(&wire).unwrap();
+            assert_eq!(packet.encode().unwrap(), wire);
+            let Some(PduSessionContainer::Downlink(information)) = packet.pdu_session_container()
+            else {
+                panic!("not DL PDU Session Information");
+            };
+            assert_eq!(information.burst_size, Some(0x01_0203));
+            assert_eq!(information.time_to_next_burst, Some(0x0405));
 
-        // All combinations of the optional fields, including interactions
-        // with timestamps and both sequence numbers.
-        for flags in 0u8..64 {
-            let mut information = DownlinkPduSessionInformation::new(63);
-            information.ppi = (flags & 1 != 0).then_some(7);
-            information.dl_sending_time_stamp = (flags & 2 != 0).then_some(u64::MAX);
-            information.dl_qfi_sequence_number = (flags & 4 != 0).then_some(0xff_ffff);
-            information.dl_mbs_qfi_sequence_number = (flags & 8 != 0).then_some(u32::MAX);
-            information.burst_size = (flags & 16 != 0).then_some(0xff_ffff);
-            information.time_to_next_burst = (flags & 32 != 0).then_some(u16::MAX);
-            let mut packet = Packet::g_pdu(1, vec![0x45]);
-            packet
-                .extension_headers
-                .push(ExtensionHeader::PduSessionContainer(
-                    PduSessionContainer::Downlink(information),
-                ));
-            if flags & 1 == 0 && flags & 48 != 0 {
-                assert_eq!(packet.encode(), Err(Error::Missing(Part::Ppi)));
-            } else {
-                let wire = packet.encode().unwrap();
-                let decoded = Packet::decode(&wire).unwrap();
-                assert_eq!(decoded, packet);
-                assert_eq!(decoded.encode().unwrap(), wire);
+            // All combinations of the optional fields, including interactions
+            // with timestamps and both sequence numbers.
+            for flags in 0u8..64 {
+                let mut information = DownlinkPduSessionInformation::new(63);
+                information.ppi = (flags & 1 != 0).then_some(7);
+                information.dl_sending_time_stamp = (flags & 2 != 0).then_some(u64::MAX);
+                information.dl_qfi_sequence_number = (flags & 4 != 0).then_some(0xff_ffff);
+                information.dl_mbs_qfi_sequence_number = (flags & 8 != 0).then_some(u32::MAX);
+                information.burst_size = (flags & 16 != 0).then_some(0xff_ffff);
+                information.time_to_next_burst = (flags & 32 != 0).then_some(u16::MAX);
+                let mut packet = Packet::g_pdu(1, vec![0x45]);
+                packet
+                    .extension_headers
+                    .push(ExtensionHeader::PduSessionContainer(
+                        PduSessionContainer::Downlink(information),
+                    ));
+                if flags & 1 == 0 && flags & 48 != 0 {
+                    assert_eq!(packet.encode(), Err(Error::Missing(Part::Ppi)));
+                } else {
+                    let wire = packet.encode().unwrap();
+                    let decoded = Packet::decode(&wire).unwrap();
+                    assert_eq!(decoded, packet);
+                    assert_eq!(decoded.encode().unwrap(), wire);
+                }
             }
-        }
+        });
     }
 
     #[test]
@@ -1033,26 +1050,28 @@ mod tests {
 
     #[test]
     fn extension_header_chain_and_optional_fields() {
-        let mut packet = Packet::g_pdu(3, vec![0xaa]);
-        packet.sequence = Some(0x0102);
-        packet.n_pdu_number = Some(0x33);
-        packet.extension_headers = vec![
-            ExtensionHeader::UdpPort(2152),
-            ExtensionHeader::PduSessionContainer(PduSessionContainer::downlink(1)),
-            ExtensionHeader::ServiceClassIndicator(7),
-            // Unknown and comprehension-required: kept for the endpoint to reject.
-            ExtensionHeader::Other {
-                kind: ExtensionHeaderType(0xe0),
-                content: vec![1, 2, 3, 4, 5, 6],
-            },
-        ];
-        round_trip(
-            &packet,
-            "37 ff 0019 00000003 0102 33 40
-             01 0868 85  01 0001 20  01 0700 e0  02 010203040506 00  aa",
-        );
-        assert!(packet.extension_headers[3].comprehension_required());
-        assert!(!packet.extension_headers[2].comprehension_required());
+        crate::bounded(|| {
+            let mut packet = Packet::g_pdu(3, vec![0xaa]);
+            packet.sequence = Some(0x0102);
+            packet.n_pdu_number = Some(0x33);
+            packet.extension_headers = vec![
+                ExtensionHeader::UdpPort(2152),
+                ExtensionHeader::PduSessionContainer(PduSessionContainer::downlink(1)),
+                ExtensionHeader::ServiceClassIndicator(7),
+                // Unknown and comprehension-required: kept for the endpoint to reject.
+                ExtensionHeader::Other {
+                    kind: ExtensionHeaderType(0xe0),
+                    content: vec![1, 2, 3, 4, 5, 6],
+                },
+            ];
+            round_trip(
+                &packet,
+                "37 ff 0019 00000003 0102 33 40
+                 01 0868 85  01 0001 20  01 0700 e0  02 010203040506 00  aa",
+            );
+            assert!(packet.extension_headers[3].comprehension_required());
+            assert!(!packet.extension_headers[2].comprehension_required());
+        });
     }
 
     #[test]
@@ -1126,60 +1145,62 @@ mod tests {
 
     #[test]
     fn rejects_malformed_messages() {
-        let wire = Packet::uplink(1, 3, vec![0x45]).encode().unwrap();
-        for length in 0..wire.len() {
-            assert!(
-                Packet::decode(&wire[..length]).is_err(),
-                "prefix of {length}"
-            );
-        }
-        let mut longer = wire.clone();
-        longer.push(0);
-        assert_eq!(
-            Packet::decode(&longer),
-            Err(Error::InvalidLength {
-                what: Part::Message,
-                length: 9,
-                expected: 10
-            })
-        );
-        for first in [0x50, 0x20, 0x10] {
+        crate::bounded(|| {
+            let wire = Packet::uplink(1, 3, vec![0x45]).encode().unwrap();
+            for length in 0..wire.len() {
+                assert!(
+                    Packet::decode(&wire[..length]).is_err(),
+                    "prefix of {length}"
+                );
+            }
+            let mut longer = wire.clone();
+            longer.push(0);
             assert_eq!(
-                Packet::decode(&hex(&format!("{first:02x} ff 0000 00000001"))),
-                Err(Error::UnsupportedVersion(first))
+                Packet::decode(&longer),
+                Err(Error::InvalidLength {
+                    what: Part::Message,
+                    length: 9,
+                    expected: 10
+                })
             );
-        }
-        let mut zero_length = wire.clone();
-        zero_length[12] = 0;
-        assert_eq!(Packet::decode(&zero_length), Err(NO_OCTETS));
-        let mut beyond = wire;
-        beyond[12] = 3;
-        assert_eq!(
-            Packet::decode(&beyond),
-            Err(Error::Truncated {
-                what: Part::ExtensionHeader,
-                needed: 12,
-                available: 5
-            })
-        );
-        // A UDP Port extension header longer than its port.
-        assert_eq!(
-            Packet::decode(&hex("34 ff 000c 00000001 0000 00 40 02 0868 00000000 00")),
-            Err(Error::InvalidLength {
-                what: Part::UdpPort,
-                length: 8,
-                expected: 4
-            })
-        );
-        // PPP announces a PPI octet the container does not have.
-        assert_eq!(
-            Packet::decode(&hex("34 ff 0008 00000001 0000 00 85 01 00 80 00")),
-            Err(Error::Truncated {
-                what: Part::PduSessionContainer,
-                needed: 1,
-                available: 0
-            })
-        );
+            for first in [0x50, 0x20, 0x10] {
+                assert_eq!(
+                    Packet::decode(&hex(&format!("{first:02x} ff 0000 00000001"))),
+                    Err(Error::UnsupportedVersion(first))
+                );
+            }
+            let mut zero_length = wire.clone();
+            zero_length[12] = 0;
+            assert_eq!(Packet::decode(&zero_length), Err(NO_OCTETS));
+            let mut beyond = wire;
+            beyond[12] = 3;
+            assert_eq!(
+                Packet::decode(&beyond),
+                Err(Error::Truncated {
+                    what: Part::ExtensionHeader,
+                    needed: 12,
+                    available: 5
+                })
+            );
+            // A UDP Port extension header longer than its port.
+            assert_eq!(
+                Packet::decode(&hex("34 ff 000c 00000001 0000 00 40 02 0868 00000000 00")),
+                Err(Error::InvalidLength {
+                    what: Part::UdpPort,
+                    length: 8,
+                    expected: 4
+                })
+            );
+            // PPP announces a PPI octet the container does not have.
+            assert_eq!(
+                Packet::decode(&hex("34 ff 0008 00000001 0000 00 85 01 00 80 00")),
+                Err(Error::Truncated {
+                    what: Part::PduSessionContainer,
+                    needed: 1,
+                    available: 0
+                })
+            );
+        });
     }
 
     #[test]
@@ -1316,56 +1337,58 @@ mod tests {
     /// protocol, as figures 5.2.2.2-1 to 5.2.2.6-1 of TS 29.281 draw them.
     #[test]
     fn handover_and_forwarding_headers_on_the_wire() {
-        let with = |header| {
-            let mut packet = Packet::g_pdu(0x2001, vec![0x45]);
-            packet.extension_headers.push(header);
-            packet
-        };
-        // A PDCP PDU Number of 12 bits, between NG-RAN nodes.
-        round_trip(
-            &with(ExtensionHeader::PdcpPduNumber(0x0abc)),
-            "34 ff 0009 00002001 0000 00 c0  01 0abc 00  45",
-        );
-        // 18 bits, then three spare octets: with the type of this release
-        // and with that of earlier ones.
-        for (legacy_type, kind) in [(false, "03"), (true, "82")] {
-            let header = ExtensionHeader::LongPdcpPduNumber {
-                number: 0x2_abcd,
-                legacy_type,
+        crate::bounded(|| {
+            let with = |header| {
+                let mut packet = Packet::g_pdu(0x2001, vec![0x45]);
+                packet.extension_headers.push(header);
+                packet
             };
+            // A PDCP PDU Number of 12 bits, between NG-RAN nodes.
             round_trip(
-                &with(header),
-                &format!("34 ff 000d 00002001 0000 00 {kind}  02 02abcd 000000 00  45"),
+                &with(ExtensionHeader::PdcpPduNumber(0x0abc)),
+                "34 ff 0009 00002001 0000 00 c0  01 0abc 00  45",
             );
-        }
-        round_trip(
-            &with(ExtensionHeader::ServiceClassIndicator(7)),
-            "34 ff 0009 00002001 0000 00 20  01 07 00 00  45",
-        );
-        for (header, kind) in [
-            (ExtensionHeader::RanContainer(vec![0xaa, 0xbb]), "81"),
-            (ExtensionHeader::XwRanContainer(vec![0xaa, 0xbb]), "83"),
-            (ExtensionHeader::NrRanContainer(vec![0xaa, 0xbb]), "84"),
-        ] {
-            assert!(header.comprehension_required());
+            // 18 bits, then three spare octets: with the type of this release
+            // and with that of earlier ones.
+            for (legacy_type, kind) in [(false, "03"), (true, "82")] {
+                let header = ExtensionHeader::LongPdcpPduNumber {
+                    number: 0x2_abcd,
+                    legacy_type,
+                };
+                round_trip(
+                    &with(header),
+                    &format!("34 ff 000d 00002001 0000 00 {kind}  02 02abcd 000000 00  45"),
+                );
+            }
             round_trip(
-                &with(header),
-                &format!("34 ff 0009 00002001 0000 00 {kind}  01 aabb 00  45"),
+                &with(ExtensionHeader::ServiceClassIndicator(7)),
+                "34 ff 0009 00002001 0000 00 20  01 07 00 00  45",
             );
-        }
-        // A frame of flow control, which a G-PDU carries without a T-PDU.
-        let mut frame = Packet::g_pdu(0x2001, vec![]);
-        frame
-            .extension_headers
-            .push(ExtensionHeader::NrRanContainer(vec![1, 2, 3, 4, 5, 6]));
-        round_trip(&frame, "34 ff 000c 00002001 0000 00 84  02 010203040506 00");
-        // The End Marker of a forwarding tunnel between 5GS and EPS has the
-        // PDU Session Container (§7.3.2).
-        round_trip(
-            &Packet::end_marker(0x2001)
-                .with_pdu_session_container(PduSessionContainer::downlink(9)),
-            "34 fe 0008 00002001 0000 00 85  01 0009 00",
-        );
+            for (header, kind) in [
+                (ExtensionHeader::RanContainer(vec![0xaa, 0xbb]), "81"),
+                (ExtensionHeader::XwRanContainer(vec![0xaa, 0xbb]), "83"),
+                (ExtensionHeader::NrRanContainer(vec![0xaa, 0xbb]), "84"),
+            ] {
+                assert!(header.comprehension_required());
+                round_trip(
+                    &with(header),
+                    &format!("34 ff 0009 00002001 0000 00 {kind}  01 aabb 00  45"),
+                );
+            }
+            // A frame of flow control, which a G-PDU carries without a T-PDU.
+            let mut frame = Packet::g_pdu(0x2001, vec![]);
+            frame
+                .extension_headers
+                .push(ExtensionHeader::NrRanContainer(vec![1, 2, 3, 4, 5, 6]));
+            round_trip(&frame, "34 ff 000c 00002001 0000 00 84  02 010203040506 00");
+            // The End Marker of a forwarding tunnel between 5GS and EPS has the
+            // PDU Session Container (§7.3.2).
+            round_trip(
+                &Packet::end_marker(0x2001)
+                    .with_pdu_session_container(PduSessionContainer::downlink(9)),
+                "34 fe 0008 00002001 0000 00 85  01 0009 00",
+            );
+        });
     }
 
     #[test]
@@ -1463,74 +1486,76 @@ mod tests {
     /// ten of PSSN, four of PSI, the PSN, then the PSSize if PSSI says so.
     #[test]
     fn pdu_set_information_on_the_wire() {
-        let mut information = DownlinkPduSetInformation::new(9);
-        information.pdu_set_sequence_number = 0x2a5;
-        information.pdu_set_importance = 3;
-        information.pdu_sequence_number = 7;
-        let mut packet = Packet::downlink(0x2001, 9, vec![0x45]);
-        let header = |information, legacy_type| ExtensionHeader::PduSetInformationContainer {
-            information: PduSetInformationContainer::Downlink(information),
-            legacy_type,
-        };
-        // After the PDU Session Container, as the specification asks.
-        packet.extension_headers.push(header(information, false));
-        round_trip(
-            &packet,
-            "34 ff 0011 00002001 0000 00 85  01 0009 04  02 00 26a5 03 07 00 00  45",
-        );
-        // The last PDU of its PDU Set and of a data burst, with the size of
-        // the set, under the type of earlier versions.
-        information.end_of_data_burst = true;
-        information.end_pdu = true;
-        information.pdu_set_size = Some(0x01_0203);
-        packet.extension_headers[1] = header(information, true);
-        round_trip(
-            &packet,
-            "34 ff 0015 00002001 0000 00 85  01 0009 86
-             03 0e 26a5 03 07 010203 0000 00  45",
-        );
-        assert!(packet.extension_headers[1].comprehension_required());
-        // Every field at its largest and at its least.
-        let mut most = DownlinkPduSetInformation::new(63);
-        most.pdu_set_sequence_number = 0x3ff;
-        most.pdu_set_importance = 15;
-        most.pdu_sequence_number = 255;
-        most.pdu_set_size = Some(0xff_ffff);
-        for information in [most, DownlinkPduSetInformation::new(0)] {
-            let mut packet = Packet::g_pdu(1, vec![]);
+        crate::bounded(|| {
+            let mut information = DownlinkPduSetInformation::new(9);
+            information.pdu_set_sequence_number = 0x2a5;
+            information.pdu_set_importance = 3;
+            information.pdu_sequence_number = 7;
+            let mut packet = Packet::downlink(0x2001, 9, vec![0x45]);
+            let header = |information, legacy_type| ExtensionHeader::PduSetInformationContainer {
+                information: PduSetInformationContainer::Downlink(information),
+                legacy_type,
+            };
+            // After the PDU Session Container, as the specification asks.
             packet.extension_headers.push(header(information, false));
-            let wire = packet.encode().unwrap();
-            assert_eq!(Packet::decode(&wire).unwrap(), packet);
-        }
-        assert_eq!(
-            Packet::g_pdu(1, vec![])
-                .encode()
-                .map(|wire| wire.len())
-                .unwrap(),
-            8
-        );
-        // Spare bits are not evaluated, and what follows the fields is
-        // padding.
-        let decoded = Packet::decode(&hex(
-            "34 ff 000c 00000001 0000 00 04  02 01 26a5 f3 07 ff 00",
-        ))
-        .unwrap();
-        information.end_of_data_burst = false;
-        information.end_pdu = false;
-        information.pdu_set_size = None;
-        assert_eq!(decoded.extension_headers, [header(information, false)]);
+            round_trip(
+                &packet,
+                "34 ff 0011 00002001 0000 00 85  01 0009 04  02 00 26a5 03 07 00 00  45",
+            );
+            // The last PDU of its PDU Set and of a data burst, with the size of
+            // the set, under the type of earlier versions.
+            information.end_of_data_burst = true;
+            information.end_pdu = true;
+            information.pdu_set_size = Some(0x01_0203);
+            packet.extension_headers[1] = header(information, true);
+            round_trip(
+                &packet,
+                "34 ff 0015 00002001 0000 00 85  01 0009 86
+                 03 0e 26a5 03 07 010203 0000 00  45",
+            );
+            assert!(packet.extension_headers[1].comprehension_required());
+            // Every field at its largest and at its least.
+            let mut most = DownlinkPduSetInformation::new(63);
+            most.pdu_set_sequence_number = 0x3ff;
+            most.pdu_set_importance = 15;
+            most.pdu_sequence_number = 255;
+            most.pdu_set_size = Some(0xff_ffff);
+            for information in [most, DownlinkPduSetInformation::new(0)] {
+                let mut packet = Packet::g_pdu(1, vec![]);
+                packet.extension_headers.push(header(information, false));
+                let wire = packet.encode().unwrap();
+                assert_eq!(Packet::decode(&wire).unwrap(), packet);
+            }
+            assert_eq!(
+                Packet::g_pdu(1, vec![])
+                    .encode()
+                    .map(|wire| wire.len())
+                    .unwrap(),
+                8
+            );
+            // Spare bits are not evaluated, and what follows the fields is
+            // padding.
+            let decoded = Packet::decode(&hex(
+                "34 ff 000c 00000001 0000 00 04  02 01 26a5 f3 07 ff 00",
+            ))
+            .unwrap();
+            information.end_of_data_burst = false;
+            information.end_pdu = false;
+            information.pdu_set_size = None;
+            assert_eq!(decoded.extension_headers, [header(information, false)]);
 
-        // Another PDU type is kept as received.
-        let other = ExtensionHeader::PduSetInformationContainer {
-            information: PduSetInformationContainer::Other(vec![0x10, 1, 2, 3, 4, 5]),
-            legacy_type: false,
-        };
-        let mut packet = Packet::g_pdu(1, vec![]);
-        packet.extension_headers.push(other);
-        round_trip(
-            &packet,
-            "34 ff 000c 00000001 0000 00 04  02 10 0102030405 00",
-        );
+            // Another PDU type is kept as received.
+            let other = ExtensionHeader::PduSetInformationContainer {
+                information: PduSetInformationContainer::Other(vec![0x10, 1, 2, 3, 4, 5]),
+                legacy_type: false,
+            };
+            let mut packet = Packet::g_pdu(1, vec![]);
+            packet.extension_headers.push(other);
+            round_trip(
+                &packet,
+                "34 ff 000c 00000001 0000 00 04  02 10 0102030405 00",
+            );
+        });
     }
 
     #[test]

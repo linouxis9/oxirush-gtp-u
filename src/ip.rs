@@ -250,48 +250,50 @@ mod tests {
 
     #[test]
     fn udp_round_trip_with_checksums() {
-        let source = SocketAddrV4::new(Ipv4Addr::new(10, 60, 0, 2), 1234);
-        let destination = SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 40900);
-        let packet = udp(source, destination, b"odd").unwrap();
-        assert_eq!(
-            parse_udp(&packet).unwrap(),
-            (source, destination, b"odd".as_slice())
-        );
-        // The error has the checksum of the packet and the one that its
-        // octets give: that of a packet made with them.
-        let mut corrupt = packet.clone();
-        *corrupt.last_mut().unwrap() ^= 1;
-        let made = udp(source, destination, b"ode").unwrap();
-        assert_eq!(corrupt[28..], made[28..]);
-        let field = |packet: &[u8]| u16::from_be_bytes([packet[26], packet[27]]);
-        assert_ne!(field(&packet), field(&made));
-        assert_eq!(
-            parse_udp(&corrupt),
-            Err(Error::InvalidChecksum {
-                what: Part::UdpDatagram,
-                received: field(&packet),
-                computed: field(&made)
-            })
-        );
-        let mut header = packet.clone();
-        header[8] = 63; // the TTL of a packet that crossed a router
-        let received = u16::from_be_bytes([packet[10], packet[11]]);
-        // One less in an octet of weight 256 is 256 more in the complement
-        // of the sum, whose carry comes back at its low end.
-        let more = u32::from(received) + 0x100;
-        assert_eq!(
-            parse_udp(&header),
-            Err(Error::InvalidChecksum {
-                what: Part::Ipv4Header,
-                received,
-                computed: (more & 0xffff) as u16 + (more >> 16) as u16
-            })
-        );
-        // A zero UDP checksum means none.
-        let mut unchecked = packet;
-        unchecked[26..28].copy_from_slice(&[0, 0]);
-        *unchecked.last_mut().unwrap() ^= 1;
-        assert!(parse_udp(&unchecked).is_ok());
+        crate::bounded(|| {
+            let source = SocketAddrV4::new(Ipv4Addr::new(10, 60, 0, 2), 1234);
+            let destination = SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 40900);
+            let packet = udp(source, destination, b"odd").unwrap();
+            assert_eq!(
+                parse_udp(&packet).unwrap(),
+                (source, destination, b"odd".as_slice())
+            );
+            // The error has the checksum of the packet and the one that its
+            // octets give: that of a packet made with them.
+            let mut corrupt = packet.clone();
+            *corrupt.last_mut().unwrap() ^= 1;
+            let made = udp(source, destination, b"ode").unwrap();
+            assert_eq!(corrupt[28..], made[28..]);
+            let field = |packet: &[u8]| u16::from_be_bytes([packet[26], packet[27]]);
+            assert_ne!(field(&packet), field(&made));
+            assert_eq!(
+                parse_udp(&corrupt),
+                Err(Error::InvalidChecksum {
+                    what: Part::UdpDatagram,
+                    received: field(&packet),
+                    computed: field(&made)
+                })
+            );
+            let mut header = packet.clone();
+            header[8] = 63; // the TTL of a packet that crossed a router
+            let received = u16::from_be_bytes([packet[10], packet[11]]);
+            // One less in an octet of weight 256 is 256 more in the complement
+            // of the sum, whose carry comes back at its low end.
+            let more = u32::from(received) + 0x100;
+            assert_eq!(
+                parse_udp(&header),
+                Err(Error::InvalidChecksum {
+                    what: Part::Ipv4Header,
+                    received,
+                    computed: (more & 0xffff) as u16 + (more >> 16) as u16
+                })
+            );
+            // A zero UDP checksum means none.
+            let mut unchecked = packet;
+            unchecked[26..28].copy_from_slice(&[0, 0]);
+            *unchecked.last_mut().unwrap() ^= 1;
+            assert!(parse_udp(&unchecked).is_ok());
+        });
     }
 
     /// RFC 768: the checksum of a UDP datagram covers the pseudo header, the source
@@ -299,142 +301,148 @@ mod tests {
     /// the datagram; the sum here was done by hand.
     #[test]
     fn the_udp_checksum_covers_the_pseudo_header() {
-        let source = SocketAddrV4::new(Ipv4Addr::new(10, 60, 0, 2), 1234);
-        let destination = SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 40900);
-        let packet = udp(source, destination, b"odd").unwrap();
-        assert_eq!(packet[26..28], [0xbb, 0x9d]);
-        // A sum whose carry, folded once, carries again: 0xffff + 0xffff + 1
-        assert_eq!(checksum(&[&[0xff, 0xff, 0xff, 0xff, 0x00, 0x01]]), 0xfffe);
+        crate::bounded(|| {
+            let source = SocketAddrV4::new(Ipv4Addr::new(10, 60, 0, 2), 1234);
+            let destination = SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 40900);
+            let packet = udp(source, destination, b"odd").unwrap();
+            assert_eq!(packet[26..28], [0xbb, 0x9d]);
+            // A sum whose carry, folded once, carries again: 0xffff + 0xffff + 1
+            assert_eq!(checksum(&[&[0xff, 0xff, 0xff, 0xff, 0x00, 0x01]]), 0xfffe);
+        });
     }
 
     #[test]
     fn known_checksum() {
-        // RFC 1071 §3 example.
-        let bytes = [0x00, 0x01, 0xf2, 0x03, 0xf4, 0xf5, 0xf6, 0xf7];
-        assert_eq!(checksum(&[&bytes]), 0x220d);
-        assert_eq!(
-            checksum(&[&bytes[..2], &bytes[2..7]]),
-            checksum(&[&bytes[..7]])
-        );
+        crate::bounded(|| {
+            // RFC 1071 §3 example.
+            let bytes = [0x00, 0x01, 0xf2, 0x03, 0xf4, 0xf5, 0xf6, 0xf7];
+            assert_eq!(checksum(&[&bytes]), 0x220d);
+            assert_eq!(
+                checksum(&[&bytes[..2], &bytes[2..7]]),
+                checksum(&[&bytes[..7]])
+            );
+        });
     }
 
     #[test]
     fn rejects_malformed_ipv4() {
-        let source = SocketAddrV4::new(Ipv4Addr::new(10, 60, 0, 2), 1);
-        let packet = udp(source, source, b"x").unwrap();
-        for length in 0..packet.len() {
-            // The input ends in the header, or before the end that the
-            // header says.
-            let error = match length {
-                ..20 => Error::Truncated {
-                    what: Part::Ipv4Header,
-                    needed: 20,
-                    available: length,
-                },
-                _ => Error::Truncated {
-                    what: Part::Ipv4Packet,
-                    needed: 29,
-                    available: length,
-                },
+        crate::bounded(|| {
+            let source = SocketAddrV4::new(Ipv4Addr::new(10, 60, 0, 2), 1);
+            let packet = udp(source, source, b"x").unwrap();
+            for length in 0..packet.len() {
+                // The input ends in the header, or before the end that the
+                // header says.
+                let error = match length {
+                    ..20 => Error::Truncated {
+                        what: Part::Ipv4Header,
+                        needed: 20,
+                        available: length,
+                    },
+                    _ => Error::Truncated {
+                        what: Part::Ipv4Packet,
+                        needed: 29,
+                        available: length,
+                    },
+                };
+                assert_eq!(parse_udp(&packet[..length]), Err(error));
+            }
+            // A packet whose total length ends inside the UDP header, and one
+            // whose UDP length says more than the packet has, or less than a
+            // header.
+            let shorter = |total: u16, udp: u16| {
+                let mut bytes = packet.clone();
+                bytes[2..4].copy_from_slice(&total.to_be_bytes());
+                bytes[24..26].copy_from_slice(&udp.to_be_bytes());
+                bytes[10..12].copy_from_slice(&[0, 0]);
+                let sum = checksum(&[&bytes[..20]]);
+                bytes[10..12].copy_from_slice(&sum.to_be_bytes());
+                parse_udp(&bytes).unwrap_err()
             };
-            assert_eq!(parse_udp(&packet[..length]), Err(error));
-        }
-        // A packet whose total length ends inside the UDP header, and one
-        // whose UDP length says more than the packet has, or less than a
-        // header.
-        let shorter = |total: u16, udp: u16| {
-            let mut bytes = packet.clone();
-            bytes[2..4].copy_from_slice(&total.to_be_bytes());
-            bytes[24..26].copy_from_slice(&udp.to_be_bytes());
-            bytes[10..12].copy_from_slice(&[0, 0]);
-            let sum = checksum(&[&bytes[..20]]);
-            bytes[10..12].copy_from_slice(&sum.to_be_bytes());
-            parse_udp(&bytes).unwrap_err()
-        };
-        assert_eq!(
-            shorter(27, 9),
-            Error::Truncated {
-                what: Part::UdpHeader,
-                needed: 8,
-                available: 7
-            }
-        );
-        assert_eq!(
-            shorter(29, 10),
-            Error::Truncated {
-                what: Part::UdpDatagram,
-                needed: 10,
-                available: 9
-            }
-        );
-        assert_eq!(
-            shorter(29, 7),
-            Error::InvalidLength {
-                what: Part::UdpDatagram,
-                length: 7,
-                expected: 8
-            }
-        );
-        assert_eq!(
-            shorter(19, 9),
-            Error::InvalidLength {
-                what: Part::Ipv4Packet,
-                length: 19,
-                expected: 20
-            }
-        );
-        // A packet of its header alone has no room for the UDP header
-        assert_eq!(
-            shorter(20, 9),
-            Error::Truncated {
-                what: Part::UdpHeader,
-                needed: 8,
-                available: 0
-            }
-        );
-        // A datagram of its header alone has an empty payload
-        let empty = udp(source, source, b"").unwrap();
-        assert_eq!(parse_udp(&empty), Ok((source, source, &b""[..])));
-        let mut options = packet.clone();
-        options[0] = 0x44;
-        assert_eq!(
-            parse_udp(&options),
-            Err(Error::InvalidLength {
-                what: Part::Ipv4Header,
-                length: 16,
-                expected: 20
-            })
-        );
-        let mut version = packet.clone();
-        version[0] = 0x65;
-        assert_eq!(
-            parse_udp(&version),
-            Err(Error::UnexpectedPacket(Expected::Ipv4))
-        );
-        let mut fragment = packet.clone();
-        fragment[6] |= 0x20; // More Fragments
-        assert_eq!(
-            parse_udp(&fragment),
-            Err(Error::UnexpectedPacket(Expected::Unfragmented))
-        );
-        let mut icmp = packet;
-        icmp[9] = 1;
-        icmp[10..12].fill(0);
-        let sum = checksum(&[&icmp[..20]]);
-        icmp[10..12].copy_from_slice(&sum.to_be_bytes());
-        assert_eq!(
-            parse_udp(&icmp),
-            Err(Error::UnexpectedPacket(Expected::Udp))
-        );
-        // More than the Total Length holds.
-        assert_eq!(
-            udp(source, source, &[0; 65508]),
-            Err(Error::OutOfRange {
-                what: Part::Ipv4Packet,
-                value: 65536,
-                max: 65535
-            })
-        );
-        assert!(udp(source, source, &[0; 65507]).is_ok());
+            assert_eq!(
+                shorter(27, 9),
+                Error::Truncated {
+                    what: Part::UdpHeader,
+                    needed: 8,
+                    available: 7
+                }
+            );
+            assert_eq!(
+                shorter(29, 10),
+                Error::Truncated {
+                    what: Part::UdpDatagram,
+                    needed: 10,
+                    available: 9
+                }
+            );
+            assert_eq!(
+                shorter(29, 7),
+                Error::InvalidLength {
+                    what: Part::UdpDatagram,
+                    length: 7,
+                    expected: 8
+                }
+            );
+            assert_eq!(
+                shorter(19, 9),
+                Error::InvalidLength {
+                    what: Part::Ipv4Packet,
+                    length: 19,
+                    expected: 20
+                }
+            );
+            // A packet of its header alone has no room for the UDP header
+            assert_eq!(
+                shorter(20, 9),
+                Error::Truncated {
+                    what: Part::UdpHeader,
+                    needed: 8,
+                    available: 0
+                }
+            );
+            // A datagram of its header alone has an empty payload
+            let empty = udp(source, source, b"").unwrap();
+            assert_eq!(parse_udp(&empty), Ok((source, source, &b""[..])));
+            let mut options = packet.clone();
+            options[0] = 0x44;
+            assert_eq!(
+                parse_udp(&options),
+                Err(Error::InvalidLength {
+                    what: Part::Ipv4Header,
+                    length: 16,
+                    expected: 20
+                })
+            );
+            let mut version = packet.clone();
+            version[0] = 0x65;
+            assert_eq!(
+                parse_udp(&version),
+                Err(Error::UnexpectedPacket(Expected::Ipv4))
+            );
+            let mut fragment = packet.clone();
+            fragment[6] |= 0x20; // More Fragments
+            assert_eq!(
+                parse_udp(&fragment),
+                Err(Error::UnexpectedPacket(Expected::Unfragmented))
+            );
+            let mut icmp = packet;
+            icmp[9] = 1;
+            icmp[10..12].fill(0);
+            let sum = checksum(&[&icmp[..20]]);
+            icmp[10..12].copy_from_slice(&sum.to_be_bytes());
+            assert_eq!(
+                parse_udp(&icmp),
+                Err(Error::UnexpectedPacket(Expected::Udp))
+            );
+            // More than the Total Length holds.
+            assert_eq!(
+                udp(source, source, &[0; 65508]),
+                Err(Error::OutOfRange {
+                    what: Part::Ipv4Packet,
+                    value: 65536,
+                    max: 65535
+                })
+            );
+            assert!(udp(source, source, &[0; 65507]).is_ok());
+        });
     }
 }

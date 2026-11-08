@@ -62,32 +62,34 @@ mod tests {
 
     #[test]
     fn an_echo_request_has_its_reply() {
-        let request = request(b"ping");
-        let reply = echo_reply(&request).unwrap();
-        // The addresses swapped, type 0, the identifier, sequence number and
-        // data of the request, and valid checksums.
-        assert_eq!(reply[12..16], request[16..20]);
-        assert_eq!(reply[16..20], request[12..16]);
-        assert_eq!(reply[20..22], [ECHO_REPLY, 0]);
-        assert_eq!(reply[24..], request[24..]);
-        assert_eq!(checksum(&[&reply[..20]]), 0);
-        assert_eq!(checksum(&[&reply[20..]]), 0);
-        // A reply, a UDP packet, a cut or a corrupt request have none.
-        assert_eq!(echo_reply(&reply), None);
-        let udp = crate::ip::udp(
-            "10.60.0.2:1".parse().unwrap(),
-            "192.0.2.1:2".parse().unwrap(),
-            b"x",
-        );
-        assert_eq!(echo_reply(&udp.unwrap()), None);
-        assert_eq!(echo_reply(&request[..27]), None);
-        let mut corrupt = request.clone();
-        corrupt[28] ^= 1;
-        assert_eq!(echo_reply(&corrupt), None);
-        let mut code = request.clone();
-        code[21] = 1;
-        let sum = checksum(&[&code[20..22], &code[24..]]);
-        code[22..24].copy_from_slice(&sum.to_be_bytes());
-        assert_eq!(echo_reply(&code), None);
+        crate::bounded(|| {
+            let request = request(b"ping");
+            let reply = echo_reply(&request).unwrap();
+            // The addresses swapped, type 0, the identifier, sequence number and
+            // data of the request, and valid checksums.
+            assert_eq!(reply[12..16], request[16..20]);
+            assert_eq!(reply[16..20], request[12..16]);
+            assert_eq!(reply[20..22], [ECHO_REPLY, 0]);
+            assert_eq!(reply[24..], request[24..]);
+            assert_eq!(checksum(&[&reply[..20]]), 0);
+            assert_eq!(checksum(&[&reply[20..]]), 0);
+            // A reply, a UDP packet, a cut or a corrupt request have none.
+            assert_eq!(echo_reply(&reply), None);
+            let udp = crate::ip::udp(
+                "10.60.0.2:1".parse().unwrap(),
+                "192.0.2.1:2".parse().unwrap(),
+                b"x",
+            );
+            assert_eq!(echo_reply(&udp.unwrap()), None);
+            assert_eq!(echo_reply(&request[..27]), None);
+            let mut corrupt = request.clone();
+            corrupt[28] ^= 1;
+            assert_eq!(echo_reply(&corrupt), None);
+            let mut code = request.clone();
+            code[21] = 1;
+            let sum = checksum(&[&code[20..22], &code[24..]]);
+            code[22..24].copy_from_slice(&sum.to_be_bytes());
+            assert_eq!(echo_reply(&code), None);
+        });
     }
 }

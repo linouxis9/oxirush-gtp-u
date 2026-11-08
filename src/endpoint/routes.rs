@@ -321,58 +321,64 @@ mod tests {
 
     #[test]
     fn teid_allocation_skips_zero_and_live_teids() {
-        let mut candidates = [0, 7, 9, 0, 9, 11].into_iter();
-        let live = |teid| teid == 7;
-        assert_eq!(first_free(|| candidates.next().unwrap(), live), 9);
-        assert_eq!(first_free(|| candidates.next().unwrap(), live), 9);
-        assert_eq!(first_free(|| candidates.next().unwrap(), live), 11);
-        // The next TEIDs of a table, of which the first two are in use.
-        let mut routes = Routes::default();
-        let mut copy = Teids {
-            key: routes.teids.key.clone(),
-            drawn: 0,
-        };
-        let next: Vec<u32> = (0..3).map(|_| copy.next()).collect();
-        routes.by_teid.insert(next[0], (1, 1));
-        routes.by_teid.insert(next[1], (1, 2));
-        assert_eq!(routes.allocate_teid(), next[2]);
+        crate::bounded(|| {
+            let mut candidates = [0, 7, 9, 0, 9, 11].into_iter();
+            let live = |teid| teid == 7;
+            assert_eq!(first_free(|| candidates.next().unwrap(), live), 9);
+            assert_eq!(first_free(|| candidates.next().unwrap(), live), 9);
+            assert_eq!(first_free(|| candidates.next().unwrap(), live), 11);
+            // The next TEIDs of a table, of which the first two are in use.
+            let mut routes = Routes::default();
+            let mut copy = Teids {
+                key: routes.teids.key.clone(),
+                drawn: 0,
+            };
+            let next: Vec<u32> = (0..3).map(|_| copy.next()).collect();
+            routes.by_teid.insert(next[0], (1, 1));
+            routes.by_teid.insert(next[1], (1, 2));
+            assert_eq!(routes.allocate_teid(), next[2]);
+        });
     }
 
     /// The table counts its tunnels, and gives the route of one of them.
     #[test]
     fn the_table_counts_its_tunnels_and_gives_each_route() {
-        let table = RouteTable::default();
-        assert_eq!(table.len(), 0);
-        let teid = table.install((1, 5), remote("192.0.2.1:2152", 44), Some(9));
-        assert_eq!(table.len(), 1);
-        let route = table.route((1, 5)).unwrap();
-        assert_eq!(
-            (route.local_teid, route.remote.teid, route.qfi),
-            (teid, 44, Some(9))
-        );
-        assert!(table.route((1, 6)).is_none());
+        crate::bounded(|| {
+            let table = RouteTable::default();
+            assert_eq!(table.len(), 0);
+            let teid = table.install((1, 5), remote("192.0.2.1:2152", 44), Some(9));
+            assert_eq!(table.len(), 1);
+            let route = table.route((1, 5)).unwrap();
+            assert_eq!(
+                (route.local_teid, route.remote.teid, route.qfi),
+                (teid, 44, Some(9))
+            );
+            assert!(table.route((1, 6)).is_none());
+        });
     }
 
     /// Whoever knows a TEID of an endpoint cannot tell another from it.
     #[test]
     fn local_teids_cannot_be_told_from_one_another() {
-        let teids = |table: &RouteTable| -> Vec<u32> {
-            (0..100)
-                .map(|session| table.install((1, session), remote("192.0.2.1:2152", 44), None))
-                .collect()
-        };
-        let (first, second) = (teids(&RouteTable::default()), teids(&RouteTable::default()));
-        assert_ne!(first[..3], [1, 2, 3]);
-        // Neither one after the other, nor what another endpoint gives.
-        let next = first
-            .windows(2)
-            .filter(|pair| pair[1] == pair[0].wrapping_add(1));
-        assert_eq!(next.count(), 0, "{first:x?}");
-        assert_ne!(first, second);
-        let mut unique = first.clone();
-        unique.sort_unstable();
-        unique.dedup();
-        assert_eq!(unique.len(), 100);
+        crate::bounded(|| {
+            let teids = |table: &RouteTable| -> Vec<u32> {
+                (0..100)
+                    .map(|session| table.install((1, session), remote("192.0.2.1:2152", 44), None))
+                    .collect()
+            };
+            let (first, second) = (teids(&RouteTable::default()), teids(&RouteTable::default()));
+            assert_ne!(first[..3], [1, 2, 3]);
+            // Neither one after the other, nor what another endpoint gives.
+            let next = first
+                .windows(2)
+                .filter(|pair| pair[1] == pair[0].wrapping_add(1));
+            assert_eq!(next.count(), 0, "{first:x?}");
+            assert_ne!(first, second);
+            let mut unique = first.clone();
+            unique.sort_unstable();
+            unique.dedup();
+            assert_eq!(unique.len(), 100);
+        });
     }
 
     #[test]
@@ -415,107 +421,115 @@ mod tests {
 
     #[test]
     fn an_error_indication_finds_the_tunnel_to_the_far_end_it_names() {
-        let table = RouteTable::default();
-        table.install((1, 5), remote("192.0.2.1:2152", 44), Some(9));
-        // A dual-stack socket reports an IPv4 peer as IPv4-mapped.
-        table.install((2, 5), remote("[::ffff:192.0.2.2]:2152", 44), Some(9));
-        table.install((3, 5), remote("[2001:db8::3]:2152", 44), None);
-        assert_indexed(&table, 3);
-        for (peer, key) in [
-            ("192.0.2.1", (1, 5)),
-            ("::ffff:192.0.2.1", (1, 5)),
-            ("192.0.2.2", (2, 5)),
-            ("::ffff:192.0.2.2", (2, 5)),
-            ("2001:db8::3", (3, 5)),
-        ] {
-            assert_eq!(indicated(&table, 44, peer), Some(key), "{peer}");
-            // Another TEID of that peer is another tunnel's, or nobody's.
-            assert_eq!(indicated(&table, 45, peer), None, "{peer}");
-        }
-        assert_eq!(indicated(&table, 44, "192.0.2.3"), None);
-        assert_eq!(indicated(&table, 44, "2001:db8::4"), None);
+        crate::bounded(|| {
+            let table = RouteTable::default();
+            table.install((1, 5), remote("192.0.2.1:2152", 44), Some(9));
+            // A dual-stack socket reports an IPv4 peer as IPv4-mapped.
+            table.install((2, 5), remote("[::ffff:192.0.2.2]:2152", 44), Some(9));
+            table.install((3, 5), remote("[2001:db8::3]:2152", 44), None);
+            assert_indexed(&table, 3);
+            for (peer, key) in [
+                ("192.0.2.1", (1, 5)),
+                ("::ffff:192.0.2.1", (1, 5)),
+                ("192.0.2.2", (2, 5)),
+                ("::ffff:192.0.2.2", (2, 5)),
+                ("2001:db8::3", (3, 5)),
+            ] {
+                assert_eq!(indicated(&table, 44, peer), Some(key), "{peer}");
+                // Another TEID of that peer is another tunnel's, or nobody's.
+                assert_eq!(indicated(&table, 45, peer), None, "{peer}");
+            }
+            assert_eq!(indicated(&table, 44, "192.0.2.3"), None);
+            assert_eq!(indicated(&table, 44, "2001:db8::4"), None);
+        });
     }
 
     #[test]
     fn a_tunnel_is_found_by_its_current_far_end_only() {
-        let table = RouteTable::default();
-        let local_teid = table.install((1, 5), remote("192.0.2.1:2152", 44), Some(9));
-        // The same call on an existing tunnel changes its far end in place.
-        assert_eq!(
-            table.install((1, 5), remote("192.0.2.1:2152", 45), Some(9)),
-            local_teid
-        );
-        assert_eq!(indicated(&table, 44, "192.0.2.1"), None);
-        assert_eq!(indicated(&table, 45, "192.0.2.1"), Some((1, 5)));
-        assert_indexed(&table, 1);
-        // Another address with the same TEID, then the same far end again.
-        table.install((1, 5), remote("192.0.2.9:2152", 45), None);
-        assert_eq!(indicated(&table, 45, "192.0.2.1"), None);
-        assert_eq!(indicated(&table, 45, "192.0.2.9"), Some((1, 5)));
-        table.install((1, 5), remote("192.0.2.9:2152", 45), None);
-        assert_eq!(indicated(&table, 45, "192.0.2.9"), Some((1, 5)));
-        assert_indexed(&table, 1);
-        // A local TEID that something else assigned replaces the tunnel.
-        table
-            .install_with_teid((1, 5), 77, remote("192.0.2.9:2152", 46), None)
-            .unwrap();
-        assert_eq!(indicated(&table, 45, "192.0.2.9"), None);
-        assert_eq!(indicated(&table, 46, "192.0.2.9"), Some((1, 5)));
-        assert_indexed(&table, 1);
-        // A refused one leaves it as it was.
-        table.install((2, 5), remote("192.0.2.9:2152", 47), None);
-        let local_teid = table.route((2, 5)).unwrap().local_teid;
-        assert!(
+        crate::bounded(|| {
+            let table = RouteTable::default();
+            let local_teid = table.install((1, 5), remote("192.0.2.1:2152", 44), Some(9));
+            // The same call on an existing tunnel changes its far end in place.
+            assert_eq!(
+                table.install((1, 5), remote("192.0.2.1:2152", 45), Some(9)),
+                local_teid
+            );
+            assert_eq!(indicated(&table, 44, "192.0.2.1"), None);
+            assert_eq!(indicated(&table, 45, "192.0.2.1"), Some((1, 5)));
+            assert_indexed(&table, 1);
+            // Another address with the same TEID, then the same far end again.
+            table.install((1, 5), remote("192.0.2.9:2152", 45), None);
+            assert_eq!(indicated(&table, 45, "192.0.2.1"), None);
+            assert_eq!(indicated(&table, 45, "192.0.2.9"), Some((1, 5)));
+            table.install((1, 5), remote("192.0.2.9:2152", 45), None);
+            assert_eq!(indicated(&table, 45, "192.0.2.9"), Some((1, 5)));
+            assert_indexed(&table, 1);
+            // A local TEID that something else assigned replaces the tunnel.
             table
-                .install_with_teid((1, 5), local_teid, remote("192.0.2.9:2152", 48), None)
-                .is_err()
-        );
-        assert_eq!(indicated(&table, 46, "192.0.2.9"), Some((1, 5)));
-        assert_eq!(indicated(&table, 48, "192.0.2.9"), None);
-        assert_indexed(&table, 2);
-        assert_eq!(table.remove((1, 5)), Some(77));
-        assert_eq!(indicated(&table, 46, "192.0.2.9"), None);
-        assert_eq!(table.remove((1, 5)), None);
-        assert_indexed(&table, 1);
+                .install_with_teid((1, 5), 77, remote("192.0.2.9:2152", 46), None)
+                .unwrap();
+            assert_eq!(indicated(&table, 45, "192.0.2.9"), None);
+            assert_eq!(indicated(&table, 46, "192.0.2.9"), Some((1, 5)));
+            assert_indexed(&table, 1);
+            // A refused one leaves it as it was.
+            table.install((2, 5), remote("192.0.2.9:2152", 47), None);
+            let local_teid = table.route((2, 5)).unwrap().local_teid;
+            assert!(
+                table
+                    .install_with_teid((1, 5), local_teid, remote("192.0.2.9:2152", 48), None)
+                    .is_err()
+            );
+            assert_eq!(indicated(&table, 46, "192.0.2.9"), Some((1, 5)));
+            assert_eq!(indicated(&table, 48, "192.0.2.9"), None);
+            assert_indexed(&table, 2);
+            assert_eq!(table.remove((1, 5)), Some(77));
+            assert_eq!(indicated(&table, 46, "192.0.2.9"), None);
+            assert_eq!(table.remove((1, 5)), None);
+            assert_indexed(&table, 1);
+        });
     }
 
     #[test]
     fn tunnels_to_one_far_end_are_found_one_after_the_other() {
-        let table = RouteTable::default();
-        // As while a peer has not said its TEID yet.
-        for key in [(2, 1), (1, 9), (1, 5), (3, 0)] {
-            table.install(key, remote("192.0.2.1:2152", 0), Some(9));
-        }
-        assert_indexed(&table, 4);
-        for key in [(1, 5), (1, 9), (2, 1), (3, 0)] {
-            assert_eq!(indicated(&table, 0, "192.0.2.1"), Some(key));
-            table.remove(key);
-        }
-        assert_eq!(indicated(&table, 0, "192.0.2.1"), None);
-        assert_indexed(&table, 0);
+        crate::bounded(|| {
+            let table = RouteTable::default();
+            // As while a peer has not said its TEID yet.
+            for key in [(2, 1), (1, 9), (1, 5), (3, 0)] {
+                table.install(key, remote("192.0.2.1:2152", 0), Some(9));
+            }
+            assert_indexed(&table, 4);
+            for key in [(1, 5), (1, 9), (2, 1), (3, 0)] {
+                assert_eq!(indicated(&table, 0, "192.0.2.1"), Some(key));
+                table.remove(key);
+            }
+            assert_eq!(indicated(&table, 0, "192.0.2.1"), None);
+            assert_indexed(&table, 0);
+        });
     }
 
     #[test]
     fn removing_a_ue_removes_its_tunnels_and_no_other() {
-        let table = RouteTable::default();
-        let mut teids = Vec::new();
-        for session in [0, 5, 255] {
-            teids.push(table.install((7, session), remote("192.0.2.1:2152", 44), Some(9)));
-        }
-        table.install((6, 255), remote("192.0.2.1:2152", 44), Some(9));
-        table.install((8, 0), remote("192.0.2.1:2152", 44), Some(9));
-        let mut removed = table.remove_ran(7);
-        removed.sort_unstable();
-        teids.sort_unstable();
-        assert_eq!(removed, teids);
-        assert_eq!(table.remove_ran(7), []);
-        assert_indexed(&table, 2);
-        assert!(table.route((6, 255)).is_some());
-        assert!(table.route((8, 0)).is_some());
-        assert_eq!(indicated(&table, 44, "192.0.2.1"), Some((6, 255)));
-        assert_eq!(table.remove_ran(u32::MAX), []);
-        assert_eq!(table.remove_ran(6).len(), 1);
-        assert_eq!(table.remove_ran(8).len(), 1);
-        assert_indexed(&table, 0);
+        crate::bounded(|| {
+            let table = RouteTable::default();
+            let mut teids = Vec::new();
+            for session in [0, 5, 255] {
+                teids.push(table.install((7, session), remote("192.0.2.1:2152", 44), Some(9)));
+            }
+            table.install((6, 255), remote("192.0.2.1:2152", 44), Some(9));
+            table.install((8, 0), remote("192.0.2.1:2152", 44), Some(9));
+            let mut removed = table.remove_ran(7);
+            removed.sort_unstable();
+            teids.sort_unstable();
+            assert_eq!(removed, teids);
+            assert_eq!(table.remove_ran(7), []);
+            assert_indexed(&table, 2);
+            assert!(table.route((6, 255)).is_some());
+            assert!(table.route((8, 0)).is_some());
+            assert_eq!(indicated(&table, 44, "192.0.2.1"), Some((6, 255)));
+            assert_eq!(table.remove_ran(u32::MAX), []);
+            assert_eq!(table.remove_ran(6).len(), 1);
+            assert_eq!(table.remove_ran(8).len(), 1);
+            assert_indexed(&table, 0);
+        });
     }
 }
