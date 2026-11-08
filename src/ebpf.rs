@@ -893,16 +893,18 @@ mod tests {
     /// for it once announcements were lost.
     #[test]
     fn the_links_give_the_mtu_of_a_link() {
-        let mut links = Rtnetlink {
-            events: LinkEvents::new().unwrap(),
-            requests: Netlink::new().unwrap(),
-        };
-        let lo = links.requests.index_of("lo").unwrap();
-        let mtu = std::fs::read_to_string("/sys/class/net/lo/mtu").unwrap();
-        assert_eq!(
-            links.mtu_of(lo).unwrap(),
-            mtu.trim().parse::<u32>().unwrap()
-        );
+        crate::bounded(|| {
+            let mut links = Rtnetlink {
+                events: LinkEvents::new().unwrap(),
+                requests: Netlink::new().unwrap(),
+            };
+            let lo = links.requests.index_of("lo").unwrap();
+            let mtu = std::fs::read_to_string("/sys/class/net/lo/mtu").unwrap();
+            assert_eq!(
+                links.mtu_of(lo).unwrap(),
+                mtu.trim().parse::<u32>().unwrap()
+            );
+        });
     }
 
     /// Move this thread to a network namespace of its own.
@@ -942,32 +944,34 @@ mod tests {
     #[test]
     #[ignore = "needs root"]
     fn a_fast_path_gives_its_thread_what_it_follows_and_stops_it() {
-        isolate();
-        let fast_path = FastPath::load().unwrap();
-        fast_path.follows_mtus().unwrap();
-        let ended = (io::ErrorKind::BrokenPipe, "the links went".to_owned());
-        *lock(&fast_path.inner.mtus) = Some(ended.clone());
-        let error = fast_path.follows_mtus().unwrap_err();
-        assert_eq!((error.kind(), error.to_string()), ended);
+        crate::bounded(|| {
+            isolate();
+            let fast_path = FastPath::load().unwrap();
+            fast_path.follows_mtus().unwrap();
+            let ended = (io::ErrorKind::BrokenPipe, "the links went".to_owned());
+            *lock(&fast_path.inner.mtus) = Some(ended.clone());
+            let error = fast_path.follows_mtus().unwrap_err();
+            assert_eq!((error.kind(), error.to_string()), ended);
 
-        let uplinks = lock(&fast_path.inner.state).uplinks.clone();
-        assert_eq!(uplinks.n3s(), BTreeSet::new());
-        let uplink = Uplink {
-            local: [127, 0, 0, 1],
-            peer: [127, 0, 0, 8],
-            teid: [0, 0, 0x10, 0x01],
-            n3: 5,
-            mtu: 1500,
-            qfi: NO_CONTAINER,
-            padding: 0,
-        };
-        lock(&uplinks).entries.insert(9, uplink);
-        assert_eq!(uplinks.n3s(), BTreeSet::from([5]));
-        lock(&uplinks).entries.clear();
+            let uplinks = lock(&fast_path.inner.state).uplinks.clone();
+            assert_eq!(uplinks.n3s(), BTreeSet::new());
+            let uplink = Uplink {
+                local: [127, 0, 0, 1],
+                peer: [127, 0, 0, 8],
+                teid: [0, 0, 0x10, 0x01],
+                n3: 5,
+                mtu: 1500,
+                qfi: NO_CONTAINER,
+                padding: 0,
+            };
+            lock(&uplinks).entries.insert(9, uplink);
+            assert_eq!(uplinks.n3s(), BTreeSet::from([5]));
+            lock(&uplinks).entries.clear();
 
-        let stop = fast_path.inner.stop.clone();
-        drop(fast_path);
-        assert!(stop.load(Ordering::Relaxed));
+            let stop = fast_path.inner.stop.clone();
+            drop(fast_path);
+            assert!(stop.load(Ordering::Relaxed));
+        });
     }
 
     /// Links whose announcements are scripted: once they have none left,
@@ -1240,15 +1244,17 @@ mod tests {
 
     #[test]
     fn a_peer_on_this_host_is_routed_through_loopback() {
-        let mut netlink = Netlink::new().unwrap();
-        let (local, peer) = (Ipv4Addr::new(127, 0, 0, 3), Ipv4Addr::new(127, 0, 0, 9));
-        let n3 = netlink.route_interface(local, peer).unwrap();
-        assert_eq!(name_of(n3).unwrap(), "lo");
-        // TEST-NET-1 is nobody's address: nothing is sent from it.
-        assert!(
-            netlink
-                .route_interface(Ipv4Addr::new(192, 0, 2, 77), peer)
-                .is_err()
-        );
+        crate::bounded(|| {
+            let mut netlink = Netlink::new().unwrap();
+            let (local, peer) = (Ipv4Addr::new(127, 0, 0, 3), Ipv4Addr::new(127, 0, 0, 9));
+            let n3 = netlink.route_interface(local, peer).unwrap();
+            assert_eq!(name_of(n3).unwrap(), "lo");
+            // TEST-NET-1 is nobody's address: nothing is sent from it.
+            assert!(
+                netlink
+                    .route_interface(Ipv4Addr::new(192, 0, 2, 77), peer)
+                    .is_err()
+            );
+        });
     }
 }

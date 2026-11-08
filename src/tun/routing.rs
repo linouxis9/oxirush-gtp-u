@@ -267,4 +267,23 @@ mod tests {
             assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{name}");
         }
     }
+
+    /// A link that the kernel does not remove, as the loopback interface, is that error:
+    /// one that has gone already (`ENODEV`) alone is none. As root, in a network namespace
+    /// of its own.
+    #[test]
+    #[ignore = "needs CAP_NET_ADMIN"]
+    fn a_link_that_the_kernel_does_not_remove_is_its_error() {
+        // SAFETY: unshare only changes this thread's namespace.
+        assert_eq!(
+            unsafe { libc::unshare(libc::CLONE_NEWNET) },
+            0,
+            "a network namespace of its own: {}",
+            io::Error::last_os_error()
+        );
+        let mut netlink = Netlink::new().unwrap();
+        let lo = netlink.index_of("lo").unwrap();
+        let error = remove_link(&mut netlink, lo, "lo").unwrap_err();
+        assert_ne!(error.raw_os_error(), Some(libc::ENODEV), "{error}");
+    }
 }

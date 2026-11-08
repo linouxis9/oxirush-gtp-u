@@ -756,7 +756,8 @@ async fn a_qfi_above_63_is_refused_and_leaves_the_tunnel_as_it_was() {
     endpoint.install(8, 1, other, Some(63)).unwrap();
 }
 
-/// Both are refused before anything is made, so without any right to.
+/// Both are refused before anything is made, so without any right to. The TUN would have
+/// the name of the loopback interface: a TUN that were made, as root, fails otherwise.
 #[cfg(all(target_os = "linux", feature = "tun"))]
 #[tokio::test]
 async fn a_tun_needs_its_tunnel_and_a_running_endpoint() {
@@ -765,7 +766,7 @@ async fn a_tun_needs_its_tunnel_and_a_running_endpoint() {
     let (endpoint, _received, _peer, _) = setup().await;
     let tun = || {
         let ue_address = Ipv4Addr::new(198, 18, 0, 2);
-        TunConfig::new("oxnone", Routing::Upf { ue_address })
+        TunConfig::new("lo", Routing::Upf { ue_address })
     };
     let error = endpoint.attach_tun(8, 1, tun()).unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::NotFound);

@@ -86,3 +86,27 @@ fn set_nonblocking(file: &File) -> io::Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The descriptor of a TUN does not block: a read with nothing to read waits in the
+    /// runtime, and does not hold its thread. As root, in a network namespace of its own.
+    #[tokio::test]
+    #[ignore = "needs CAP_NET_ADMIN"]
+    async fn the_descriptor_of_a_tun_does_not_block() {
+        // SAFETY: unshare only changes this thread's namespace.
+        assert_eq!(
+            unsafe { libc::unshare(libc::CLONE_NEWNET) },
+            0,
+            "a network namespace of its own: {}",
+            io::Error::last_os_error()
+        );
+        let tun = TunDevice::create("oxnonblocking").unwrap();
+        // SAFETY: F_GETFL only reads the flags of this valid descriptor.
+        let flags = unsafe { libc::fcntl(tun.io.as_raw_fd(), libc::F_GETFL) };
+        assert!(flags >= 0, "{}", io::Error::last_os_error());
+        assert_ne!(flags & libc::O_NONBLOCK, 0);
+    }
+}
