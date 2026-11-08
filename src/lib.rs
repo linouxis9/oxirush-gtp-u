@@ -188,9 +188,10 @@ pub const MAX_EXTENSION_HEADERS: usize = 16;
 struct _Readme;
 
 /// Runs the unit test `test` on a thread of its own, and ends the run when it takes more
-/// than 10 s: an encoding, a checksum, an allocation of TEIDs or an exchange with the
-/// kernel that loops for good cannot be stopped, and the run would wait for it. The tests
-/// that the mutants of such a loop hold are bounded so.
+/// than 10 s. A thread that loops for good cannot be stopped, and the run waits for every
+/// test: failing the test instead would leave its thread spinning on a processor while the
+/// bounded tests after it time out one by one. The tests that the mutants of such a loop
+/// hold are bounded so.
 #[cfg(test)]
 fn bounded(test: impl FnOnce() + Send + 'static) {
     use std::io::Write;
