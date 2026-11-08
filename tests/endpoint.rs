@@ -17,6 +17,19 @@ use tokio::time::timeout;
 const WAIT: Duration = Duration::from_secs(2);
 const QUIET: Duration = Duration::from_millis(100);
 
+/// An endpoint prints its address and how many tunnels it has.
+#[tokio::test]
+async fn an_endpoint_prints_its_address_and_its_tunnels() {
+    let (endpoint, _) = Endpoint::bind("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    let address = endpoint.local_addr().unwrap();
+    assert_eq!(
+        format!("{endpoint:?}"),
+        format!("Endpoint {{ local_addr: Some({address}), tunnels: 0 }}")
+    );
+}
+
 #[tokio::test]
 async fn custom_packet_send_preserves_fields_and_source_socket() {
     let (endpoint, _, peer, _) = setup().await;

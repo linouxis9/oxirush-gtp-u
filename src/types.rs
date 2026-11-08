@@ -254,6 +254,35 @@ mod tests {
         assert!(matches!(MessageType(1), MessageType::ECHO_REQUEST));
     }
 
+    /// The values that hold octets print them in hexadecimal, after how many there are:
+    /// the containers of another PDU type, and the new IEs that this release does not
+    /// know. The others print their fields.
+    #[test]
+    fn the_octets_of_a_value_print_in_hexadecimal() {
+        use crate::{
+            DownlinkPduSessionInformation, DownlinkPduSetInformation, PduSessionContainer,
+            PduSetInformationContainer, UnknownNewIes, UplinkPduSessionInformation,
+        };
+        let other = PduSessionContainer::Other(vec![0x20, 0x01]);
+        assert_eq!(format!("{other:?}"), "Other(2 octets 2001)");
+        let downlink = PduSessionContainer::Downlink(DownlinkPduSessionInformation::default());
+        assert!(format!("{downlink:?}").starts_with("Downlink(DownlinkPduSessionInformation {"));
+        let uplink = PduSessionContainer::Uplink(UplinkPduSessionInformation::default());
+        assert!(format!("{uplink:?}").starts_with("Uplink(UplinkPduSessionInformation {"));
+        let other = PduSetInformationContainer::Other(vec![0x10]);
+        assert_eq!(format!("{other:?}"), "Other(1 octet 10)");
+        let downlink = PduSetInformationContainer::Downlink(DownlinkPduSetInformation::default());
+        assert!(format!("{downlink:?}").starts_with("Downlink(DownlinkPduSetInformation {"));
+        let unknown = UnknownNewIes {
+            flags: vec![0x20],
+            content: Vec::new(),
+        };
+        assert_eq!(
+            format!("{unknown:?}"),
+            "UnknownNewIes { flags: 1 octet 20, content: 0 octets }"
+        );
+    }
+
     /// Bits 8 and 7 of a type, as figure 5.2.1-2 gives them.
     #[test]
     fn the_types_of_the_specification_say_who_must_understand_them() {

@@ -608,6 +608,23 @@ async fn forward_tun_downlink(
 mod tests {
     use super::*;
 
+    /// An uplink packet prints its TEID in hexadecimal, where it came from and the packet.
+    #[test]
+    fn an_uplink_packet_prints_its_teid_its_sender_and_its_packet() {
+        let packet = Packet::g_pdu(0x1234, b"ip".to_vec());
+        let uplink = UplinkPacket {
+            uplink_teid: 0x1234,
+            from: "192.0.2.1:2152".parse().unwrap(),
+            packet: packet.clone(),
+        };
+        assert_eq!(
+            format!("{uplink:?}"),
+            format!(
+                "UplinkPacket {{ uplink_teid: 0x00001234, from: 192.0.2.1:2152, packet: {packet:?} }}"
+            )
+        );
+    }
+
     /// A UPF whose sessions stopped is not running, before its task ends too.
     #[tokio::test]
     async fn a_stopped_upf_is_not_running_before_its_task_ends() {
