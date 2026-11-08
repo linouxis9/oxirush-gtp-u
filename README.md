@@ -446,8 +446,9 @@ cargo test --test wireshark -- --ignored
 ```
 
 Property tests and a `cargo fuzz` target check that decoding never panics,
-and that what decodes encodes to a message that decodes to the same value.
-CI rebuilds the eBPF object from its source and compares. Each Rust block of
+and that what decodes encodes to a message that decodes to the same value;
+another holds what a node answers, and the Echo Reply of the test UPF, to
+TS 29.281 and to RFC 792. CI rebuilds the eBPF object from its source and compares. Each Rust block of
 this page is checked with what it prints ([`readme/`](readme/build.rs) says
 how).
 

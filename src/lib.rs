@@ -170,6 +170,37 @@ pub use types::{Cause, ExtensionHeaderType, InformationElementType, MessageType}
 /// The UDP port of GTP-U.
 pub const PORT: u16 = 2152;
 
+// What `cargo fuzz` drives, which builds the crate with `--cfg fuzzing`: what a node
+// answers, without its socket.
+#[cfg(all(fuzzing, feature = "endpoint"))]
+#[doc(hidden)]
+pub mod fuzzing {
+    use std::net::SocketAddr;
+
+    use crate::Packet;
+
+    /// What the endpoint sends for `packet` from `from`, and where, and whether the
+    /// packet goes no further: an Echo Response, a Supported Extension Headers
+    /// Notification, or none.
+    pub fn answer(
+        packet: &Packet<&[u8]>,
+        from: SocketAddr,
+    ) -> (Option<(Packet, SocketAddr)>, bool) {
+        crate::path::reply(packet, from)
+    }
+
+    /// The Echo Response that answers octets which do not decode for their length: an
+    /// Echo Request of a length that is not its own.
+    pub fn length_error_response(bytes: &[u8]) -> Option<Packet> {
+        crate::path::length_error_response(bytes)
+    }
+
+    /// The ICMP Echo Reply of the test UPF to an IPv4 packet.
+    pub fn echo_reply(request: &[u8]) -> Option<Vec<u8>> {
+        crate::icmp::echo_reply(request)
+    }
+}
+
 /// The most extension headers that a message is decoded or encoded with: a
 /// longer chain is [`Error::TooManyExtensionHeaders`].
 ///

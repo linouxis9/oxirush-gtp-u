@@ -128,6 +128,7 @@ jobs:
       matrix:
         include:
           - { target: decode, max_len: 512 }
+          - { target: answers, max_len: 512, seeds: fuzz/seeds/answers }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
@@ -142,6 +143,12 @@ jobs:
           path: fuzz/corpus/${{ matrix.target }}
           key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: fuzz-corpus-${{ matrix.target }}-
+      # The seeds of the target, copied into its corpus.
+      - if: matrix.seeds
+        env:
+          SEEDS: ${{ matrix.seeds }}
+          TARGET: ${{ matrix.target }}
+        run: mkdir -p "fuzz/corpus/$TARGET" && cp "$SEEDS"/* "fuzz/corpus/$TARGET/"
       # The corpus takes what the run finds. An input that takes more than 30
       # seconds is a timeout.
       - name: Fuzz ${{ matrix.target }} for ${{ needs.plan.outputs.seconds }} seconds

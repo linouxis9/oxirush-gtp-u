@@ -9,7 +9,8 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-oxirush-gtp-u = { path = "..", default-features = false }
+# The endpoint, whose answers the target `answers` holds to the specification
+oxirush-gtp-u = { path = "..", default-features = false, features = ["endpoint"] }
 
 # Not part of any parent workspace.
 [workspace]
@@ -18,6 +19,13 @@ members = ["."]
 [[bin]]
 name = "decode"
 path = "fuzz_targets/decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "answers"
+path = "fuzz_targets/answers.rs"
 test = false
 doc = false
 bench = false

@@ -69,6 +69,22 @@ pub(crate) async fn answer<P: AsRef<[u8]>>(
     }
 }
 
+/// What [`answer`] sends for `packet` from `from`, and where, and whether the packet
+/// goes no further: for the fuzz targets, which have no socket.
+#[cfg(fuzzing)]
+pub(crate) fn reply<P: AsRef<[u8]>>(
+    packet: &Packet<P>,
+    from: SocketAddr,
+) -> (Option<(Packet, SocketAddr)>, bool) {
+    match classify(packet, from) {
+        PathAction::Forward => (None, false),
+        PathAction::Discard(_) => (None, true),
+        PathAction::Reply { packet, to, .. } | PathAction::Notify { packet, to, .. } => {
+            (Some((packet, to)), true)
+        }
+    }
+}
+
 fn classify<P: AsRef<[u8]>>(packet: &Packet<P>, from: SocketAddr) -> PathAction {
     let unsupported = packet.extension_headers.iter().any(|header| {
         matches!(header, ExtensionHeader::Other { .. }) && header.comprehension_required()
@@ -135,7 +151,7 @@ pub(crate) async fn answer_length_error(socket: &DatagramSocket, bytes: &[u8], f
     }
 }
 
-fn length_error_response(bytes: &[u8]) -> Option<Packet> {
+pub(crate) fn length_error_response(bytes: &[u8]) -> Option<Packet> {
     let header = bytes.first_chunk::<8>()?;
     let flags = header[0];
     if flags & 0xf0 != 0x30 || header[1] != MessageType::ECHO_REQUEST.0 {

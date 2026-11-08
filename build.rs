@@ -21,6 +21,9 @@ const ARCHITECTURES: [&str; 9] = [
 fn main() {
     println!("cargo::rerun-if-changed=build.rs");
     println!("cargo::rustc-check-cfg=cfg(fast_path)");
+    // `cargo fuzz` builds the crate with `--cfg fuzzing`, which gives the fuzz targets
+    // the module `fuzzing`.
+    println!("cargo::rustc-check-cfg=cfg(fuzzing)");
     let variable = |name| std::env::var(name).unwrap_or_default();
     if std::env::var_os("CARGO_FEATURE_EBPF").is_some()
         && variable("CARGO_CFG_TARGET_OS") == "linux"

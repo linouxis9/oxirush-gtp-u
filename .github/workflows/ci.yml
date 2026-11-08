@@ -160,7 +160,7 @@ jobs:
       - run: cargo test --locked --test wireshark -- --ignored
 
   fuzz:
-    name: Fuzz the decoders (1 minute)
+    name: Fuzz the decoders and the answers of a node (2 minutes)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -170,6 +170,9 @@ jobs:
           workspaces: fuzz
       - run: cargo install cargo-fuzz --locked
       - run: cargo fuzz run decode -- -max_total_time=60 -max_len=512
+      - run: |
+          mkdir -p fuzz/corpus/answers
+          cargo fuzz run answers fuzz/corpus/answers fuzz/seeds/answers -- -max_total_time=60 -max_len=512
 
   clippy:
     name: Clippy
