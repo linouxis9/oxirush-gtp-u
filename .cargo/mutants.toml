@@ -49,4 +49,9 @@ exclude_re = [
     # The end of a receive task that is neither its return nor its abort is a panic,
     # which no input makes it do.
     'src/(endpoint|upf_sim)\.rs:.*: replace match guard error\.is_cancelled\(\) with true in (Endpoint|UpfSimulator)::shutdown$',
+    # What the fuzz targets take from the inside of the crate, the module `fuzzing` and
+    # the reply of the path without a socket, is built with `--cfg fuzzing` alone: the
+    # build that the tests run on has none of it, and every mutant of it passes.
+    'src/lib\.rs:.*: replace fuzzing::(answer|length_error_response|echo_reply) -> ',
+    'src/path\.rs:.*(: replace reply -> | in reply$)',
 ]
