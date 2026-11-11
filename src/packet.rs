@@ -594,8 +594,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        DownlinkPduSessionInformation, DownlinkPduSetInformation, InformationElementType,
-        PduSetInformationContainer, UnknownNewIes, UplinkPduSessionInformation, UplinkTimeStamps,
+        DownlinkPduSessionInformation, InformationElementType, UnknownNewIes,
+        UplinkPduSessionInformation, UplinkTimeStamps,
     };
 
     fn hex(text: &str) -> Vec<u8> {
@@ -653,10 +653,6 @@ mod tests {
             let mut downlink = PduSessionContainer::downlink(1);
             assert_eq!(downlink.set_qfi(2), Some(1));
             assert_eq!(downlink.qfi(), Some(2));
-            let mut pdu_set =
-                PduSetInformationContainer::Downlink(DownlinkPduSetInformation::new(3));
-            assert_eq!(pdu_set.set_qfi(4), Some(3));
-            assert_eq!(pdu_set.qfi(), Some(4));
             // A signalling message's elements, as `information_elements` reads them.
             let mut indication = Packet::new(MessageType::ERROR_INDICATION, 0, Vec::new());
             let elements = [
@@ -1481,166 +1477,47 @@ mod tests {
         }
     }
 
-    /// DL PDU SET INFORMATION, as figure 6.5.2.1-1 of TS 38.415 V19.1.0
-    /// draws it: EDB, EPDU and PSSI in the first octet, six bits of QFI and
-    /// ten of PSSN, four of PSI, the PSN, then the PSSize if PSSI says so.
+    /// The PDU Set Information Container keeps its frame of TS 38.415 as
+    /// octets, after the PDU Session Container as the specification asks,
+    /// under the type of this version (0x04) or of earlier ones (0x86), and
+    /// with a length that an extension header can have.
     #[test]
-    fn pdu_set_information_on_the_wire() {
+    fn a_pdu_set_information_container_keeps_its_frame() {
         crate::bounded(|| {
-            let mut information = DownlinkPduSetInformation::new(9);
-            information.pdu_set_sequence_number = 0x2a5;
-            information.pdu_set_importance = 3;
-            information.pdu_sequence_number = 7;
-            let mut packet = Packet::downlink(0x2001, 9, vec![0x45]);
-            let header = |information, legacy_type| ExtensionHeader::PduSetInformationContainer {
-                information: PduSetInformationContainer::Downlink(information),
+            let frame = vec![0x02, 0x26, 0xa5, 0x03, 0x07, 0x01, 0x02, 0x03, 0, 0];
+            let header = |legacy_type| ExtensionHeader::PduSetInformationContainer {
+                content: frame.clone(),
                 legacy_type,
             };
-            // After the PDU Session Container, as the specification asks.
-            packet.extension_headers.push(header(information, false));
+            let mut packet = Packet::downlink(0x2001, 9, vec![0x45]);
+            packet.extension_headers.push(header(false));
             round_trip(
                 &packet,
-                "34 ff 0011 00002001 0000 00 85  01 0009 04  02 00 26a5 03 07 00 00  45",
+                "34 ff 0015 00002001 0000 00 85  01 0009 04  03 02 26a5 03 07 010203 0000 00  45",
             );
-            // The last PDU of its PDU Set and of a data burst, with the size of
-            // the set, under the type of earlier versions.
-            information.end_of_data_burst = true;
-            information.end_pdu = true;
-            information.pdu_set_size = Some(0x01_0203);
-            packet.extension_headers[1] = header(information, true);
+            packet.extension_headers[1] = header(true);
             round_trip(
                 &packet,
-                "34 ff 0015 00002001 0000 00 85  01 0009 86
-                 03 0e 26a5 03 07 010203 0000 00  45",
+                "34 ff 0015 00002001 0000 00 85  01 0009 86  03 02 26a5 03 07 010203 0000 00  45",
             );
-            assert!(packet.extension_headers[1].comprehension_required());
-            // Every field at its largest and at its least.
-            let mut most = DownlinkPduSetInformation::new(63);
-            most.pdu_set_sequence_number = 0x3ff;
-            most.pdu_set_importance = 15;
-            most.pdu_sequence_number = 255;
-            most.pdu_set_size = Some(0xff_ffff);
-            for information in [most, DownlinkPduSetInformation::new(0)] {
-                let mut packet = Packet::g_pdu(1, vec![]);
-                packet.extension_headers.push(header(information, false));
-                let wire = packet.encode().unwrap();
-                assert_eq!(Packet::decode(&wire).unwrap(), packet);
-            }
             assert_eq!(
-                Packet::g_pdu(1, vec![])
-                    .encode()
-                    .map(|wire| wire.len())
-                    .unwrap(),
-                8
-            );
-            // Spare bits are not evaluated, and what follows the fields is
-            // padding.
-            let decoded = Packet::decode(&hex(
-                "34 ff 000c 00000001 0000 00 04  02 01 26a5 f3 07 ff 00",
-            ))
-            .unwrap();
-            information.end_of_data_burst = false;
-            information.end_pdu = false;
-            information.pdu_set_size = None;
-            assert_eq!(decoded.extension_headers, [header(information, false)]);
-
-            // Another PDU type is kept as received.
-            let other = ExtensionHeader::PduSetInformationContainer {
-                information: PduSetInformationContainer::Other(vec![0x10, 1, 2, 3, 4, 5]),
-                legacy_type: false,
-            };
-            let mut packet = Packet::g_pdu(1, vec![]);
-            packet.extension_headers.push(other);
-            round_trip(
-                &packet,
-                "34 ff 000c 00000001 0000 00 04  02 10 0102030405 00",
+                format!("{:?}", header(true)),
+                "PduSetInformationContainer { content: 10 octets 0226a503070102030000, legacy_type: true }"
             );
         });
-    }
-
-    #[test]
-    fn pdu_set_information_rejects_what_it_cannot_carry() {
-        let container = Part::PduSetInformationContainer;
-        // The frame has five octets at least, and three more with PSSI.
+        let mut packet = Packet::downlink(0x2001, 9, vec![0x45]);
+        packet
+            .extension_headers
+            .push(ExtensionHeader::PduSetInformationContainer {
+                content: vec![0x00],
+                legacy_type: false,
+            });
         assert_eq!(
-            Packet::decode(&hex("34 ff 0008 00000001 0000 00 04  01 00 26 00")),
-            Err(Error::Truncated {
-                what: container,
-                needed: 5,
-                available: 2
-            })
-        );
-        assert_eq!(
-            Packet::decode(&hex(
-                "34 ff 000c 00000001 0000 00 04  02 02 26a5 03 07 01 00"
-            )),
-            Err(Error::Truncated {
-                what: container,
-                needed: 3,
-                available: 1
-            })
-        );
-        let encode = |information: PduSetInformationContainer| {
-            let mut packet = Packet::g_pdu(1, vec![]);
-            packet
-                .extension_headers
-                .push(ExtensionHeader::PduSetInformationContainer {
-                    information,
-                    legacy_type: false,
-                });
-            packet.encode()
-        };
-        let out_of_range = |change: fn(&mut DownlinkPduSetInformation)| {
-            let mut information = DownlinkPduSetInformation::new(1);
-            change(&mut information);
-            encode(PduSetInformationContainer::Downlink(information))
-        };
-        for (result, what, value, max) in [
-            (out_of_range(|i| i.qfi = 64), Part::Qfi, 64, 63),
-            (
-                out_of_range(|i| i.pdu_set_sequence_number = 0x400),
-                Part::PduSetSequenceNumber,
-                0x400,
-                0x3ff,
-            ),
-            (
-                out_of_range(|i| i.pdu_set_importance = 16),
-                Part::PduSetImportance,
-                16,
-                15,
-            ),
-            (
-                out_of_range(|i| i.pdu_set_size = Some(0x100_0000)),
-                Part::PduSetSize,
-                0x100_0000,
-                0xff_ffff,
-            ),
-        ] {
-            assert_eq!(result, Err(Error::OutOfRange { what, value, max }));
-        }
-        // Content that is kept as received has its padding, and is not of
-        // the PDU type that has a variant.
-        assert_eq!(
-            encode(PduSetInformationContainer::Other(vec![0x10])),
+            packet.encode(),
             Err(Error::InvalidLength {
-                what: container,
+                what: Part::PduSetInformationContainer,
                 length: 3,
                 expected: 4
-            })
-        );
-        assert_eq!(
-            encode(PduSetInformationContainer::Other(vec![])),
-            Err(Error::InvalidLength {
-                what: container,
-                length: 2,
-                expected: 4
-            })
-        );
-        assert_eq!(
-            encode(PduSetInformationContainer::Other(vec![0x00, 0])),
-            Err(Error::InvalidType {
-                what: container,
-                kind: 0
             })
         );
     }

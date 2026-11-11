@@ -131,14 +131,8 @@ pub enum Part {
     XwRanContainer,
     /// The NR RAN Container extension header.
     NrRanContainer,
-    /// The PDU Set Information Container (TS 38.415 §6.5.2).
+    /// The PDU Set Information Container extension header.
     PduSetInformationContainer,
-    /// The PDU Set Sequence Number, 10 bits.
-    PduSetSequenceNumber,
-    /// The PDU Set Importance, 4 bits.
-    PduSetImportance,
-    /// The PDU Set Size, 24 bits.
-    PduSetSize,
     /// The PDU Session Container (TS 38.415 §5.5.2).
     PduSessionContainer,
     /// The QoS Flow Identifier, 6 bits.
@@ -193,9 +187,6 @@ impl fmt::Display for Part {
             Part::XwRanContainer => "Xw RAN Container",
             Part::NrRanContainer => "NR RAN Container",
             Part::PduSetInformationContainer => "PDU Set Information Container",
-            Part::PduSetSequenceNumber => "PDU Set Sequence Number",
-            Part::PduSetImportance => "PDU Set Importance",
-            Part::PduSetSize => "PDU Set Size",
             Part::PduSessionContainer => "PDU Session Container",
             Part::Qfi => "QFI",
             Part::Ppi => "PPI",

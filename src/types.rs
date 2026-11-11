@@ -260,8 +260,8 @@ mod tests {
     #[test]
     fn the_octets_of_a_value_print_in_hexadecimal() {
         use crate::{
-            DownlinkPduSessionInformation, DownlinkPduSetInformation, PduSessionContainer,
-            PduSetInformationContainer, UnknownNewIes, UplinkPduSessionInformation,
+            DownlinkPduSessionInformation, PduSessionContainer, UnknownNewIes,
+            UplinkPduSessionInformation,
         };
         let other = PduSessionContainer::Other(vec![0x20, 0x01]);
         assert_eq!(format!("{other:?}"), "Other(2 octets 2001)");
@@ -269,10 +269,6 @@ mod tests {
         assert!(format!("{downlink:?}").starts_with("Downlink(DownlinkPduSessionInformation {"));
         let uplink = PduSessionContainer::Uplink(UplinkPduSessionInformation::default());
         assert!(format!("{uplink:?}").starts_with("Uplink(UplinkPduSessionInformation {"));
-        let other = PduSetInformationContainer::Other(vec![0x10]);
-        assert_eq!(format!("{other:?}"), "Other(1 octet 10)");
-        let downlink = PduSetInformationContainer::Downlink(DownlinkPduSetInformation::default());
-        assert!(format!("{downlink:?}").starts_with("Downlink(DownlinkPduSetInformation {"));
         let unknown = UnknownNewIes {
             flags: vec![0x20],
             content: Vec::new(),

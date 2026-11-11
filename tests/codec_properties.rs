@@ -1,10 +1,9 @@
 use std::net::IpAddr;
 
 use oxirush_gtp_u::{
-    Cause, DownlinkPduSessionInformation, DownlinkPduSetInformation, Error, ExtensionHeader,
-    ExtensionHeaderType, InformationElement, InformationElementType, MessageType, Packet, Part,
-    PduSessionContainer, PduSetInformationContainer, UplinkPduSessionInformation, UplinkTimeStamps,
-    ip,
+    Cause, DownlinkPduSessionInformation, Error, ExtensionHeader, ExtensionHeaderType,
+    InformationElement, InformationElementType, MessageType, Packet, Part, PduSessionContainer,
+    UplinkPduSessionInformation, UplinkTimeStamps, ip,
 };
 use proptest::collection::vec;
 use proptest::option::of;
@@ -112,27 +111,6 @@ fn content(valid: bool) -> impl Strategy<Value = Vec<u8>> {
     })
 }
 
-fn pdu_set() -> impl Strategy<Value = PduSetInformationContainer> {
-    (
-        0u8..64,
-        any::<[bool; 2]>(),
-        0u16..1 << 10,
-        0u8..16,
-        any::<u8>(),
-        of(0u32..1 << 24),
-    )
-        .prop_map(|(qfi, [burst, pdu], sequence, importance, number, size)| {
-            let mut information = DownlinkPduSetInformation::new(qfi);
-            information.end_of_data_burst = burst;
-            information.end_pdu = pdu;
-            information.pdu_set_sequence_number = sequence;
-            information.pdu_set_importance = importance;
-            information.pdu_sequence_number = number;
-            information.pdu_set_size = size;
-            PduSetInformationContainer::Downlink(information)
-        })
-}
-
 fn extension_header(valid: bool) -> impl Strategy<Value = ExtensionHeader> {
     prop_oneof![
         any::<u16>().prop_map(ExtensionHeader::UdpPort),
@@ -147,22 +125,12 @@ fn extension_header(valid: bool) -> impl Strategy<Value = ExtensionHeader> {
         content(valid).prop_map(ExtensionHeader::RanContainer),
         content(valid).prop_map(ExtensionHeader::XwRanContainer),
         content(valid).prop_map(ExtensionHeader::NrRanContainer),
-        (
-            prop_oneof![
-                pdu_set(),
-                (1u8..16, content(valid)).prop_map(|(pdu_type, mut content)| {
-                    content[0] = pdu_type << 4 | (content[0] & 0x0f);
-                    PduSetInformationContainer::Other(content)
-                }),
-            ],
-            any::<bool>()
-        )
-            .prop_map(|(information, legacy_type)| {
-                ExtensionHeader::PduSetInformationContainer {
-                    information,
-                    legacy_type,
-                }
-            }),
+        (content(valid), any::<bool>()).prop_map(|(content, legacy_type)| {
+            ExtensionHeader::PduSetInformationContainer {
+                content,
+                legacy_type,
+            }
+        }),
         downlink().prop_map(ExtensionHeader::PduSessionContainer),
         uplink(valid).prop_map(ExtensionHeader::PduSessionContainer),
         (2u8..16, content(valid)).prop_map(|(pdu_type, mut content)| {

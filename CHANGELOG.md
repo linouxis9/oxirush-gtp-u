@@ -9,6 +9,13 @@ All notable changes to `oxirush-gtp-u` are recorded here.
 - The `oxirush-upf-sim` program and its feature `cli`. The test UPF is
   `upf_sim::UpfSimulator`, which a program of a few lines starts. A build
   that names the feature no longer resolves.
+- `PduSetInformationContainer` and `DownlinkPduSetInformation`, the fields
+  of the frame of TS 38.415 §6.5.2. The extension header keeps its variant
+  and carries the frame as octets, as the RAN containers carry theirs:
+  `ExtensionHeader::PduSetInformationContainer { content, legacy_type }`,
+  where it had `information`. `Part::PduSetSequenceNumber`,
+  `Part::PduSetImportance` and `Part::PduSetSize` go with the fields. Not
+  source compatible.
 
 ## 0.2.0 - 2026-11-07
 

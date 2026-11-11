@@ -9,9 +9,8 @@ use std::net::{Ipv4Addr, SocketAddrV4};
 use std::process::{Command, Stdio};
 
 use oxirush_gtp_u::{
-    Cause, DownlinkPduSessionInformation, DownlinkPduSetInformation, ExtensionHeader,
-    ExtensionHeaderType, InformationElement, Packet, PduSessionContainer,
-    PduSetInformationContainer, UplinkPduSessionInformation, UplinkTimeStamps,
+    Cause, DownlinkPduSessionInformation, ExtensionHeader, ExtensionHeaderType, InformationElement,
+    Packet, PduSessionContainer, UplinkPduSessionInformation, UplinkTimeStamps,
 };
 
 /// Dissect `packet`, sent in UDP to port 2152, and return `fields` as
@@ -454,13 +453,12 @@ fn handover_and_forwarding_headers() {
             ("gtp.ext_hdr.xw_ran_cont", "01020304050600"),
         ],
     );
-    let mut information = DownlinkPduSetInformation::new(9);
-    information.pdu_set_size = Some(0x01_0203);
     check(
         &with(vec![
             ExtensionHeader::PduSessionContainer(PduSessionContainer::downlink(9)),
+            // DL PDU SET INFORMATION of QFI 9 with a PDU Set Size.
             ExtensionHeader::PduSetInformationContainer {
-                information: PduSetInformationContainer::Downlink(information),
+                content: vec![0x02, 0x24, 0, 0, 0, 1, 2, 3, 0, 0],
                 legacy_type: false,
             },
             ExtensionHeader::ServiceClassIndicator(7),

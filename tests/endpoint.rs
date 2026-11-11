@@ -6,9 +6,8 @@ use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use oxirush_gtp_u::{
-    Cause, DownlinkPduSetInformation, Endpoint, Error, ExtensionHeader, ExtensionHeaderType,
-    InformationElement, MessageType, Packet, Part, PduSessionContainer, PduSetInformationContainer,
-    ReceivedPacket, RemoteTunnel,
+    Cause, Endpoint, Error, ExtensionHeader, ExtensionHeaderType, InformationElement, MessageType,
+    Packet, Part, PduSessionContainer, ReceivedPacket, RemoteTunnel,
 };
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc::Receiver;
@@ -600,11 +599,11 @@ async fn delivers_g_pdus_with_the_headers_of_a_handover_and_of_the_ran_protocols
         ExtensionHeader::XwRanContainer(vec![0xaa, 0xbb]),
         ExtensionHeader::NrRanContainer(vec![1, 2, 3, 4, 5, 6]),
         ExtensionHeader::PduSetInformationContainer {
-            information: PduSetInformationContainer::Downlink(DownlinkPduSetInformation::new(9)),
+            content: vec![0x00, 0x24, 0, 0, 0, 0],
             legacy_type: false,
         },
         ExtensionHeader::PduSetInformationContainer {
-            information: PduSetInformationContainer::Downlink(DownlinkPduSetInformation::new(9)),
+            content: vec![0x00, 0x24, 0, 0, 0, 0],
             legacy_type: true,
         },
     ] {

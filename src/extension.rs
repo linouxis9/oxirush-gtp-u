@@ -5,7 +5,7 @@ use std::fmt;
 
 use crate::error::{header_length, truncated};
 use crate::types::Octets;
-use crate::{Error, ExtensionHeaderType, Part, PduSetInformationContainer};
+use crate::{Error, ExtensionHeaderType, Part};
 
 // The same serializer counts validated bytes before writing them. This avoids
 // maintaining separate length and field-validation implementations.
@@ -108,11 +108,12 @@ pub enum ExtensionHeader {
     /// NR RAN Container (§5.2.2.6), on X2-U, Xn-U and F1-U: the frame of
     /// TS 38.425 as octets, as for `RanContainer`.
     NrRanContainer(Vec<u8>),
-    /// PDU Set Information Container (§5.2.2.8): the PDU Set of a downlink
-    /// G-PDU on N3 and N9, and on Xn-U and F1-U.
+    /// PDU Set Information Container (§5.2.2.8), on N3 and N9, and on Xn-U
+    /// and F1-U: the frame of TS 38.415 §6.5.2 as octets, as for
+    /// `RanContainer`.
     PduSetInformationContainer {
-        /// Its content.
-        information: PduSetInformationContainer,
+        /// The frame, padding included. Its length plus 2 is a multiple of 4.
+        content: Vec<u8>,
         /// Whether the header has the type of earlier versions, 0x86,
         /// which a receiver may still get, and not 0x04.
         legacy_type: bool,
@@ -234,7 +235,7 @@ impl ExtensionHeader {
             NR_RAN_CONTAINER => Ok(ExtensionHeader::NrRanContainer(content.to_vec())),
             PDU_SET_INFORMATION_CONTAINER | PDU_SET_INFORMATION_CONTAINER_LEGACY => {
                 Ok(ExtensionHeader::PduSetInformationContainer {
-                    information: PduSetInformationContainer::decode(content)?,
+                    content: content.to_vec(),
                     legacy_type: kind == PDU_SET_INFORMATION_CONTAINER_LEGACY,
                 })
             }
@@ -276,8 +277,8 @@ impl ExtensionHeader {
             ExtensionHeader::NrRanContainer(content) => {
                 octets(Part::NrRanContainer, content, out)?;
             }
-            ExtensionHeader::PduSetInformationContainer { information, .. } => {
-                information.encode(out)?;
+            ExtensionHeader::PduSetInformationContainer { content, .. } => {
+                octets(Part::PduSetInformationContainer, content, out)?;
             }
             ExtensionHeader::Other { kind, content } => {
                 if kind.0 == 0 || Self::TYPES.contains(kind) {
@@ -356,11 +357,11 @@ impl fmt::Debug for ExtensionHeader {
             ExtensionHeader::XwRanContainer(content) => container(f, "XwRanContainer", content),
             ExtensionHeader::NrRanContainer(content) => container(f, "NrRanContainer", content),
             ExtensionHeader::PduSetInformationContainer {
-                information,
+                content,
                 legacy_type,
             } => f
                 .debug_struct("PduSetInformationContainer")
-                .field("information", information)
+                .field("content", &Octets(content))
                 .field("legacy_type", legacy_type)
                 .finish(),
             ExtensionHeader::Other { kind, content } => f

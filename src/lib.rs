@@ -85,8 +85,8 @@
 //! in their order and the payload, which is any `AsRef<[u8]>`:
 //! [`Packet::decode_borrowed`] leaves it in the datagram. Every extension
 //! header of TS 29.281 V19.2.0 §5.2.2 is a variant of [`ExtensionHeader`], with
-//! the PDU Session Container and the PDU Set Information Container of
-//! TS 38.415 V19.1.0. Decoding follows the receiver rules of §5.1, keeps what
+//! the PDU Session Container of TS 38.415 V19.1.0; the containers of the
+//! other frames keep them as octets. Decoding follows the receiver rules of §5.1, keeps what
 //! it does not know as received, and never panics; what decodes encodes to a
 //! message that decodes to the same value. [`Error`] names the [`Part`] of the
 //! message that is wrong, and converts into a `std::io::Error`.
@@ -124,7 +124,6 @@ mod extension;
 mod ie;
 pub mod ip;
 mod packet;
-mod pdu_set;
 mod types;
 
 #[cfg(feature = "endpoint")]
@@ -161,7 +160,6 @@ pub use extension::{
 };
 pub use ie::InformationElement;
 pub use packet::Packet;
-pub use pdu_set::{DownlinkPduSetInformation, PduSetInformationContainer};
 #[cfg(feature = "endpoint")]
 pub use stats::ReceiveStats;
 pub use types::{Cause, ExtensionHeaderType, InformationElementType, MessageType};
