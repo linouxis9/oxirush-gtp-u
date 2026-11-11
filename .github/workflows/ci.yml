@@ -88,7 +88,7 @@ jobs:
             echo "::warning::no vrf kernel module: the VRF test is skipped"
             echo "skip=--skip ue_vrf" >> "$GITHUB_OUTPUT"
           fi
-      - run: cargo test --locked --features tun,cli --test tun_linux --test tun_cleanup -- --ignored ${{ steps.vrf.outputs.skip }}
+      - run: cargo test --locked --features tun --test tun_linux --test tun_cleanup -- --ignored ${{ steps.vrf.outputs.skip }}
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: sudo
       # The fast path loads eBPF programs; three of its tests use a VRF.

@@ -284,7 +284,7 @@ jobs:
           path: mutants.out
 
   # After the shards, what a build without the feature `tun` does where that of every
-  # feature has a TUN: the program's refusal of one, and the UPF's write to none.
+  # feature has a TUN: the UPF's write to none.
   without-tun:
     name: Mutants of the code built without TUN
     needs: [plan, mutants]
@@ -300,9 +300,8 @@ jobs:
         with:
           tool: cargo-mutants@27.1.0
       - run: |
-          cargo mutants --no-config --features cli -j 2 \
-            -f src/bin/oxirush-upf-sim.rs -f src/upf_sim.rs \
-            -F 'src/bin/oxirush-upf-sim\.rs:.*: replace attach_tun ' \
+          cargo mutants --no-config -j 2 \
+            -f src/upf_sim.rs \
             -F 'src/upf_sim\.rs:.*: replace write_to_tun -> bool with true$' \
             || [ $? -eq 3 ]
           test ! -s mutants.out/missed.txt

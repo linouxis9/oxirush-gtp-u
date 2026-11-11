@@ -173,29 +173,6 @@ fn process_has_socket(inode: &str) -> bool {
 
 #[tokio::test]
 #[ignore = "needs CAP_NET_ADMIN"]
-async fn the_program_attaches_the_tun_that_it_is_given() {
-    use tokio::io::{AsyncBufReadExt, BufReader};
-    isolate();
-    let mut program = Command::new(env!("CARGO_BIN_EXE_oxirush-upf-sim"))
-        .args(["127.0.0.1:0", "127.0.0.1:2152", "1", "2"])
-        .args(["--tun", "oxprogram", "198.19.0.30"])
-        .stdout(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .unwrap();
-    let mut lines = BufReader::new(program.stdout.take().unwrap()).lines();
-    let first = tokio::time::timeout(Duration::from_secs(5), lines.next_line()).await;
-    let first = first
-        .unwrap()
-        .unwrap()
-        .expect("the program says where it is");
-    assert!(first.starts_with("UPF simulator on 127.0.0.1:"), "{first}");
-    assert!(exists("oxprogram"));
-    program.kill().await.unwrap();
-}
-
-#[tokio::test]
-#[ignore = "needs CAP_NET_ADMIN"]
 async fn replacing_an_attached_session_closes_its_old_tun() {
     isolate();
     let (upf, _) = UpfSimulator::bind("127.0.0.1:0".parse().unwrap())

@@ -27,8 +27,6 @@ tun = [
 # The eBPF fast path of the tunnels of a gNB or an eNB (Linux 6.6, and a
 # little-endian architecture of aya below).
 ebpf = ["tun", "dep:aya"]
-# The oxirush-upf-sim program, which needs Tokio's macros and signals.
-cli = ["endpoint", "tokio/macros", "tokio/signal"]
 
 [dependencies]
 tokio = { version = "1.38", features = ["net", "rt", "sync", "time"], optional = true }
@@ -52,10 +50,6 @@ tokio = { version = "1.38", features = ["io-util", "macros", "net", "process", "
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 libc = "0.2.164"
-
-[[bin]]
-name = "oxirush-upf-sim"
-required-features = ["cli"]
 
 [[example]]
 name = "tun"

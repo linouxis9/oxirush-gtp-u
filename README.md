@@ -61,9 +61,8 @@ tokio = { version = "1", features = ["macros", "rt", "net"] } # for the endpoint
 | `endpoint`, the default | `Endpoint`, `upf_sim` | a Tokio runtime |
 | `tun` | `tun`, and `attach_tun` of `Endpoint` and `UpfSimulator` | Linux, `CAP_NET_ADMIN` |
 | `ebpf` | `ebpf` | Linux 6.6, `CAP_BPF` and `CAP_NET_ADMIN` |
-| `cli` | the `oxirush-upf-sim` program | |
 
-`ebpf` turns on `tun`, and `tun` and `cli` turn on `endpoint`.
+`ebpf` turns on `tun`, and `tun` turns on `endpoint`.
 Off Linux, `tun` and `ebpf` build and add nothing; so does `ebpf` on 32-bit
 x86 and on big-endian targets. The eBPF programs come prebuilt: a build
 with `ebpf` needs no nightly toolchain and no eBPF linker.
@@ -357,27 +356,6 @@ Loading the programs needs root. The program is `examples/fast_path.rs`:
 ```sh
 cargo build --features ebpf --example fast_path
 sudo unshare --net sh -c 'ip link set lo up && target/debug/examples/fast_path'
-```
-
-## Run the test UPF as a program
-
-The arguments are the N3 address of the UPF, that of the gNB, the uplink
-TEID, the downlink TEID (decimal or hexadecimal), and the QFI. The program
-serves that session with an echo service, or as root with a TUN.
-
-```sh
-cargo install oxirush-gtp-u --locked --features cli       # --features cli,tun for a TUN
-oxirush-upf-sim 127.0.0.8:2152 127.0.0.1:2152 0x1001 0x2001 9
-```
-
-From a checkout of the repository:
-
-```sh
-cargo run --features cli --bin oxirush-upf-sim -- 127.0.0.8:2152 127.0.0.1:2152 0x1001 0x2001 9
-
-cargo build --features cli,tun --bin oxirush-upf-sim
-sudo ./target/debug/oxirush-upf-sim \
-  127.0.0.8:2152 127.0.0.1:2152 0x1001 0x2001 9 --tun oxupf0 10.45.0.2
 ```
 
 ## Limits

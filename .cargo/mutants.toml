@@ -9,7 +9,7 @@
 # programs of src/ebpf/programs.rs are no module of the crate: ebpf/build.sh builds
 # them into the committed object, which the crate loads.
 
-# Every feature, so that the code of `tun`, `ebpf` and `cli` is in the build
+# Every feature, so that the code of `tun` and `ebpf` is in the build
 # that the tests run on: without its feature, a mutant of that code would build
 # without it and pass.
 all_features = true
@@ -21,11 +21,10 @@ all_features = true
 exclude_globs = ["src/tun.rs", "src/tun/*.rs", "src/netlink.rs", "src/ebpf.rs"]
 
 exclude_re = [
-    # The code of TUNs in the files that the shards mutate, and the program's TUN:
-    # the job `privileged` runs these mutants, as root, by the same regexes in
-    # .cargo/mutants-privileged.toml. (What the program and the UPF do without a
-    # TUN is built without the feature `tun`: the job `without-tun` runs it.)
-    'src/bin/oxirush-upf-sim\.rs:.*: replace attach_tun ',
+    # The code of TUNs in the files that the shards mutate: the job `privileged`
+    # runs these mutants, as root, by the same regexes in
+    # .cargo/mutants-privileged.toml. (What the UPF does without a TUN is built
+    # without the feature `tun`: the job `without-tun` runs it.)
     'src/endpoint\.rs:.*(: replace (Endpoint::attach_tun|forward_tun) | in (Endpoint::attach_tun|forward_tun)$)',
     'src/endpoint\.rs:.*: (replace match guard !packet\.payload\.is_empty\(\) with (true|false)|delete !) in receive$',
     'src/endpoint/routes\.rs:.*(TunAttachment>::drop|RouteTable::(close_tuns|tun_slot|attach_tun|tun) |Routes::tun_slot)',

@@ -15,9 +15,8 @@ examine_re = [
     # The TUN device, its routes, netlink and the loader of the eBPF fast path.
     '^src/(tun|netlink|ebpf)\.rs:',
     '^src/tun/[a-z_]+\.rs:',
-    # The code of TUNs in the files that the shards mutate, and the program's TUN:
-    # the regexes by which .cargo/mutants.toml leaves them out.
-    'src/bin/oxirush-upf-sim\.rs:.*: replace attach_tun ',
+    # The code of TUNs in the files that the shards mutate: the regexes by which
+    # .cargo/mutants.toml leaves them out.
     'src/endpoint\.rs:.*(: replace (Endpoint::attach_tun|forward_tun) | in (Endpoint::attach_tun|forward_tun)$)',
     'src/endpoint\.rs:.*: (replace match guard !packet\.payload\.is_empty\(\) with (true|false)|delete !) in receive$',
     'src/endpoint/routes\.rs:.*(TunAttachment>::drop|RouteTable::(close_tuns|tun_slot|attach_tun|tun) |Routes::tun_slot)',

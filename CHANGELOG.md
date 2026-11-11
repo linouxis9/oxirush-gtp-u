@@ -2,6 +2,14 @@
 
 All notable changes to `oxirush-gtp-u` are recorded here.
 
+## Unreleased
+
+### Removed
+
+- The `oxirush-upf-sim` program and its feature `cli`. The test UPF is
+  `upf_sim::UpfSimulator`, which a program of a few lines starts. A build
+  that names the feature no longer resolves.
+
 ## 0.2.0 - 2026-11-07
 
 ### Changed
