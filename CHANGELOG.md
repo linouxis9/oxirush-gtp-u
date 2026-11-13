@@ -4,6 +4,12 @@ All notable changes to `oxirush-gtp-u` are recorded here.
 
 ## Unreleased
 
+### Changed
+
+- `upf_sim::Session::qfi` is an `Option<u8>`, and `Session::s1_u` makes the
+  session of an E-RAB on S1-U, whose downlink G-PDUs carry no PDU Session
+  Container. `Session::new` makes one of N3, of its QFI.
+
 ### Removed
 
 - The `oxirush-upf-sim` program and its feature `cli`. The test UPF is

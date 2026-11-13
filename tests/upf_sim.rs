@@ -66,6 +66,43 @@ async fn reply(socket: &UdpSocket) -> Packet {
     Packet::decode(&buffer[..size]).unwrap()
 }
 
+/// The echo service answers a PDU session of N3 in a G-PDU with its PDU
+/// Session Container and QFI, and an E-RAB of S1-U in one with no
+/// extension header.
+#[tokio::test]
+async fn the_downlink_of_n3_has_its_qos_flow_and_that_of_s1_u_none() {
+    let (upf, _upf_rx) = UpfSimulator::bind("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    let (ran, mut ran_rx) = Endpoint::bind("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    let address = upf.local_addr().unwrap();
+    for (session, qfi) in [(1, Some(9)), (2, None)] {
+        let remote = RemoteTunnel {
+            address,
+            teid: 0x1000 + session,
+        };
+        let local = ran.install(1, session as u8, remote, qfi).unwrap();
+        let provisioned = match qfi {
+            Some(qfi) => Session::new(remote.teid, local, ran.local_addr().unwrap(), qfi),
+            None => Session::s1_u(remote.teid, local, ran.local_addr().unwrap()),
+        };
+        upf.set_session(provisioned).unwrap();
+        ran.send(1, session as u8, udp(b"echo")).await.unwrap();
+        let downlink = next(&mut ran_rx).await;
+        assert_eq!(downlink.packet.teid, local);
+        assert_eq!(downlink.packet.qfi(), qfi);
+        match qfi {
+            Some(qfi) => assert_eq!(
+                downlink.packet.pdu_session_container(),
+                Some(&PduSessionContainer::downlink(qfi))
+            ),
+            None => assert!(downlink.packet.extension_headers.is_empty()),
+        }
+    }
+}
+
 #[tokio::test]
 async fn n3_packets_follow_the_target_after_a_path_switch() {
     let (upf, mut upf_rx) = UpfSimulator::bind("127.0.0.1:0".parse().unwrap())
@@ -193,7 +230,7 @@ async fn a_qfi_above_63_is_refused_and_leaves_the_session_as_it_was() {
     // the TEID of a session that exists and for a new one, whether the QFI
     // came through `new` or through the field.
     let mut changed = Session::new(1, 2, address, 9);
-    changed.qfi = 64;
+    changed.qfi = Some(64);
     for session in [changed, Session::new(5, 6, address, 64)] {
         let error = upf.set_session(session).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);

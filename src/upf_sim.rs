@@ -1,6 +1,6 @@
-//! A test UPF: an N3 peer whose sessions are provisioned directly, without
-//! PFCP. Its N6 is a built-in echo service, or a Linux TUN per session.
-//! [`UpfSimulator`] is an N3 peer whose sessions are set with
+//! A test UPF: an N3 peer, or an S1-U one as an SGW, whose sessions are
+//! provisioned directly, without PFCP. Its N6 is a built-in echo service, or a Linux TUN per session.
+//! [`UpfSimulator`] is an N3 or S1-U peer whose sessions are set with
 //! [`set_session`](UpfSimulator::set_session). Uplink packets go to the echo
 //! service, which reflects IPv4 UDP and answers ICMP Echo Requests, or to the
 //! TUN that `attach_tun` gives the session.
@@ -31,7 +31,8 @@ use crate::tun::{TunConfig, TunPort};
 use crate::types::Teid;
 use crate::{MessageType, Packet, ReceiveStats, icmp, ip};
 
-/// The tunnels of one PDU session. `Debug` prints the TEIDs in hexadecimal.
+/// The tunnels of one PDU session on N3, or of one E-RAB on S1-U. `Debug`
+/// prints the TEIDs in hexadecimal.
 ///
 /// ```
 /// # #[tokio::main(flavor = "current_thread")]
@@ -48,11 +49,15 @@ use crate::{MessageType, Packet, ReceiveStats, icmp, ip};
 /// assert_eq!(
 ///     format!("{session:?}"),
 ///     "Session { uplink_teid: 0x00001001, downlink_teid: 0x00002002, \
-///      gnb_address: 127.0.0.1:2152, qfi: 9 }"
+///      gnb_address: 127.0.0.1:2152, qfi: Some(9) }"
 /// );
 ///
 /// // A QFI has six bits
 /// assert!(upf.set_session(Session::new(0x1001, 0x2002, gnb, 64)).is_err());
+///
+/// // An E-RAB of an eNB, whose downlink has no QoS flow
+/// let enb = "127.0.0.2:2152".parse().unwrap();
+/// assert_eq!(Session::s1_u(0x1002, 0x2003, enb).qfi, None);
 /// # Ok(())
 /// # }
 /// ```
@@ -63,22 +68,35 @@ pub struct Session {
     pub uplink_teid: u32,
     /// The TEID the gNB receives downlink G-PDUs on.
     pub downlink_teid: u32,
-    /// The gNB's N3 address.
+    /// The RAN node's address: a gNB's on N3, an eNB's on S1-U.
     pub gnb_address: SocketAddr,
-    /// The QoS flow of downlink G-PDUs, 0..=63.
-    pub qfi: u8,
+    /// The QoS flow of downlink G-PDUs, 0..=63, which their PDU Session
+    /// Container carries (TS 38.415); none on S1-U, whose G-PDUs have no
+    /// such container.
+    pub qfi: Option<u8>,
 }
 
 impl Session {
-    /// A session with these tunnels. A QFI above 63 is refused where the
-    /// session is given to a UPF,
+    /// A PDU session on N3 with these tunnels, of QoS flow `qfi`. A QFI
+    /// above 63 is refused where the session is given to a UPF,
     /// [`set_session`](UpfSimulator::set_session).
     pub fn new(uplink_teid: u32, downlink_teid: u32, gnb_address: SocketAddr, qfi: u8) -> Self {
         Self {
             uplink_teid,
             downlink_teid,
             gnb_address,
-            qfi,
+            qfi: Some(qfi),
+        }
+    }
+
+    /// An E-RAB on S1-U with these tunnels, toward the eNB at
+    /// `enb_address`: its downlink G-PDUs have no PDU Session Container.
+    pub fn s1_u(uplink_teid: u32, downlink_teid: u32, enb_address: SocketAddr) -> Self {
+        Self {
+            uplink_teid,
+            downlink_teid,
+            gnb_address: enb_address,
+            qfi: None,
         }
     }
 }
@@ -116,7 +134,7 @@ impl fmt::Debug for UplinkPacket {
     }
 }
 
-/// A test UPF on one N3 socket.
+/// A test UPF on one N3 socket, which serves the E-RABs of S1-U too.
 ///
 /// A task answers Echo Requests, sends an Error Indication for a G-PDU on
 /// an unknown uplink TEID, within the limit of replies of an
@@ -318,7 +336,9 @@ impl UpfSimulator {
     /// [`Error::OutOfRange`](crate::Error::OutOfRange) for the QFI, which
     /// is what encoding a G-PDU with it returns.
     pub fn set_session(&self, session: Session) -> io::Result<()> {
-        path::qfi(session.qfi)?;
+        if let Some(qfi) = session.qfi {
+            path::qfi(qfi)?;
+        }
         let entry = Entry {
             session,
             #[cfg(all(target_os = "linux", feature = "tun"))]
@@ -478,7 +498,10 @@ async fn send_downlink<P: AsRef<[u8]>>(
     packet: P,
 ) -> io::Result<()> {
     let session = sessions.get(uplink_teid)?;
-    let downlink = Packet::downlink(session.downlink_teid, session.qfi, packet);
+    let downlink = match session.qfi {
+        Some(qfi) => Packet::downlink(session.downlink_teid, qfi, packet),
+        None => Packet::g_pdu(session.downlink_teid, packet),
+    };
     socket.send(&downlink, session.gnb_address).await
 }
 
