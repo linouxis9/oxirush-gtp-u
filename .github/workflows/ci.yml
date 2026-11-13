@@ -239,20 +239,3 @@ jobs:
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-
-  # The README and the front page of the documentation print what they show: readme/
-  # is a package of its own, whose build script writes their blocks.
-  readme:
-    name: The README blocks print what they show
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: readme
-      - run: cargo test --manifest-path readme/Cargo.toml
-      - run: cargo clippy --manifest-path readme/Cargo.toml --all-targets -- -D warnings
-      - run: cargo fmt --check --manifest-path readme/Cargo.toml

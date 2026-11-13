@@ -11,12 +11,15 @@
 //!     // the PDU Session Container, then the IP packet
 //!     let uplink = Packet::uplink(0x1234_5678, 9, b"an IP packet".as_slice());
 //!     let bytes = uplink.encode()?;
-//!     println!("{:02x?}", &bytes[..16]);
+//!     assert_eq!(
+//!         bytes[..16],
+//!         [0x34, 0xff, 0x00, 0x14, 0x12, 0x34, 0x56, 0x78, 0x00, 0x00, 0x00, 0x85, 0x01, 0x10, 0x09, 0x00],
+//!     );
 //!
 //!     // Decode it. The payload stays in the datagram
 //!     let decoded = Packet::decode_borrowed(&bytes)?;
-//!     println!("TEID {:#x}, QFI {:?}", decoded.teid, decoded.qfi());
-//!     println!("{:?}", String::from_utf8_lossy(decoded.payload));
+//!     assert_eq!((decoded.teid, decoded.qfi()), (0x1234_5678, Some(9)));
+//!     assert_eq!(decoded.payload, b"an IP packet");
 //!
 //!     // A downlink G-PDU whose container has more than a QFI
 //!     let mut information = DownlinkPduSessionInformation::new(9);
@@ -25,23 +28,16 @@
 //!         .with_pdu_session_container(PduSessionContainer::Downlink(information));
 //!     let decoded = Packet::decode(&downlink.encode()?)?;
 //!     if let Some(PduSessionContainer::Downlink(information)) = decoded.pdu_session_container() {
-//!         println!("QFI {}, RQI {}", information.qfi, information.rqi);
+//!         assert_eq!((information.qfi, information.rqi), (9, true));
 //!     }
 //!     Ok(())
 //! }
 //! ```
 //!
-//! ```text
-//! [34, ff, 00, 14, 12, 34, 56, 78, 00, 00, 00, 85, 01, 10, 09, 00]
-//! TEID 0x12345678, QFI Some(9)
-//! "an IP packet"
-//! QFI 9, RQI true
-//! ```
-//!
 //! # Tasks
 //!
 //! The [README](https://github.com/linouxis9/oxirush-gtp-u#readme) has a
-//! program for each, with what it prints.
+//! program for each, with what it gives.
 //!
 //! | Task | Items |
 //! |------|-------|

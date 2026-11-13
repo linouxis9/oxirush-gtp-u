@@ -16,12 +16,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // the PDU Session Container, then the IP packet
     let uplink = Packet::uplink(0x1234_5678, 9, b"an IP packet".as_slice());
     let bytes = uplink.encode()?;
-    println!("{:02x?}", &bytes[..16]);
+    assert_eq!(
+        bytes[..16],
+        [0x34, 0xff, 0x00, 0x14, 0x12, 0x34, 0x56, 0x78, 0x00, 0x00, 0x00, 0x85, 0x01, 0x10, 0x09, 0x00],
+    );
 
     // Decode it. The payload stays in the datagram
     let decoded = Packet::decode_borrowed(&bytes)?;
-    println!("TEID {:#x}, QFI {:?}", decoded.teid, decoded.qfi());
-    println!("{:?}", String::from_utf8_lossy(decoded.payload));
+    assert_eq!((decoded.teid, decoded.qfi()), (0x1234_5678, Some(9)));
+    assert_eq!(decoded.payload, b"an IP packet");
 
     // A downlink G-PDU whose container has more than a QFI
     let mut information = DownlinkPduSessionInformation::new(9);
@@ -30,20 +33,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_pdu_session_container(PduSessionContainer::Downlink(information));
     let decoded = Packet::decode(&downlink.encode()?)?;
     if let Some(PduSessionContainer::Downlink(information)) = decoded.pdu_session_container() {
-        println!("QFI {}, RQI {}", information.qfi, information.rqi);
+        assert_eq!((information.qfi, information.rqi), (9, true));
     }
     Ok(())
 }
 ```
 
-```text
-[34, ff, 00, 14, 12, 34, 56, 78, 00, 00, 00, 85, 01, 10, 09, 00]
-TEID 0x12345678, QFI Some(9)
-"an IP packet"
-QFI 9, RQI true
-```
-
-Each example is followed by its output.
+Each example shows what it gives with `assert_eq!`, and runs as a test of the crate.
 
 ## Installation
 
@@ -96,21 +92,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let server = "192.0.2.1:7".parse()?;
     gnb.send(1, 5, ip::udp(ue, server, b"hello")?).await?;
     let uplink = observed.recv().await.expect("the UPF is running");
-    println!(
-        "UPF: TEID {:#x}, QFI {:?}",
-        uplink.uplink_teid,
-        uplink.packet.qfi()
-    );
+    assert_eq!((uplink.uplink_teid, uplink.packet.qfi()), (0x1001, Some(9)));
 
     // Downlink: the reply, with the tunnel it arrived on
     let downlink = received.recv().await.expect("the endpoint is running");
     let (from, to, payload) = ip::parse_udp(&downlink.packet.payload)?;
-    println!(
-        "gNB: RAN UE {} session {}, QFI {:?}: {from} to {to}",
-        downlink.ran_id,
-        downlink.session_id,
-        downlink.packet.qfi()
-    );
+    assert_eq!((downlink.ran_id, downlink.session_id, downlink.packet.qfi()), (1, 5, Some(9)));
     assert_eq!((from, to, payload), (server, ue, b"hello".as_slice()));
 
     // The gNB asks whether its path to the UPF is alive, then supervises it:
@@ -118,20 +105,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut events = gnb.path_events();
     gnb.echo(upf.local_addr()?).await?;
     if let Ok(PathEvent::EchoResponse { packet, .. }) = events.recv().await {
-        println!("Echo Response: {:?}", packet.information_elements()?);
+        assert_eq!(format!("{:?}", packet.information_elements()?), "[Recovery(0)]");
     }
     gnb.supervise(upf.local_addr()?)?;
     let state = gnb.path_state(upf.local_addr()?).expect("supervised");
-    println!("path up: {}, unanswered: {}", state.up, state.unanswered);
+    assert_eq!((state.up, state.unanswered), (true, 0));
     Ok(())
 }
-```
-
-```text
-UPF: TEID 0x1001, QFI Some(9)
-gNB: RAN UE 1 session 5, QFI Some(9): 192.0.2.1:7 to 10.45.0.2:4000
-Echo Response: [Recovery(0)]
-path up: true, unanswered: 0
 ```
 
 The TEIDs, the addresses and the QoS flow of a tunnel come from the
@@ -157,32 +137,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut buffer = [0; 64];
     let (length, _) = peer.recv_from(&mut buffer).await?;
     let response = Packet::decode(&buffer[..length])?;
-    println!(
-        "{}, sequence number {:?}, {:?}",
-        response.message_type,
-        response.sequence,
-        response.information_elements()?
-    );
+    assert_eq!(response.message_type.to_string(), "Echo Response");
+    assert_eq!(response.sequence, Some(7));
+    assert_eq!(format!("{:?}", response.information_elements()?), "[Recovery(0)]");
 
     // The UPF has no session with TEID 0x1001. It answers the G-PDU with an
     // Error Indication, which the receiver gets with its tunnel
     gnb.install(1, 5, RemoteTunnel::new(upf.local_addr()?, 0x1001), Some(9))?;
     gnb.send(1, 5, b"an IP packet".as_slice()).await?;
     let indication = received.recv().await.expect("the endpoint is running");
-    println!(
-        "{} for RAN UE {} session {}: {:?}",
-        indication.packet.message_type,
-        indication.ran_id,
-        indication.session_id,
-        indication.packet.information_elements()?
+    assert_eq!(indication.packet.message_type.to_string(), "Error Indication");
+    assert_eq!((indication.ran_id, indication.session_id), (1, 5));
+    assert_eq!(
+        format!("{:?}", indication.packet.information_elements()?),
+        "[TeidDataI(0x00001001), GtpUPeerAddress(127.0.0.10)]",
     );
     Ok(())
 }
-```
-
-```text
-Echo Response, sequence number Some(7), [Recovery(0)]
-Error Indication for RAN UE 1 session 5: [TeidDataI(0x00001001), GtpUPeerAddress(127.0.0.10)]
 ```
 
 An endpoint, too, answers a G-PDU on a TEID it does not have with an Error
@@ -209,26 +180,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // A decoded message has them in their order
     let decoded = Packet::decode(&packet.encode()?)?;
-    for header in &decoded.extension_headers {
-        let required = header.comprehension_required();
-        println!("{}, comprehension required: {required}", header.kind());
-    }
-    println!("{:?}", decoded.extension_headers[1]);
+    let headers: Vec<_> = (decoded.extension_headers.iter())
+        .map(|header| (header.kind().to_string(), header.comprehension_required()))
+        .collect();
+    assert_eq!(headers, [("PDU Session Container".into(), true), ("0x21".into(), false)]);
+    assert_eq!(
+        format!("{:?}", decoded.extension_headers[1]),
+        "Other { kind: ExtensionHeaderType(0x21), content: 2 octets 0700 }",
+    );
 
     // Sent on with another TEID and QoS flow
     let mut forwarded = decoded;
     forwarded.teid = 0x9abc_def0;
     forwarded.set_qfi(5);
-    println!("{:02x?}", &forwarded.encode()?[4..16]);
+    assert_eq!(
+        forwarded.encode()?[4..16],
+        [0x9a, 0xbc, 0xde, 0xf0, 0x00, 0x00, 0x00, 0x85, 0x01, 0x10, 0x05, 0x21],
+    );
     Ok(())
 }
-```
-
-```text
-PDU Session Container, comprehension required: true
-0x21, comprehension required: false
-Other { kind: ExtensionHeaderType(0x21), content: 2 octets 0700 }
-[9a, bc, de, f0, 00, 00, 00, 85, 01, 10, 05, 21]
 ```
 
 Every extension header of TS 29.281 V19.2.0 has a variant, and a header of
@@ -276,14 +246,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     socket.send_to(b"hello", "192.0.2.1:7").await?;
     let mut reply = [0; 16];
     let (length, from) = socket.recv_from(&mut reply).await?;
-    let reply = String::from_utf8_lossy(&reply[..length]);
-    println!("{from} answered {reply:?}");
+    assert_eq!((from, &reply[..length]), ("192.0.2.1:7".parse()?, &b"hello"[..]));
     Ok(())
 }
-```
-
-```text
-192.0.2.1:7 answered "hello"
 ```
 
 It creates an interface and a routing rule, which needs `CAP_NET_ADMIN`. A
@@ -426,9 +391,9 @@ cargo test --test wireshark -- --ignored
 Property tests and a `cargo fuzz` target check that decoding never panics,
 and that what decodes encodes to a message that decodes to the same value;
 another holds what a node answers, and the Echo Reply of the test UPF, to
-TS 29.281 and to RFC 792. CI rebuilds the eBPF object from its source and compares. Each Rust block of
-this page is checked with what it prints ([`readme/`](readme/build.rs) says
-how).
+TS 29.281 and to RFC 792. CI rebuilds the eBPF object from its source and
+compares. Each Rust block of this page checks what it gives with
+`assert_eq!`, and runs as a documentation test of the crate.
 
 [The documentation](https://docs.rs/oxirush-gtp-u) has the terms, what the
 codec covers, and the reference of the endpoint, the test UPF, the TUN

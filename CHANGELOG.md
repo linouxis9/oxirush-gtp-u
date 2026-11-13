@@ -12,6 +12,9 @@ All notable changes to `oxirush-gtp-u` are recorded here.
 
 ### Removed
 
+- `readme/`, the package that compared what each block of the README and of the
+  front page of the documentation printed with the text under it: the blocks check
+  what they give with `assert_eq!`, and run as documentation tests.
 - The `oxirush-upf-sim` program and its feature `cli`. The test UPF is
   `upf_sim::UpfSimulator`, which a program of a few lines starts. A build
   that names the feature no longer resolves.
