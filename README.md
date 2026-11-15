@@ -406,15 +406,15 @@ sudo unshare --net sh -c 'ip link set lo up && target/debug/examples/fast_path'
 
 | Operation, a G-PDU of 1,400 octets | This crate | go-gtp v0.8.12 |
 |---|---|---|
-| Encode, with a PDU Session Container | 25.8 ns | about the same |
-| Decode, with a PDU Session Container | 24.0 ns | 1.8× slower |
-| Decode, no extension header | 10.8 ns | 2.6× faster |
-| From an endpoint to another and back, over the loopback interface | 12.1 µs | 2.0× slower |
+| Encode, with a PDU Session Container | 69.1 ns | 1.2× faster |
+| Decode, with a PDU Session Container | 76.2 ns | 1.4× slower |
+| Decode, no extension header | 18.1 ns | 2.2× faster |
+| From an endpoint to another and back, over the loopback interface | 18.0 µs | 2.1× slower |
 
-On one core of an AMD Ryzen 7 5700G (Linux 7.0, Rust 1.98.1), at 0d25889 on
-2026-10-18, the lowest of three runs. The go-gtp cell says how much slower or
-faster go-gtp is than this crate: "about the same" when the two are within
-10 %.
+Medians of ten rounds in turns on one core of an Intel Xeon E5-2680 v4 (a
+KVM guest, Linux 7.0, Rust 1.100.0, Go 1.27.4), at 04de366 on 2026-11-15.
+The go-gtp cell says how much slower or faster go-gtp is than this crate:
+"about the same" when the medians are within 10 % or the ten times overlap.
 [`benches/README.md`](benches/README.md) has every figure, the method and
 the commands.
 
