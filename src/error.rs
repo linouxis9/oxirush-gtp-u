@@ -169,6 +169,8 @@ pub enum Part {
     UdpHeader,
     /// A UDP datagram: what its Length counts.
     UdpDatagram,
+    /// An ICMP message: what its IPv4 packet carries.
+    IcmpMessage,
 }
 
 impl fmt::Display for Part {
@@ -205,6 +207,7 @@ impl fmt::Display for Part {
             Part::Ipv4Packet => "IPv4 packet",
             Part::UdpHeader => "UDP header",
             Part::UdpDatagram => "UDP datagram",
+            Part::IcmpMessage => "ICMP message",
         })
     }
 }

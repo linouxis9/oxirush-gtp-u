@@ -1,5 +1,7 @@
-//! Inner IPv4 UDP packets, to exercise a tunnel without a TUN. They are
+//! Inner IPv4 packets, to exercise a tunnel without a TUN: UDP datagrams,
+//! the header of any other protocol, and the Internet checksum. They are
 //! IPv4 only; the codec and the endpoint carry any payload, IPv6 included.
+//! [`icmp`](crate::icmp) has the ICMP Echo messages.
 
 use std::fmt;
 use std::net::{Ipv4Addr, SocketAddrV4};
@@ -22,6 +24,10 @@ pub enum Expected {
     Unfragmented,
     /// Protocol 17, UDP.
     Udp,
+    /// Protocol 1, ICMP.
+    Icmp,
+    /// An ICMP Echo Request or Echo Reply, of code 0.
+    Echo,
 }
 
 impl fmt::Display for Expected {
@@ -30,6 +36,8 @@ impl fmt::Display for Expected {
             Expected::Ipv4 => "not IPv4",
             Expected::Unfragmented => "fragmented",
             Expected::Udp => "not UDP",
+            Expected::Icmp => "not ICMP",
+            Expected::Echo => "not an ICMP Echo",
         })
     }
 }
@@ -181,13 +189,21 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<Ipv4Packet<'_>, Error> {
     })
 }
 
-/// An IPv4 header without options, Don't Fragment set, TTL 64.
-pub(crate) fn header(
-    source: Ipv4Addr,
-    destination: Ipv4Addr,
-    protocol: u8,
-    total_length: u16,
-) -> Vec<u8> {
+/// An IPv4 header of 20 octets for a packet of `total_length` octets of
+/// `protocol`: no options, a Type of Service and an Identification of zero,
+/// Don't Fragment set, a TTL of 64, and its checksum. The payload goes after
+/// it, in the room that the vector has for the whole packet.
+///
+/// ```
+/// use oxirush_gtp_u::ip;
+///
+/// // The header of an SCTP packet of 120 octets, protocol 132
+/// let (source, destination) = ("10.0.0.1".parse().unwrap(), "10.0.0.2".parse().unwrap());
+/// let header = ip::header(source, destination, 132, 120);
+/// assert_eq!(header[..10], [0x45, 0, 0, 120, 0, 0, 0x40, 0, 64, 132]);
+/// assert_eq!(ip::checksum(&[&header]), 0);
+/// ```
+pub fn header(source: Ipv4Addr, destination: Ipv4Addr, protocol: u8, total_length: u16) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(usize::from(total_length));
     bytes.extend_from_slice(&[0x45, 0]);
     bytes.extend_from_slice(&total_length.to_be_bytes());
@@ -224,9 +240,19 @@ fn udp_checksum(source: Ipv4Addr, destination: Ipv4Addr, udp: &[u8]) -> u16 {
     checksum(&[&pseudo_header(source, destination, udp.len()), udp])
 }
 
-/// The Internet checksum (RFC 1071) of the concatenated `parts`; only the
-/// last part may have an odd length.
-pub(crate) fn checksum(parts: &[&[u8]]) -> u16 {
+/// The Internet checksum (RFC 1071) of the concatenated `parts`, the last
+/// octet of an odd length padded with a zero: 0 over octets that carry their
+/// checksum. Only the last part may have an odd length.
+///
+/// ```
+/// use oxirush_gtp_u::ip;
+///
+/// // RFC 1071 §3, in one part and in two
+/// let octets = [0x00, 0x01, 0xf2, 0x03, 0xf4, 0xf5, 0xf6, 0xf7];
+/// assert_eq!(ip::checksum(&[&octets]), 0x220d);
+/// assert_eq!(ip::checksum(&[&octets[..2], &octets[2..]]), 0x220d);
+/// ```
+pub fn checksum(parts: &[&[u8]]) -> u16 {
     let mut sum: u32 = 0;
     for part in parts {
         let (words, last) = part.as_chunks::<2>();

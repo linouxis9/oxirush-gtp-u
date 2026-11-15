@@ -4,6 +4,13 @@ All notable changes to `oxirush-gtp-u` are recorded here.
 
 ## Unreleased
 
+### Added
+
+- `icmp`: `echo_request`, `parse_echo` and `reply_to`, the ICMP Echo messages
+  of a ping in IPv4 packets, without a feature. `ip::header` and `ip::checksum`
+  are public. `Expected::Icmp`, `Expected::Echo` and `Part::IcmpMessage` are
+  what `parse_echo` refuses.
+
 ### Changed
 
 - `upf_sim::Session::qfi` is an `Option<u8>`, and `Session::s1_u` makes the

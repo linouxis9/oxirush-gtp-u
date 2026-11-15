@@ -43,6 +43,7 @@
 //! |------|-------|
 //! | Encode and decode a G-PDU | [`Packet`], [`Packet::uplink`], [`Packet::decode_borrowed`], [`PduSessionContainer`] |
 //! | Carry a PDU session between a gNB and the test UPF | [`Endpoint`], [`Endpoint::install`], [`Endpoint::send`], [`upf_sim::UpfSimulator`], [`upf_sim::Session`], [`ip::udp`] |
+//! | Ping through a tunnel | [`icmp::echo_request`], [`icmp::parse_echo`], [`icmp::reply_to`] |
 //! | Supervise the path to a peer | [`Endpoint::echo`], [`Endpoint::supervise`], [`Endpoint::path_state`], [`Endpoint::path_events`], [`PathEvent`] |
 //! | Answer a peer: Echo and Error Indication | [`Packet::echo_request`], [`InformationElement`] |
 //! | Read and write extension headers | [`ExtensionHeader`], [`ExtensionHeaderType`] |
@@ -65,7 +66,7 @@
 //!
 //! | Part | Feature | Needs |
 //! | ---- | ------- | ----- |
-//! | The codec ([`Packet`], [`ExtensionHeader`], [`InformationElement`]) and the IPv4 helpers of [`ip`] | none | no dependency |
+//! | The codec ([`Packet`], [`ExtensionHeader`], [`InformationElement`]) and the IPv4 helpers of [`ip`] and [`icmp`] | none | no dependency |
 //! | [`Endpoint`], [`upf_sim`] | `endpoint`, the default | a Tokio runtime |
 //! | [`tun`], and `attach_tun` of [`Endpoint`] and [`UpfSimulator`](upf_sim::UpfSimulator) | `tun` | Linux, `CAP_NET_ADMIN` |
 //! | [`ebpf`] | `ebpf` | Linux 6.6, `CAP_BPF` and `CAP_NET_ADMIN` |
@@ -124,8 +125,7 @@ mod types;
 
 #[cfg(feature = "endpoint")]
 mod datagram;
-#[cfg(feature = "endpoint")]
-mod icmp;
+pub mod icmp;
 // The `ebpf` feature on Linux, on a little-endian architecture of aya: see
 // build.rs.
 #[cfg(fast_path)]
@@ -190,7 +190,7 @@ pub mod fuzzing {
 
     /// The ICMP Echo Reply of the test UPF to an IPv4 packet.
     pub fn echo_reply(request: &[u8]) -> Option<Vec<u8>> {
-        crate::icmp::echo_reply(request)
+        crate::icmp::reply_to(request)
     }
 }
 

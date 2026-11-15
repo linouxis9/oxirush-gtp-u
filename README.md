@@ -118,6 +118,26 @@ The TEIDs, the addresses and the QoS flow of a tunnel come from the
 control plane: in 5G, the PDU SESSION RESOURCE SETUP of NGAP, which
 [oxirush-ngap](https://github.com/linouxis9/oxirush-ngap) decodes.
 
+## Ping through a tunnel
+
+`icmp` writes and reads the ICMP Echo messages of a ping: the request of a
+UE, the reply of the host that answers it, which the test UPF writes on N6,
+and what the UE reads of it.
+
+```rust
+use oxirush_gtp_u::icmp::{self, EchoKind};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let (ue, server) = ("10.45.0.2".parse()?, "192.0.2.1".parse()?);
+    let request = icmp::echo_request(ue, server, 0x4f58, 1, b"ping")?;
+    let reply = icmp::reply_to(&request).expect("an Echo Request");
+    let echo = icmp::parse_echo(&reply)?;
+    assert_eq!((echo.kind, echo.source, echo.destination), (EchoKind::Reply, server, ue));
+    assert_eq!((echo.identifier, echo.sequence, echo.payload), (0x4f58, 1, b"ping".as_slice()));
+    Ok(())
+}
+```
+
 ## Answer a peer: Echo and Error Indication
 
 ```rust

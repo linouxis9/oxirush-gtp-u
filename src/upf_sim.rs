@@ -510,7 +510,7 @@ fn echo_service(packet: &[u8]) -> Option<Vec<u8>> {
     if let Ok((source, destination, payload)) = ip::parse_udp(packet) {
         return ip::udp(destination, source, payload).ok();
     }
-    icmp::echo_reply(packet)
+    icmp::reply_to(packet)
 }
 
 async fn receive(
