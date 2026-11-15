@@ -222,12 +222,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 An endpoint, too, answers a G-PDU on a TEID it does not have with an Error
-Indication. Since anyone who reaches the socket can send such G-PDUs
-and Echo Requests from any address, the replies are limited: a socket sends
-at most 1,000 Error Indications, Supported Extension Headers Notifications
-and Echo Responses a second, after a burst of 1,000. `stats()` counts the
-replies that were not sent, the G-PDUs on unknown TEIDs and the Error
-Indications that name no tunnel.
+Indication.
+
+Anyone who reaches the socket can send such G-PDUs and Echo Requests, from
+any address, so the replies are limited. A socket sends at most 1,000 Error
+Indications, Supported Extension Headers Notifications and Echo Responses a
+second, after a burst of 1,000. `stats()` counts the replies that were not
+sent, the G-PDUs on unknown TEIDs and the Error Indications that name no
+tunnel.
 
 ## Read and write extension headers
 
@@ -411,7 +413,8 @@ sudo unshare --net sh -c 'ip link set lo up && target/debug/examples/fast_path'
 
 On one core of an AMD Ryzen 7 5700G (Linux 7.0, Rust 1.98.1), at 0d25889 on
 2026-10-18, the lowest of three runs. The go-gtp cell says how much slower or
-faster go-gtp is than this crate, and "about the same" is within 10 %.
+faster go-gtp is than this crate: "about the same" when the two are within
+10 %.
 [`benches/README.md`](benches/README.md) has every figure, the method and
 the commands.
 
