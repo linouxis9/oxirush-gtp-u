@@ -2,7 +2,7 @@
 
 All notable changes to `oxirush-gtp-u` are recorded here.
 
-## Unreleased
+## 0.3.0 - unreleased
 
 ### Added
 

@@ -45,10 +45,10 @@ Each example shows what it gives with `assert_eq!`, and runs as a test of the cr
 
 ```toml
 [dependencies]
-oxirush-gtp-u = "0.2"
+oxirush-gtp-u = "0.3"
 tokio = { version = "1", features = ["macros", "rt", "net"] } # for the endpoint
 # The codec alone, without a dependency:
-# oxirush-gtp-u = { version = "0.2", default-features = false }
+# oxirush-gtp-u = { version = "0.3", default-features = false }
 ```
 
 | Feature | Adds | Needs |
