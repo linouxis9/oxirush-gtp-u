@@ -1,6 +1,6 @@
 //! GTP-U for the user plane of 5G and 4G, per 3GPP TS 29.281, with the PDU
 //! Session Container of TS 38.415: a codec, an endpoint for the tunnels of a
-//! base station, a UPF to test against, Linux TUN devices and an eBPF fast
+//! base station, a user-plane test peer, Linux TUN devices and an eBPF fast
 //! path.
 //!
 //! ```rust
@@ -42,7 +42,8 @@
 //! | Task | Items |
 //! |------|-------|
 //! | Encode and decode a G-PDU | [`Packet`], [`Packet::uplink`], [`Packet::decode_borrowed`], [`PduSessionContainer`] |
-//! | Carry a PDU session between a gNB and the test UPF | [`Endpoint`], [`Endpoint::install`], [`Endpoint::send`], [`upf_sim::UpfSimulator`], [`upf_sim::Session`], [`ip::udp`] |
+//! | Carry a PDU session to a test peer | [`Endpoint`], [`Endpoint::install`], [`Endpoint::send`], [`upf_sim::UpfSimulator`], [`upf_sim::Session`], [`ip::udp`] |
+//! | An E-RAB on S1-U | [`upf_sim::Session::s1_u`], [`Endpoint::install`] with no QoS flow |
 //! | Ping through a tunnel | [`icmp::echo_request`], [`icmp::parse_echo`], [`icmp::reply_to`] |
 //! | Supervise the path to a peer | [`Endpoint::echo`], [`Endpoint::supervise`], [`Endpoint::path_state`], [`Endpoint::path_events`], [`PathEvent`] |
 //! | Answer a peer: Echo and Error Indication | [`Packet::echo_request`], [`InformationElement`] |
@@ -110,7 +111,7 @@
 //! - [oxirush-security](https://docs.rs/oxirush-security): NAS security, AKA and the derivation of keys.
 //! - [oxirush-ngap](https://docs.rs/oxirush-ngap): NGAP, between a gNB and an AMF.
 //! - [oxirush-s1ap](https://docs.rs/oxirush-s1ap): S1AP, between an eNB and an MME.
-//! - [oxirush-gtp-u](https://docs.rs/oxirush-gtp-u): GTP-U tunnels, with a test UPF.
+//! - [oxirush-gtp-u](https://docs.rs/oxirush-gtp-u): GTP-U tunnels, with a user-plane test peer.
 //! - [oxirush-sctp](https://docs.rs/oxirush-sctp): SCTP sockets, which carry NGAP and S1AP.
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![deny(unsafe_code)]
@@ -188,7 +189,7 @@ pub mod fuzzing {
         crate::path::length_error_response(bytes)
     }
 
-    /// The ICMP Echo Reply of the test UPF to an IPv4 packet.
+    /// The ICMP Echo Reply of the test peer's echo service to an IPv4 packet.
     pub fn echo_reply(request: &[u8]) -> Option<Vec<u8>> {
         crate::icmp::reply_to(request)
     }

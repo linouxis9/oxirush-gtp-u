@@ -19,8 +19,8 @@ pub struct ReceiveStats {
     pub unknown_teid_g_pdus: u64,
     /// Error Indications that name no tunnel of an endpoint.
     pub unmatched_error_indications: u64,
-    /// Messages that the endpoint or the test UPF does not take: End
-    /// Markers on a TEID without a tunnel, the test UPF's Error Indications
+    /// Messages that the endpoint or the test peer does not take: End
+    /// Markers on a TEID without a tunnel, the test peer's Error Indications
     /// and End Markers, and messages of other types.
     pub ignored_messages: u64,
     /// Error Indications, Supported Extension Headers Notifications and Echo

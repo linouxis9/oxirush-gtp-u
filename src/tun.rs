@@ -15,8 +15,9 @@
 //! - [`Routing::UeVrf`] gives the TUN a UE's address and puts it in a new VRF,
 //!   whose table has the TUN as its default route.
 //! - [`Routing::Upf`] routes one UE address to the TUN in the main table, so
-//!   that Linux is the UPF's N6. To reach another network, enable IPv4
-//!   forwarding and add the routes or NAT that network needs.
+//!   that Linux is the network behind the test peer, as N6 is behind a UPF.
+//!   To reach another network, enable IPv4 forwarding and add the routes or
+//!   NAT that network needs.
 //!
 //! The routing is IPv4 and the TUN has no IPv6 address, so Linux sends nothing
 //! through it unasked. `recv` and `send` exchange raw IP packets with Linux.
@@ -64,7 +65,9 @@ pub enum Routing {
         /// The VRF's name.
         vrf_name: String,
     },
-    /// A UPF session: the main table routes `ue_address` to the TUN.
+    /// A session of the test peer
+    /// ([`UpfSimulator::attach_tun`](crate::upf_sim::UpfSimulator::attach_tun)):
+    /// the main table routes `ue_address` to the TUN.
     Upf {
         /// The UE's address.
         ue_address: Ipv4Addr,

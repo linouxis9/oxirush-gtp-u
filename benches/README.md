@@ -45,7 +45,7 @@ extension headers, of which one is kept as octets:
 | Decode, the payload copied: no extension header | 15 ns | 36 ns |
 | The same, with the PDU Session Container | 27 ns | 57 ns |
 | The same, with three extension headers | 76 ns | 108 ns |
-| From an endpoint to the test UPF and its echo back, over the loopback interface | 12.3 µs | 12.9 µs |
+| From an endpoint to the test peer and its echo back, over the loopback interface | 12.3 µs | 12.9 µs |
 
 Four fifths of the round trip are its four system calls, and the codec is
 under 2% of it. A message whose payload stays in the datagram allocates the list of its

@@ -16,13 +16,16 @@ All notable changes to `oxirush-gtp-u` are recorded here.
 - `upf_sim::Session::qfi` is an `Option<u8>`, and `Session::s1_u` makes the
   session of an E-RAB on S1-U, whose downlink G-PDUs carry no PDU Session
   Container. `Session::new` makes one of N3, of its QFI.
+- The documentation and the description of the crate present
+  `upf_sim::UpfSimulator` as a user-plane test peer, not as a UPF; the
+  keyword `upf` gives way to `lte`.
 
 ### Removed
 
 - `readme/`, the package that compared what each block of the README and of the
   front page of the documentation printed with the text under it: the blocks check
   what they give with `assert_eq!`, and run as documentation tests.
-- The `oxirush-upf-sim` program and its feature `cli`. The test UPF is
+- The `oxirush-upf-sim` program and its feature `cli`. The test peer is
   `upf_sim::UpfSimulator`, which a program of a few lines starts. A build
   that names the feature no longer resolves.
 - `PduSetInformationContainer` and `DownlinkPduSetInformation`, the fields

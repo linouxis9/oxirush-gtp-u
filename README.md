@@ -6,7 +6,7 @@
 
 GTP-U, the protocol that tunnels user traffic in 5G and 4G networks, in
 Rust, per 3GPP TS 29.281: a codec, an endpoint for the tunnels of a base
-station, a UPF to test against, Linux TUN devices and an eBPF fast path.
+station, a user-plane test peer, Linux TUN devices and an eBPF fast path.
 
 ```rust
 use oxirush_gtp_u::{DownlinkPduSessionInformation, Packet, PduSessionContainer};
@@ -65,12 +65,17 @@ with `ebpf` needs no nightly toolchain and no eBPF linker.
 
 The minimum supported Rust version is 1.88.
 
-## Carry a PDU session between a gNB and the test UPF
+## Carry a PDU session to a test peer
 
 `Endpoint` is the N3 socket of a gNB, or the S1-U socket of an eNB, for
 labs and test tools. You give each tunnel the TEIDs (Tunnel Endpoint
 Identifiers), the addresses and the QoS flow that NGAP, S1AP or PFCP would
 negotiate.
+
+`UpfSimulator`, in `upf_sim`, is the other end: a user-plane test peer, a
+GTP-U socket whose sessions you set yourself, without PFCP. It echoes what
+the UE sends, or forwards it to a TUN, so that you can test the gNB or eNB
+side of a tunnel, or a GTP-U tool, without a core network.
 
 ```rust
 use oxirush_gtp_u::upf_sim::{Session, UpfSimulator};
@@ -78,20 +83,20 @@ use oxirush_gtp_u::{Endpoint, PathEvent, RemoteTunnel, ip};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let (upf, mut observed) = UpfSimulator::bind("127.0.0.1:0".parse()?).await?;
+    let (peer, mut observed) = UpfSimulator::bind("127.0.0.1:0".parse()?).await?;
     let (gnb, mut received) = Endpoint::bind("127.0.0.1:0".parse()?).await?;
 
-    // What the control plane negotiates: the UPF receives the session's
-    // uplink on TEID 0x1001, the gNB its downlink on the TEID it assigns
-    // to RAN UE 1, PDU session 5, whose QoS flow is 9
-    let teid = gnb.install(1, 5, RemoteTunnel::new(upf.local_addr()?, 0x1001), Some(9))?;
-    upf.set_session(Session::new(0x1001, teid, gnb.local_addr()?, 9))?;
+    // What the control plane would negotiate: the peer receives the
+    // session's uplink on TEID 0x1001, the gNB its downlink on the TEID it
+    // assigns to RAN UE 1, PDU session 5, whose QoS flow is 9
+    let teid = gnb.install(1, 5, RemoteTunnel::new(peer.local_addr()?, 0x1001), Some(9))?;
+    peer.set_session(Session::new(0x1001, teid, gnb.local_addr()?, 9))?;
 
-    // Uplink: an IP packet of the UE, which the UPF's echo service reflects
+    // Uplink: an IP packet of the UE, which the peer's echo service reflects
     let ue = "10.45.0.2:4000".parse()?;
     let server = "192.0.2.1:7".parse()?;
     gnb.send(1, 5, ip::udp(ue, server, b"hello")?).await?;
-    let uplink = observed.recv().await.expect("the UPF is running");
+    let uplink = observed.recv().await.expect("the peer is running");
     assert_eq!((uplink.uplink_teid, uplink.packet.qfi()), (0x1001, Some(9)));
 
     // Downlink: the reply, with the tunnel it arrived on
@@ -100,15 +105,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!((downlink.ran_id, downlink.session_id, downlink.packet.qfi()), (1, 5, Some(9)));
     assert_eq!((from, to, payload), (server, ue, b"hello".as_slice()));
 
-    // The gNB asks whether its path to the UPF is alive, then supervises it:
+    // The gNB asks whether its path to the peer is alive, then supervises it:
     // `path_state` and `path_events` say when it goes down, and up again
     let mut events = gnb.path_events();
-    gnb.echo(upf.local_addr()?).await?;
+    gnb.echo(peer.local_addr()?).await?;
     if let Ok(PathEvent::EchoResponse { packet, .. }) = events.recv().await {
         assert_eq!(format!("{:?}", packet.information_elements()?), "[Recovery(0)]");
     }
-    gnb.supervise(upf.local_addr()?)?;
-    let state = gnb.path_state(upf.local_addr()?).expect("supervised");
+    gnb.supervise(peer.local_addr()?)?;
+    let state = gnb.path_state(peer.local_addr()?).expect("supervised");
     assert_eq!((state.up, state.unanswered), (true, 0));
     Ok(())
 }
@@ -118,11 +123,48 @@ The TEIDs, the addresses and the QoS flow of a tunnel come from the
 control plane: in 5G, the PDU SESSION RESOURCE SETUP of NGAP, which
 [oxirush-ngap](https://github.com/linouxis9/oxirush-ngap) decodes.
 
+`set_echo_service(false)` turns the echo off, for a program that answers
+the UE itself with `send_downlink`; `attach_tun` gives a session a TUN in
+its place, and `switch_downlink` moves a session's downlink to another
+address and TEID after a handover, with an End Marker on the old path.
+
+## An E-RAB on S1-U
+
+On S1-U the tunnel has no QoS flow, and its G-PDUs no PDU Session
+Container: the endpoint is an eNB's, and `Session::s1_u` gives the test
+peer the E-RAB, as an SGW would have it.
+
+```rust
+use oxirush_gtp_u::upf_sim::{Session, UpfSimulator};
+use oxirush_gtp_u::{Endpoint, RemoteTunnel, ip};
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let (peer, mut observed) = UpfSimulator::bind("127.0.0.1:0".parse()?).await?;
+    let (enb, mut received) = Endpoint::bind("127.0.0.1:0".parse()?).await?;
+
+    // E-RAB 5 of eNB UE 1, as S1AP would set it up: no QoS flow
+    let teid = enb.install(1, 5, RemoteTunnel::new(peer.local_addr()?, 0x1001), None)?;
+    peer.set_session(Session::s1_u(0x1001, teid, enb.local_addr()?))?;
+
+    let (ue, server) = ("10.45.0.2:4000".parse()?, "192.0.2.1:7".parse()?);
+    enb.send(1, 5, ip::udp(ue, server, b"hello")?).await?;
+    let uplink = observed.recv().await.expect("the peer is running");
+    assert_eq!((uplink.uplink_teid, uplink.packet.extension_headers.len()), (0x1001, 0));
+
+    // The echo comes back without an extension header either
+    let downlink = received.recv().await.expect("the endpoint is running");
+    assert_eq!((downlink.ran_id, downlink.session_id), (1, 5));
+    assert_eq!((downlink.packet.qfi(), downlink.packet.extension_headers.len()), (None, 0));
+    Ok(())
+}
+```
+
 ## Ping through a tunnel
 
 `icmp` writes and reads the ICMP Echo messages of a ping: the request of a
-UE, the reply of the host that answers it, which the test UPF writes on N6,
-and what the UE reads of it.
+UE, the reply of the host that answers it, which the echo service of the
+test peer writes, and what the UE reads of it.
 
 ```rust
 use oxirush_gtp_u::icmp::{self, EchoKind};
@@ -148,22 +190,22 @@ use oxirush_gtp_u::{Endpoint, Packet, RemoteTunnel};
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // An Error Indication goes to port 2152 of the sender of the G-PDU
     let (gnb, mut received) = Endpoint::bind("127.0.0.9:2152".parse()?).await?;
-    let (upf, _observed) = UpfSimulator::bind("127.0.0.10:2152".parse()?).await?;
+    let (peer, _observed) = UpfSimulator::bind("127.0.0.10:2152".parse()?).await?;
 
     // An endpoint answers an Echo Request by itself
-    let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await?;
+    let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await?;
     let request = Packet::echo_request(7).encode()?;
-    peer.send_to(&request, gnb.local_addr()?).await?;
+    client.send_to(&request, gnb.local_addr()?).await?;
     let mut buffer = [0; 64];
-    let (length, _) = peer.recv_from(&mut buffer).await?;
+    let (length, _) = client.recv_from(&mut buffer).await?;
     let response = Packet::decode(&buffer[..length])?;
     assert_eq!(response.message_type.to_string(), "Echo Response");
     assert_eq!(response.sequence, Some(7));
     assert_eq!(format!("{:?}", response.information_elements()?), "[Recovery(0)]");
 
-    // The UPF has no session with TEID 0x1001. It answers the G-PDU with an
-    // Error Indication, which the receiver gets with its tunnel
-    gnb.install(1, 5, RemoteTunnel::new(upf.local_addr()?, 0x1001), Some(9))?;
+    // The test peer has no session with TEID 0x1001. It answers the G-PDU
+    // with an Error Indication, which the receiver gets with its tunnel
+    gnb.install(1, 5, RemoteTunnel::new(peer.local_addr()?, 0x1001), Some(9))?;
     gnb.send(1, 5, b"an IP packet".as_slice()).await?;
     let indication = received.recv().await.expect("the endpoint is running");
     assert_eq!(indication.packet.message_type.to_string(), "Error Indication");
@@ -244,10 +286,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     use oxirush_gtp_u::upf_sim::{Session, UpfSimulator};
     use oxirush_gtp_u::{Endpoint, RemoteTunnel};
 
-    let (upf, _observed) = UpfSimulator::bind("127.0.0.8:2152".parse()?).await?;
+    let (peer, _observed) = UpfSimulator::bind("127.0.0.8:2152".parse()?).await?;
     let (gnb, _received) = Endpoint::bind("127.0.0.1:2152".parse()?).await?;
-    let teid = gnb.install(1, 5, RemoteTunnel::new(upf.local_addr()?, 0x1001), Some(9))?;
-    upf.set_session(Session::new(0x1001, teid, gnb.local_addr()?, 9))?;
+    let teid = gnb.install(1, 5, RemoteTunnel::new(peer.local_addr()?, 0x1001), Some(9))?;
+    peer.set_session(Session::new(0x1001, teid, gnb.local_addr()?, 9))?;
 
     // The tunnel gets a TUN with the UE's address, and a rule that routes
     // what is sent from that address into it. The endpoint carries the
@@ -261,7 +303,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     gnb.attach_tun(1, 5, TunConfig::new("ue0", routing))?;
 
     // A socket bound to the UE's address now goes through the tunnel. The
-    // test UPF's echo service answers for any destination.
+    // test peer's echo service answers for any destination.
     let socket = tokio::net::UdpSocket::bind((ue, 0)).await?;
     socket.send_to(b"hello", "192.0.2.1:7").await?;
     let mut reply = [0; 16];
@@ -301,13 +343,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     use oxirush_gtp_u::{Endpoint, RemoteTunnel};
 
     let local: SocketAddrV4 = "127.0.0.1:2152".parse()?;
-    let (upf, _observed) = UpfSimulator::bind("127.0.0.8:2152".parse()?).await?;
+    let (peer, _observed) = UpfSimulator::bind("127.0.0.8:2152".parse()?).await?;
     let (gnb, _received) = Endpoint::bind(local.into()).await?;
     let fast_path = FastPath::load()?;
 
-    let remote = RemoteTunnel::new(upf.local_addr()?, 0x1001);
+    let remote = RemoteTunnel::new(peer.local_addr()?, 0x1001);
     let teid = gnb.install(1, 5, remote, Some(9))?;
-    upf.set_session(Session::new(0x1001, teid, gnb.local_addr()?, 9))?;
+    peer.set_session(Session::new(0x1001, teid, gnb.local_addr()?, 9))?;
 
     // As in the `tun` example, then the TUN goes on the fast path and the
     // tunnel through it: the kernel carries the tunnel's packets.
@@ -346,11 +388,11 @@ sudo unshare --net sh -c 'ip link set lo up && target/debug/examples/fast_path'
 ## Limits
 
 - It has no control plane: no NGAP, S1AP or PFCP.
-- The endpoint and the test UPF are for labs and test tools, not for
+- The endpoint and the test peer are for labs and test tools, not for
   untrusted peers. GTP-U has no authentication: whoever reaches a socket can
   send on its tunnels.
-- The test UPF is not one for real traffic: it has no PFCP, QoS or
-  charging.
+- The test peer is not a UPF or an SGW: it has no PFCP, no QoS, no
+  charging and no routing beyond its echo service and its TUNs.
 - It has no GTP' and no versions 0 and 2 of GTP.
 - The helpers, the TUN routing and the fast path are IPv4 only. The codec
   and the endpoint carry any payload.
@@ -366,7 +408,7 @@ payload:
 | Build the G-PDU and encode it into a buffer that is used again | 45 ns |
 | Decode, the payload left in the datagram | 22 ns |
 | Decode, the payload copied | 57 ns |
-| From an endpoint to the test UPF and back, over the loopback interface | 12.9 µs |
+| From an endpoint to the test peer and back, over the loopback interface | 12.9 µs |
 
 [`benches/`](benches/README.md) has the benchmarks, the other figures and
 how to profile.
@@ -410,13 +452,13 @@ cargo test --test wireshark -- --ignored
 
 Property tests and a `cargo fuzz` target check that decoding never panics,
 and that what decodes encodes to a message that decodes to the same value;
-another holds what a node answers, and the Echo Reply of the test UPF, to
+another holds what a node answers, and the Echo Reply of the test peer, to
 TS 29.281 and to RFC 792. CI rebuilds the eBPF object from its source and
 compares. Each Rust block of this page checks what it gives with
 `assert_eq!`, and runs as a documentation test of the crate.
 
 [The documentation](https://docs.rs/oxirush-gtp-u) has the terms, what the
-codec covers, and the reference of the endpoint, the test UPF, the TUN
+codec covers, and the reference of the endpoint, the test peer, the TUN
 routings and the fast path.
 
 A pull request comes with a test for what it changes. Sign off your commits
@@ -432,7 +474,7 @@ says how to report a vulnerability.
 - [oxirush-security](https://github.com/linouxis9/oxirush-security): NAS security, AKA and the derivation of keys.
 - [oxirush-ngap](https://github.com/linouxis9/oxirush-ngap): NGAP, between a gNB and an AMF.
 - [oxirush-s1ap](https://github.com/linouxis9/oxirush-s1ap): S1AP, between an eNB and an MME.
-- [oxirush-gtp-u](https://github.com/linouxis9/oxirush-gtp-u): GTP-U tunnels, with a test UPF.
+- [oxirush-gtp-u](https://github.com/linouxis9/oxirush-gtp-u): GTP-U tunnels, with a user-plane test peer.
 - [oxirush-sctp](https://github.com/linouxis9/oxirush-sctp): SCTP sockets, which carry NGAP and S1AP.
 
 ## License

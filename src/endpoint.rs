@@ -319,14 +319,14 @@ impl Endpoint {
     /// use oxirush_gtp_u::upf_sim::UpfSimulator;
     /// use oxirush_gtp_u::{Endpoint, PathEvent};
     ///
-    /// let (upf, _observed) = UpfSimulator::bind("127.0.0.1:0".parse().unwrap()).await?;
+    /// let (peer, _observed) = UpfSimulator::bind("127.0.0.1:0".parse().unwrap()).await?;
     /// let (gnb, _received) = Endpoint::bind("127.0.0.1:0".parse().unwrap()).await?;
     ///
-    /// // Whether the UPF answers, and the response among the events of the paths
+    /// // Whether the peer answers, and the response among the events of the paths
     /// let mut events = gnb.path_events();
-    /// let round_trip = gnb.echo(upf.local_addr()?).await?;
+    /// let round_trip = gnb.echo(peer.local_addr()?).await?;
     /// let Ok(PathEvent::EchoResponse { from, .. }) = events.recv().await else { unreachable!() };
-    /// assert_eq!(from, upf.local_addr()?);
+    /// assert_eq!(from, peer.local_addr()?);
     /// assert!(round_trip < std::time::Duration::from_secs(3));
     /// # Ok(())
     /// # }
@@ -367,12 +367,12 @@ impl Endpoint {
     /// use oxirush_gtp_u::Endpoint;
     /// use oxirush_gtp_u::upf_sim::UpfSimulator;
     ///
-    /// let (upf, _observed) = UpfSimulator::bind("127.0.0.1:0".parse().unwrap()).await?;
+    /// let (peer, _observed) = UpfSimulator::bind("127.0.0.1:0".parse().unwrap()).await?;
     /// let (gnb, _received) = Endpoint::bind("127.0.0.1:0".parse().unwrap()).await?;
     ///
-    /// // The path to the UPF, supervised: up until Echo Requests go unanswered
-    /// gnb.supervise(upf.local_addr()?)?;
-    /// let state = gnb.path_state(upf.local_addr()?).unwrap();
+    /// // The path to the peer, supervised: up until Echo Requests go unanswered
+    /// gnb.supervise(peer.local_addr()?)?;
+    /// let state = gnb.path_state(peer.local_addr()?).unwrap();
     /// assert!(state.up);
     /// assert_eq!(state.unanswered, 0);
     ///
@@ -588,10 +588,10 @@ impl Endpoint {
     /// use oxirush_gtp_u::upf_sim::{Session, UpfSimulator};
     /// use oxirush_gtp_u::{Endpoint, RemoteTunnel, ip};
     ///
-    /// let (upf, mut observed) = UpfSimulator::bind("127.0.0.1:0".parse().unwrap()).await?;
+    /// let (peer, mut observed) = UpfSimulator::bind("127.0.0.1:0".parse().unwrap()).await?;
     /// let (gnb, _received) = Endpoint::bind("127.0.0.1:0".parse().unwrap()).await?;
-    /// let teid = gnb.install(1, 5, RemoteTunnel::new(upf.local_addr()?, 0x1001), Some(9))?;
-    /// upf.set_session(Session::new(0x1001, teid, gnb.local_addr()?, 9))?;
+    /// let teid = gnb.install(1, 5, RemoteTunnel::new(peer.local_addr()?, 0x1001), Some(9))?;
+    /// peer.set_session(Session::new(0x1001, teid, gnb.local_addr()?, 9))?;
     ///
     /// // An IP packet of the UE in the tunnel of RAN UE 1, PDU session 5
     /// let (ue, server) = ("10.45.0.2:4000".parse().unwrap(), "192.0.2.1:7".parse().unwrap());

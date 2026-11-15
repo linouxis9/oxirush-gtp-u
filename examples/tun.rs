@@ -1,5 +1,5 @@
-//! A UE's TUN whose packets cross an N3 tunnel in userspace, to the test UPF
-//! and back. It needs Linux and `CAP_NET_ADMIN`, which a user namespace of
+//! A UE's TUN whose packets cross an N3 tunnel in userspace, to the test
+//! peer and back. It needs Linux and `CAP_NET_ADMIN`, which a user namespace of
 //! its own gives without root, and is best run in a network namespace of its
 //! own:
 //!
@@ -36,7 +36,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     gnb.attach_tun(1, 5, TunConfig::new("ue0", routing))?;
 
     // A socket bound to the UE's address now goes through the tunnel. The
-    // test UPF's echo service answers for any destination.
+    // test peer's echo service answers for any destination.
     let socket = tokio::net::UdpSocket::bind((ue, 0)).await?;
     socket.send_to(b"hello", "192.0.2.1:7").await?;
     let mut reply = [0; 16];

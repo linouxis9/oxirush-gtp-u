@@ -88,12 +88,12 @@ pub struct PathState {
 /// use oxirush_gtp_u::upf_sim::UpfSimulator;
 /// use oxirush_gtp_u::{Endpoint, PathEvent};
 ///
-/// let (upf, _observed) = UpfSimulator::bind("127.0.0.1:0".parse()?).await?;
+/// let (peer, _observed) = UpfSimulator::bind("127.0.0.1:0".parse()?).await?;
 /// let (gnb, _received) = Endpoint::bind("127.0.0.1:0".parse()?).await?;
 ///
 /// // The events of the paths, from now on
 /// let mut events = gnb.path_events();
-/// gnb.echo(upf.local_addr()?).await?;
+/// gnb.echo(peer.local_addr()?).await?;
 /// match events.recv().await? {
 ///     PathEvent::EchoResponse { sequence, .. } => println!("Echo Response {sequence}"),
 ///     PathEvent::SupportedExtensionHeaders { from, types } => println!("{from}: {types:?}"),

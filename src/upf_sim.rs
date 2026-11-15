@@ -1,9 +1,13 @@
-//! A test UPF: an N3 peer, or an S1-U one as an SGW, whose sessions are
-//! provisioned directly, without PFCP. Its N6 is a built-in echo service, or a Linux TUN per session.
-//! [`UpfSimulator`] is an N3 or S1-U peer whose sessions are set with
-//! [`set_session`](UpfSimulator::set_session). Uplink packets go to the echo
-//! service, which reflects IPv4 UDP and answers ICMP Echo Requests, or to the
-//! TUN that `attach_tun` gives the session.
+//! A user-plane test peer: the other end of the tunnels of a gNB on N3, or
+//! of an eNB on S1-U, for testing that side or a GTP-U tool without a core
+//! network. It is not a UPF: the caller sets its sessions, and there is no
+//! PFCP, QoS or charging.
+//!
+//! [`UpfSimulator`] is a GTP-U socket whose sessions are set with
+//! [`set_session`](UpfSimulator::set_session): a PDU session of N3
+//! ([`Session::new`]) or an E-RAB of S1-U ([`Session::s1_u`]). Uplink
+//! packets go to an echo service, which reflects IPv4 UDP and answers ICMP
+//! Echo Requests, or to the TUN that `attach_tun` gives the session.
 //! [`set_echo_service`](UpfSimulator::set_echo_service) turns the echo
 //! service off, for a program that answers the UE itself.
 //! [`send_downlink`](UpfSimulator::send_downlink) sends a packet to the UE.
@@ -39,13 +43,13 @@ use crate::{MessageType, Packet, ReceiveStats, icmp, ip};
 /// # async fn main() -> std::io::Result<()> {
 /// use oxirush_gtp_u::upf_sim::{Session, UpfSimulator};
 ///
-/// let (upf, _observed) = UpfSimulator::bind("127.0.0.1:0".parse().unwrap()).await?;
+/// let (peer, _observed) = UpfSimulator::bind("127.0.0.1:0".parse().unwrap()).await?;
 ///
-/// // The UPF receives the uplink on TEID 0x1001, and sends the downlink to the
+/// // The peer receives the uplink on TEID 0x1001, and sends the downlink to the
 /// // gNB at its N3 address on TEID 0x2002, in QoS flow 9
 /// let gnb = "127.0.0.1:2152".parse().unwrap();
 /// let session = Session::new(0x1001, 0x2002, gnb, 9);
-/// upf.set_session(session)?;
+/// peer.set_session(session)?;
 /// assert_eq!(
 ///     format!("{session:?}"),
 ///     "Session { uplink_teid: 0x00001001, downlink_teid: 0x00002002, \
@@ -53,7 +57,7 @@ use crate::{MessageType, Packet, ReceiveStats, icmp, ip};
 /// );
 ///
 /// // A QFI has six bits
-/// assert!(upf.set_session(Session::new(0x1001, 0x2002, gnb, 64)).is_err());
+/// assert!(peer.set_session(Session::new(0x1001, 0x2002, gnb, 64)).is_err());
 ///
 /// // An E-RAB of an eNB, whose downlink has no QoS flow
 /// let enb = "127.0.0.2:2152".parse().unwrap();
@@ -64,7 +68,7 @@ use crate::{MessageType, Packet, ReceiveStats, icmp, ip};
 #[derive(Clone, Copy, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct Session {
-    /// The TEID the UPF receives uplink G-PDUs on.
+    /// The TEID the test peer receives uplink G-PDUs on.
     pub uplink_teid: u32,
     /// The TEID the gNB receives downlink G-PDUs on.
     pub downlink_teid: u32,
@@ -78,7 +82,7 @@ pub struct Session {
 
 impl Session {
     /// A PDU session on N3 with these tunnels, of QoS flow `qfi`. A QFI
-    /// above 63 is refused where the session is given to a UPF,
+    /// above 63 is refused where the session is given to the test peer,
     /// [`set_session`](UpfSimulator::set_session).
     pub fn new(uplink_teid: u32, downlink_teid: u32, gnb_address: SocketAddr, qfi: u8) -> Self {
         Self {
@@ -112,7 +116,7 @@ impl fmt::Debug for Session {
     }
 }
 
-/// An uplink G-PDU of a session, as the UPF received it.
+/// An uplink G-PDU of a session, as the test peer received it.
 #[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct UplinkPacket {
@@ -134,12 +138,13 @@ impl fmt::Debug for UplinkPacket {
     }
 }
 
-/// A test UPF on one N3 socket, which serves the E-RABs of S1-U too.
+/// A user-plane test peer on one GTP-U socket, for the PDU sessions of N3
+/// and the E-RABs of S1-U.
 ///
 /// A task answers Echo Requests, sends an Error Indication for a G-PDU on
 /// an unknown uplink TEID, within the limit of replies of an
-/// [`Endpoint`](crate::Endpoint), and passes a session's uplink T-PDUs to
-/// N6: its TUN if it has one, else the echo service, which reflects IPv4
+/// [`Endpoint`](crate::Endpoint), and passes a session's uplink T-PDUs on:
+/// to its TUN if it has one, else the echo service, which reflects IPv4
 /// UDP and ICMP Echo Request packets, unless
 /// [`set_echo_service`](Self::set_echo_service) turned it off. The TEID
 /// alone identifies a session, whatever address the gNB sends from. Clones
@@ -156,14 +161,14 @@ impl fmt::Debug for UplinkPacket {
 ///
 /// # #[tokio::main(flavor = "current_thread")]
 /// # async fn main() -> std::io::Result<()> {
-/// let (upf, mut observed) = UpfSimulator::bind("127.0.0.1:0".parse().unwrap()).await?;
+/// let (peer, mut observed) = UpfSimulator::bind("127.0.0.1:0".parse().unwrap()).await?;
 /// // The gNB under test: here a socket that sends and receives G-PDUs.
 /// let gnb = tokio::net::UdpSocket::bind("127.0.0.1:0").await?;
-/// upf.set_session(Session::new(0x1001, 0x2001, gnb.local_addr()?, 9))?;
+/// peer.set_session(Session::new(0x1001, 0x2001, gnb.local_addr()?, 9))?;
 ///
 /// let (ue, server) = ("10.45.0.2:4000".parse().unwrap(), "192.0.2.1:7".parse().unwrap());
 /// let uplink = Packet::uplink(0x1001, 9, ip::udp(ue, server, b"hello")?);
-/// gnb.send_to(&uplink.encode()?, upf.local_addr()?).await?;
+/// gnb.send_to(&uplink.encode()?, peer.local_addr()?).await?;
 /// assert_eq!(observed.recv().await.unwrap().packet, uplink);
 ///
 /// // The echo service answers on the session's downlink tunnel.
@@ -415,8 +420,8 @@ impl UpfSimulator {
     ///
     /// [`NotFound`](io::ErrorKind::NotFound) for a session that does not
     /// exist, [`AlreadyExists`](io::ErrorKind::AlreadyExists) for one that
-    /// has a TUN, [`BrokenPipe`](io::ErrorKind::BrokenPipe) once the UPF is
-    /// shut down, and the errors of [`TunPort::create`]. On an error nothing
+    /// has a TUN, [`BrokenPipe`](io::ErrorKind::BrokenPipe) once the test peer
+    /// is shut down, and the errors of [`TunPort::create`]. On an error nothing
     /// of the TUN is left.
     ///
     /// # Panics

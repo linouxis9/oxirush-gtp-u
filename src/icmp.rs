@@ -157,7 +157,8 @@ pub fn parse_echo(bytes: &[u8]) -> Result<Echo<'_>, Error> {
 /// The IPv4 ICMP Echo Reply to `request`, if it is an Echo Request that
 /// [`parse_echo`] reads: the addresses swapped, the Identifier, the Sequence
 /// Number and the data of the request, in a header of
-/// [`ip::header`](crate::ip::header). The test UPF answers so on N6.
+/// [`ip::header`](crate::ip::header). The echo service of
+/// [`UpfSimulator`](crate::upf_sim::UpfSimulator) answers so.
 pub fn reply_to(request: &[u8]) -> Option<Vec<u8>> {
     let echo = parse_echo(request)
         .ok()

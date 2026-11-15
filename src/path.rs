@@ -257,7 +257,7 @@ pub(crate) fn transient(error: &std::io::Error) -> bool {
 }
 
 /// Whether `qfi` is one that a PDU Session Container carries: an endpoint
-/// and the test UPF refuse another where they are given it, with the error
+/// and the test peer refuse another where they are given it, with the error
 /// that encoding a G-PDU with it would return.
 pub(crate) fn qfi(qfi: u8) -> std::io::Result<()> {
     crate::extension::check_qfi(qfi)
