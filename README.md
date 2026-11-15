@@ -410,7 +410,8 @@ sudo unshare --net sh -c 'ip link set lo up && target/debug/examples/fast_path'
 | From an endpoint to another and back, over the loopback interface | 12.1 µs | 2.0× slower |
 
 On one core of an AMD Ryzen 7 5700G (Linux 7.0, Rust 1.98.1), at 0d25889 on
-2026-10-18, the lowest of three runs; "about the same" is within 10 %.
+2026-10-18, the lowest of three runs. The go-gtp cell says how much slower or
+faster go-gtp is than this crate, and "about the same" is within 10 %.
 [`benches/README.md`](benches/README.md) has every figure, the method and
 the commands.
 
