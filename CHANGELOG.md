@@ -22,19 +22,23 @@ All notable changes to `oxirush-gtp-u` are recorded here.
 
 ### Removed
 
-- `readme/`, the package that compared what each block of the README and of the
-  front page of the documentation printed with the text under it: the blocks check
-  what they give with `assert_eq!`, and run as documentation tests.
-- The `oxirush-upf-sim` program and its feature `cli`. The test peer is
-  `upf_sim::UpfSimulator`, which a program of a few lines starts. A build
-  that names the feature no longer resolves.
-- `PduSetInformationContainer` and `DownlinkPduSetInformation`, the fields
-  of the frame of TS 38.415 §6.5.2. The extension header keeps its variant
-  and carries the frame as octets, as the RAN containers carry theirs:
-  `ExtensionHeader::PduSetInformationContainer { content, legacy_type }`,
-  where it had `information`. `Part::PduSetSequenceNumber`,
-  `Part::PduSetImportance` and `Part::PduSetSize` go with the fields. Not
-  source compatible.
+- `readme/`, the repository's package that compared the output of each
+  README block with the text under it. The blocks check their results with
+  `assert_eq!` and run as documentation tests.
+- The `oxirush-upf-sim` program and its feature `cli`. A program of a few
+  lines starts `upf_sim::UpfSimulator`.
+- `PduSetInformationContainer` and `DownlinkPduSetInformation`, the fields of
+  the frame of TS 38.415 §6.5.2, with `Part::PduSetSequenceNumber`,
+  `Part::PduSetImportance` and `Part::PduSetSize`. The extension header keeps
+  its variant and carries the frame as octets, as the RAN containers do.
+
+### Migration from 0.2
+
+| 0.2 | 0.3 |
+|-----|-----|
+| `features = ["cli"]`, the `oxirush-upf-sim` program | `UpfSimulator::bind` in a program of your own |
+| `session.qfi` | `session.qfi`, now an `Option<u8>`: `Some(qfi)` on N3, `None` on S1-U |
+| `ExtensionHeader::PduSetInformationContainer { information, legacy_type }` | `ExtensionHeader::PduSetInformationContainer { content, legacy_type }`, where `content` is the frame of TS 38.415 §6.5.2 as octets, padding included |
 
 ## 0.2.0 - 2026-11-07
 

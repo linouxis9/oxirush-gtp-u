@@ -53,7 +53,7 @@ tokio = { version = "1", features = ["macros", "rt", "net"] } # for the endpoint
 
 | Feature | Adds | Needs |
 | ------- | ---- | ----- |
-| none | the codec and the IPv4 helpers of `ip` | no dependency |
+| none | the codec, and the IPv4 helpers of `ip` and `icmp` | no dependency |
 | `endpoint`, the default | `Endpoint`, `upf_sim` | a Tokio runtime |
 | `tun` | `tun`, and `attach_tun` of `Endpoint` and `UpfSimulator` | Linux, `CAP_NET_ADMIN` |
 | `ebpf` | `ebpf` | Linux 6.6, `CAP_BPF` and `CAP_NET_ADMIN` |
@@ -162,23 +162,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Ping through a tunnel
 
-`icmp` writes and reads the ICMP Echo messages of a ping: the request of a
-UE, the reply of the host that answers it, which the echo service of the
-test peer writes, and what the UE reads of it.
+`icmp` writes and reads the ICMP Echo messages of a ping. The echo service
+of the test peer answers an Echo Request for any destination.
 
 ```rust
 use oxirush_gtp_u::icmp::{self, EchoKind};
+use oxirush_gtp_u::upf_sim::{Session, UpfSimulator};
+use oxirush_gtp_u::{Endpoint, RemoteTunnel};
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let (peer, _observed) = UpfSimulator::bind("127.0.0.1:0".parse()?).await?;
+    let (gnb, mut received) = Endpoint::bind("127.0.0.1:0".parse()?).await?;
+    let teid = gnb.install(1, 5, RemoteTunnel::new(peer.local_addr()?, 0x1001), Some(9))?;
+    peer.set_session(Session::new(0x1001, teid, gnb.local_addr()?, 9))?;
+
+    // The UE pings 192.0.2.1, and reads the reply that comes back down
     let (ue, server) = ("10.45.0.2".parse()?, "192.0.2.1".parse()?);
-    let request = icmp::echo_request(ue, server, 0x4f58, 1, b"ping")?;
-    let reply = icmp::reply_to(&request).expect("an Echo Request");
-    let echo = icmp::parse_echo(&reply)?;
+    gnb.send(1, 5, icmp::echo_request(ue, server, 0x4f58, 1, b"ping")?).await?;
+    let downlink = received.recv().await.expect("the endpoint is running");
+    let echo = icmp::parse_echo(&downlink.packet.payload)?;
     assert_eq!((echo.kind, echo.source, echo.destination), (EchoKind::Reply, server, ue));
     assert_eq!((echo.identifier, echo.sequence, echo.payload), (0x4f58, 1, b"ping".as_slice()));
     Ok(())
 }
 ```
+
+`icmp::reply_to` writes the reply to a request, for a program that
+answers the UE itself.
 
 ## Answer a peer: Echo and Error Indication
 
