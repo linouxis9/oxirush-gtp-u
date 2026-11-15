@@ -410,41 +410,17 @@ sudo unshare --net sh -c 'ip link set lo up && target/debug/examples/fast_path'
 
 ## Performance
 
-On one core of an AMD Ryzen 7 5700G (Linux 7.0, Rust 1.98.1), at 0d25889 on
-2026-10-18, for a G-PDU with its PDU Session Container and 1,400 octets of
-payload:
-
-| | Time |
-|---|---|
-| Build the G-PDU and encode it into a buffer that is used again | 45 ns |
-| Decode, the payload left in the datagram | 22 ns |
-| Decode, the payload copied | 57 ns |
-| From an endpoint to the test peer and back, over the loopback interface | 12.9 µs |
-
-[`benches/`](benches/README.md) has the benchmarks, the other figures and
-how to profile.
-
-### Against go-gtp
-
-[go-gtp](https://github.com/wmnsk/go-gtp) v0.8.12 on the same G-PDUs of
-1,400 octets, at 0d25889 on core 2 of the same machine. A ratio is the time
-of go-gtp over this crate's, and "about the same" is within 10 %:
-
-| Operation | This crate | go-gtp / this crate |
+| Operation, a G-PDU of 1,400 octets | Time | go-gtp v0.8.12, time over this crate's |
 |---|---|---|
-| Encode, no extension header | 17.8 ns | about the same |
-| Encode, PDU Session Container | 25.8 ns | about the same |
+| Encode, with a PDU Session Container | 25.8 ns | about the same |
+| Decode, with a PDU Session Container | 24.0 ns | 1.8x |
 | Decode, no extension header | 10.8 ns | 0.38x |
-| Decode, PDU Session Container | 24.0 ns | 1.8x |
-| Endpoint to endpoint and back, no extension header, loopback | 12,078 ns | 2.0x |
+| From an endpoint to another and back, over the loopback interface | 12.1 µs | 2.0x |
 
-[`benches/`](benches/README.md#against-go-gtp) has every figure, with cycles,
-instructions, allocations and peak memory, and the method.
-`benches/compare.sh 3` runs every row on core 3:
-
-```sh
-benches/compare.sh 3
-```
+On one core of an AMD Ryzen 7 5700G (Linux 7.0, Rust 1.98.1), at 0d25889 on
+2026-10-18, the lowest of three runs; "about the same" is within 10 %.
+[`benches/README.md`](benches/README.md) has every figure, the method and
+the commands.
 
 ## Tests and fuzzing
 
@@ -465,8 +441,7 @@ Property tests and a `cargo fuzz` target check that decoding never panics,
 and that what decodes encodes to a message that decodes to the same value;
 another holds what a node answers, and the Echo Reply of the test peer, to
 TS 29.281 and to RFC 792. CI rebuilds the eBPF object from its source and
-compares. Each Rust block of this page checks what it gives with
-`assert_eq!`, and runs as a documentation test of the crate.
+compares.
 
 [The documentation](https://docs.rs/oxirush-gtp-u) has the terms, what the
 codec covers, and the reference of the endpoint, the test peer, the TUN

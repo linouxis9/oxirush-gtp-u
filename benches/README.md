@@ -17,8 +17,7 @@ go tool pprof -top target/criterion/endpoint/round-trip/1400/profile/profile.pb
 The profile is one that Go's `pprof` reads. With `PROFILE=flamegraph` in
 the environment it is `flamegraph.svg`, in the same directory.
 
-`compare.sh` prints the table of the README that compares the crate with
-go-gtp: `src/bin/compare.rs` and `compare/main.go` run the same operations
+`compare.sh` prints the table that compares the crate with go-gtp: `src/bin/compare.rs` and `compare/main.go` run the same operations
 on the same G-PDUs, and `go build` fetches the version of go-gtp that
 `compare/go.mod` pins.
 
