@@ -4,9 +4,9 @@
 [![Documentation](https://docs.rs/oxirush-gtp-u/badge.svg)](https://docs.rs/oxirush-gtp-u)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-GTP-U, the protocol that tunnels user traffic in 5G and 4G networks, in
-Rust, per 3GPP TS 29.281: a codec, an endpoint for the tunnels of a base
-station, a user-plane test peer, Linux TUN devices and an eBPF fast path.
+GTP-U tunnels the user traffic of 5G and 4G networks. This crate has a
+GTP-U codec, a tunnel endpoint for gNBs and eNBs, a user-plane test peer,
+Linux TUN devices and an eBPF fast path, in Rust (3GPP TS 29.281).
 
 ```rust
 use oxirush_gtp_u::{DownlinkPduSessionInformation, Packet, PduSessionContainer};
@@ -18,7 +18,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bytes = uplink.encode()?;
     assert_eq!(
         bytes[..16],
-        [0x34, 0xff, 0x00, 0x14, 0x12, 0x34, 0x56, 0x78, 0x00, 0x00, 0x00, 0x85, 0x01, 0x10, 0x09, 0x00],
+        [
+            0x34, 0xff, 0x00, 0x14, 0x12, 0x34, 0x56, 0x78, // the header, TEID 0x12345678
+            0x00, 0x00, 0x00, 0x85, // sequence number, N-PDU number, next: the container
+            0x01, 0x10, 0x09, 0x00, // PDU Session Container: uplink, QFI 9, no next header
+        ],
     );
 
     // Decode it. The payload stays in the datagram
@@ -39,8 +43,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Each example shows what it gives with `assert_eq!`, and runs as a test of the crate.
-
 ## Installation
 
 ```toml
@@ -52,16 +54,11 @@ tokio = { version = "1", features = ["macros", "rt", "net"] } # for the endpoint
 ```
 
 | Feature | Adds | Needs |
-| ------- | ---- | ----- |
-| none | the codec, and the IPv4 helpers of `ip` and `icmp` | no dependency |
-| `endpoint`, the default | `Endpoint`, `upf_sim` | a Tokio runtime |
-| `tun` | `tun`, and `attach_tun` of `Endpoint` and `UpfSimulator` | Linux, `CAP_NET_ADMIN` |
-| `ebpf` | `ebpf` | Linux 6.6, `CAP_BPF` and `CAP_NET_ADMIN` |
-
-`ebpf` turns on `tun`, and `tun` turns on `endpoint`.
-Off Linux, `tun` and `ebpf` build and add nothing; so does `ebpf` on 32-bit
-x86 and on big-endian targets. The eBPF programs come prebuilt: a build
-with `ebpf` needs no nightly toolchain and no eBPF linker.
+|---------|------|-------|
+| none | The codec, and the IPv4 and ICMP helpers | Nothing |
+| `endpoint` (default) | `Endpoint` and the test peer, `upf_sim` | A Tokio runtime |
+| `tun` | TUN devices for the tunnels (`attach_tun`) | Linux, `CAP_NET_ADMIN`; turns on `endpoint` |
+| `ebpf` | The eBPF fast path, prebuilt | Linux 6.6, `CAP_BPF` and `CAP_NET_ADMIN`; turns on `tun` |
 
 The minimum supported Rust version is 1.88.
 
@@ -79,7 +76,7 @@ side of a tunnel, or a GTP-U tool, without a core network.
 
 ```rust
 use oxirush_gtp_u::upf_sim::{Session, UpfSimulator};
-use oxirush_gtp_u::{Endpoint, PathEvent, RemoteTunnel, ip};
+use oxirush_gtp_u::{Endpoint, RemoteTunnel, ip};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -104,17 +101,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (from, to, payload) = ip::parse_udp(&downlink.packet.payload)?;
     assert_eq!((downlink.ran_id, downlink.session_id, downlink.packet.qfi()), (1, 5, Some(9)));
     assert_eq!((from, to, payload), (server, ue, b"hello".as_slice()));
-
-    // The gNB asks whether its path to the peer is alive, then supervises it:
-    // `path_state` and `path_events` say when it goes down, and up again
-    let mut events = gnb.path_events();
-    gnb.echo(peer.local_addr()?).await?;
-    if let Ok(PathEvent::EchoResponse { packet, .. }) = events.recv().await {
-        assert_eq!(format!("{:?}", packet.information_elements()?), "[Recovery(0)]");
-    }
-    gnb.supervise(peer.local_addr()?)?;
-    let state = gnb.path_state(peer.local_addr()?).expect("supervised");
-    assert_eq!((state.up, state.unanswered), (true, 0));
     Ok(())
 }
 ```
@@ -123,12 +109,7 @@ The TEIDs, the addresses and the QoS flow of a tunnel come from the
 control plane: in 5G, the PDU SESSION RESOURCE SETUP of NGAP, which
 [oxirush-ngap](https://github.com/linouxis9/oxirush-ngap) decodes.
 
-`set_echo_service(false)` turns the echo off, for a program that answers
-the UE itself with `send_downlink`; `attach_tun` gives a session a TUN in
-its place, and `switch_downlink` moves a session's downlink to another
-address and TEID after a handover, with an End Marker on the old path.
-
-## An E-RAB on S1-U
+## Carry an E-RAB on S1-U
 
 On S1-U the tunnel has no QoS flow, and its G-PDUs no PDU Session
 Container: the endpoint is an eNB's, and `Session::s1_u` gives the test
@@ -191,11 +172,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 `icmp::reply_to` writes the reply to a request, for a program that
 answers the UE itself.
 
-## Answer a peer: Echo and Error Indication
+## Answer Echo and Error Indication, and supervise a path
 
 ```rust
 use oxirush_gtp_u::upf_sim::UpfSimulator;
-use oxirush_gtp_u::{Endpoint, Packet, RemoteTunnel};
+use oxirush_gtp_u::{Endpoint, Packet, PathEvent, RemoteTunnel};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -213,6 +194,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(response.message_type.to_string(), "Echo Response");
     assert_eq!(response.sequence, Some(7));
     assert_eq!(format!("{:?}", response.information_elements()?), "[Recovery(0)]");
+
+    // The gNB asks whether its path to the peer is alive, then supervises it:
+    // `path_state` and `path_events` say when it goes down, and up again
+    let mut events = gnb.path_events();
+    gnb.echo(peer.local_addr()?).await?;
+    if let Ok(PathEvent::EchoResponse { packet, .. }) = events.recv().await {
+        assert_eq!(format!("{:?}", packet.information_elements()?), "[Recovery(0)]");
+    }
+    gnb.supervise(peer.local_addr()?)?;
+    let state = gnb.path_state(peer.local_addr()?).expect("supervised");
+    assert_eq!((state.up, state.unanswered), (true, 0));
 
     // The test peer has no session with TEID 0x1001. It answers the G-PDU
     // with an Error Indication, which the receiver gets with its tunnel
@@ -275,12 +267,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 Every extension header of TS 29.281 V19.2.0 has a variant, and a header of
-another type is kept as its octets, in `Other`. An endpoint refuses a
-message with such a header when a receiver must understand it, as the
-specification requires, and answers a G-PDU or an Echo Request that has one
-with the list of the types that it knows. `examples/handover.rs` writes the
-headers of a handover: the PDCP PDU Number of a forwarded packet, the long
-one, and the End Marker of a forwarding tunnel.
+another type is kept as its octets, in `Other`. An endpoint rejects a message
+whose unknown header is marked comprehension-required, and answers with a
+Supported Extension Headers Notification. `examples/handover.rs` writes the
+headers of a handover.
 
 ## Give a tunnel a TUN
 
@@ -407,15 +397,17 @@ sudo unshare --net sh -c 'ip link set lo up && target/debug/examples/fast_path'
 - It has no GTP' and no versions 0 and 2 of GTP.
 - The helpers, the TUN routing and the fast path are IPv4 only. The codec
   and the endpoint carry any payload.
+- Off Linux, `tun` and `ebpf` add nothing; `ebpf` also adds nothing on 32-bit
+  x86 and on big-endian targets.
 
 ## Performance
 
-| Operation, a G-PDU of 1,400 octets | Time | go-gtp v0.8.12, time over this crate's |
+| Operation, a G-PDU of 1,400 octets | This crate | go-gtp v0.8.12 |
 |---|---|---|
 | Encode, with a PDU Session Container | 25.8 ns | about the same |
-| Decode, with a PDU Session Container | 24.0 ns | 1.8x |
-| Decode, no extension header | 10.8 ns | 0.38x |
-| From an endpoint to another and back, over the loopback interface | 12.1 µs | 2.0x |
+| Decode, with a PDU Session Container | 24.0 ns | 1.8× slower |
+| Decode, no extension header | 10.8 ns | 2.6× faster |
+| From an endpoint to another and back, over the loopback interface | 12.1 µs | 2.0× slower |
 
 On one core of an AMD Ryzen 7 5700G (Linux 7.0, Rust 1.98.1), at 0d25889 on
 2026-10-18, the lowest of three runs; "about the same" is within 10 %.
@@ -426,31 +418,22 @@ the commands.
 
 ```sh
 cargo test --all-features
-# The TUN, each test in a network namespace of its own: in a user namespace,
-# without root, or with sudo as the runner
-CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="unshare --user --map-root-user --net --" \
-  cargo test --features tun --test tun_linux --test tun_cleanup -- --ignored
-# As root, the fast path (Linux 6.6)
-CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER=sudo \
-  cargo test --features ebpf --test ebpf_linux -- --ignored
-# The encoder against Wireshark's dissector, with tshark 4.4 or later
-cargo test --test wireshark -- --ignored
 ```
 
-Property tests and a `cargo fuzz` target check that decoding never panics,
-and that what decodes encodes to a message that decodes to the same value;
-another holds what a node answers, and the Echo Reply of the test peer, to
-TS 29.281 and to RFC 792. CI rebuilds the eBPF object from its source and
-compares.
-
+Each example of this page checks what it gives with `assert_eq!`, and runs
+as a documentation test. Property tests and a fuzz target check that
+decoding never panics and that what decodes encodes back to the same value;
+another holds what a node answers, and the test peer's Echo Reply, to
+TS 29.281 and RFC 792. The TUN and the fast path have tests of their own,
+which need a network namespace or root, and CI rebuilds the eBPF object from
+its source and compares.
 [The documentation](https://docs.rs/oxirush-gtp-u) has the terms, what the
 codec covers, and the reference of the endpoint, the test peer, the TUN
 routings and the fast path.
 
-A pull request comes with a test for what it changes. Sign off your commits
-(`git commit -s`): by contributing you agree to the [Developer Certificate
-of Origin](https://developercertificate.org/). [SECURITY.md](SECURITY.md)
-says how to report a vulnerability.
+[CONTRIBUTING.md](CONTRIBUTING.md) has how to run the privileged tests, the
+Wireshark test and the fuzz targets, and how to contribute.
+[SECURITY.md](SECURITY.md) says how to report a vulnerability.
 
 ## The OxiRush family
 

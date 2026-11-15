@@ -13,7 +13,11 @@
 //!     let bytes = uplink.encode()?;
 //!     assert_eq!(
 //!         bytes[..16],
-//!         [0x34, 0xff, 0x00, 0x14, 0x12, 0x34, 0x56, 0x78, 0x00, 0x00, 0x00, 0x85, 0x01, 0x10, 0x09, 0x00],
+//!         [
+//!             0x34, 0xff, 0x00, 0x14, 0x12, 0x34, 0x56, 0x78, // the header, TEID 0x12345678
+//!             0x00, 0x00, 0x00, 0x85, // sequence number, N-PDU number, next: the container
+//!             0x01, 0x10, 0x09, 0x00, // PDU Session Container: uplink, QFI 9, no next header
+//!         ],
 //!     );
 //!
 //!     // Decode it. The payload stays in the datagram
@@ -43,10 +47,9 @@
 //! |------|-------|
 //! | Encode and decode a G-PDU | [`Packet`], [`Packet::uplink`], [`Packet::decode_borrowed`], [`PduSessionContainer`] |
 //! | Carry a PDU session to a test peer | [`Endpoint`], [`Endpoint::install`], [`Endpoint::send`], [`upf_sim::UpfSimulator`], [`upf_sim::Session`], [`ip::udp`] |
-//! | An E-RAB on S1-U | [`upf_sim::Session::s1_u`], [`Endpoint::install`] with no QoS flow |
+//! | Carry an E-RAB on S1-U | [`upf_sim::Session::s1_u`], [`Endpoint::install`] with no QoS flow |
 //! | Ping through a tunnel | [`icmp::echo_request`], [`icmp::parse_echo`], [`icmp::reply_to`] |
-//! | Supervise the path to a peer | [`Endpoint::echo`], [`Endpoint::supervise`], [`Endpoint::path_state`], [`Endpoint::path_events`], [`PathEvent`] |
-//! | Answer a peer: Echo and Error Indication | [`Packet::echo_request`], [`InformationElement`] |
+//! | Answer Echo and Error Indication, and supervise a path | [`Packet::echo_request`], [`InformationElement`], [`Endpoint::echo`], [`Endpoint::supervise`], [`Endpoint::path_state`], [`Endpoint::path_events`], [`PathEvent`] |
 //! | Read and write extension headers | [`ExtensionHeader`], [`ExtensionHeaderType`] |
 //! | The headers of a handover | [`ExtensionHeader::PdcpPduNumber`], [`Packet::end_marker`] |
 //! | Give a tunnel a TUN, on Linux | [`tun::TunConfig`], [`tun::Routing`], [`Endpoint::attach_tun`] |
